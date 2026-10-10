@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.xuanji</groupId>
+    <artifactId>xuanji-platform</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>xuanji-core</artifactId>
+  <name>XuanJi Core</name>
+  <description>核心层：只含接口与抽象，不依赖任何具体实现模块（依赖倒置的物理保障）</description>
+
+  <!--
+    依赖纪律（docs/detail/01-engineering.md §1 模块依赖规则）：
+    仅三方基础库（Spring context / Jackson / SLF4J）。
+    禁止依赖：任何实现模块、LiteFlow / AgentScope 具体类。
+    spring-context 在此引入是为了向插件传递 @Component 注解能力——
+    插件只依赖 xuanji-core 即可完成 Spring bean 声明（编译期插拔的全部成本）。
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

@@ -1,0 +1,205 @@
+/* 全局样式：对齐原型 common.css 的共享外壳（xj-logo/xj-sider/xj-header/xj-content）
+   与公共类（xj-mono/xj-toolbar）。色彩/间距遵循 AntD 5 Token：
+   文字次级 rgba(0,0,0,0.65)、分割线 #f0f0f0、主色 #1677ff、8px 栅格。 */
+
+/* ---------- 共享外壳（原型 common.css 等价迁移） ---------- */
+
+.xj-logo {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.xj-sider .ant-menu {
+  border-inline-end: none;
+}
+
+.xj-header {
+  background: #fff;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #f0f0f0;
+  height: 48px;
+  line-height: normal;
+}
+
+.xj-content {
+  padding: 16px;
+  overflow: auto;
+  /* 高度链：100vh Layout - 48px Header，子页面 height:100% 才能生效
+     （工作区对话区 flex 填充、消息区独立滚动，不再整页塌陷） */
+  height: calc(100vh - 48px);
+  box-sizing: border-box;
+  /* 企业后台标准层次：灰底承载白卡片（colorBgLayout） */
+  background: #f5f5f5;
+}
+
+/* ---------- 公共类 ---------- */
+
+.xj-mono {
+  font-family: 'SFMono-Regular', Consolas, Monaco, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+}
+
+.xj-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+/* ---------- 页面级 ---------- */
+
+/* 对话流（工作区）：消息气泡滚动区（白底容器，与灰底页面分层） */
+.xj-chat-box {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+}
+
+/* 工作区卡片列表项 */
+.xj-ws-item {
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: #fff;
+}
+
+.xj-ws-item:hover {
+  border-color: #1677ff;
+}
+
+.xj-ws-item.xj-ws-active {
+  border-color: #1677ff;
+  background: #e6f4ff;
+}
+
+/* 状态圆点（工作区/运行状态） */
+.xj-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 2px;
+}
+
+/* ---------- 画布编辑器 ---------- */
+
+/* 画布容器：占满剩余高度（父级 flex 列布局）；#fafafa 底对齐原型 xj-canvas-wrap */
+.xj-canvas-wrap {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafafa;
+}
+
+/* 左侧节点面板可点项：白底边框卡片化（对齐原型 xj-panel-item） */
+.xj-panel-item {
+  padding: 7px 10px;
+  margin: 4px 0;
+  border: 1px solid #e8e8e8;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  user-select: none;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.xj-panel-item:hover {
+  border-color: #1677ff;
+  color: #1677ff;
+}
+
+.xj-panel-item:active {
+  background: #e6f4ff;
+}
+
+/* 画布操作提示条 */
+.xj-canvas-hint {
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+  margin-top: 8px;
+}
+
+/* ---------- 工作区对话 ---------- */
+
+/* 消息头像：圆形角色标识（agent=主色淡底 / user=主色实底） */
+.xj-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.xj-avatar-agent {
+  background: #e6f4ff;
+  color: #1677ff;
+}
+
+.xj-avatar-user {
+  background: #1677ff;
+  color: #fff;
+}
+
+/* 消息气泡统一容器 */
+.xj-bubble {
+  max-width: 78%;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+/* 输入区容器：白底卡片包裹输入框与操作 */
+.xj-input-bar {
+  margin-top: 12px;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+/* 空态引导（替代 emoji 空态） */
+.xj-empty-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  background: #e6f4ff;
+  color: #1677ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  margin: 0 auto 16px;
+}

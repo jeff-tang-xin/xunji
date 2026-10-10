@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 发布中心</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+const { useState } = React;
+const { Layout, Menu, Button, Table, Tag, message, Alert, Tabs, Drawer, Timeline, Space, Typography, Modal } = antd;
+const { Sider, Header, Content } = Layout;
+const MENU = [
+  ['ws','工作区','00-workspace.html'], ['canvas','画布编辑器','01-canvas-editor.html'],
+  ['run','运行监控','02-run-monitor.html'], ['approval','决策工作区','03-approval-center.html'],
+  ['publish','发布中心','04-publish-center.html'], ['agent','Agent 管理台','05-agent-admin.html'],
+  ['app','应用管理','06-app-admin.html'], ['report','报表中心','07-report-dashboard.html'], ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>发布中心 <Tag color="blue">静态原型</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>五类资产统一生命周期（主文档 4.8）</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+const STATUS_COLOR = { PUBLISHED:'green', DRAFT:'default', DEPRECATED:'orange', OFFLINE:'red' };
+const ASSETS = {
+  workflow: [
+    { name:'SDLC-全流程编排', ver:'v6', status:'PUBLISHED', refs:12, updated:'2026-10-07' },
+    { name:'每日构建质量报告', ver:'v3', status:'PUBLISHED', refs:1, updated:'2026-10-06' },
+    { name:'数据治理-月度治理', ver:'v1', status:'DRAFT', refs:0, updated:'2026-10-08' },
+  ],
+  agent: [
+    { name:'架构选型评审', ver:'v3', status:'PUBLISHED', refs:4, updated:'2026-10-05' },
+    { name:'测试用例生成', ver:'v2', status:'PUBLISHED', refs:2, updated:'2026-10-04' },
+    { name:'质量分析师', ver:'v2', status:'PUBLISHED', refs:1, updated:'2026-10-06' },
+  ],
+  skill: [{ name:'SDLC 评审清单', ver:'v1', status:'PUBLISHED', refs:3, updated:'2026-09-28' }],
+  mcp:   [{ name:'公司 Wiki MCP', ver:'v1', status:'PUBLISHED', refs:5, updated:'2026-09-30' },
+          { name:'禅道 MCP（自定义接入）', ver:'v2', status:'PUBLISHED', refs:2, updated:'2026-10-03' }],
+  tool:  [{ name:'Jira·创建 Issue', ver:'v1', status:'PUBLISHED', refs:6, updated:'2026-09-25' },
+          { name:'云效·触发流水线', ver:'v1', status:'DEPRECATED', refs:0, updated:'2026-09-20' }],
+};
+const VERSIONS = [
+  { v:'v6', note:'新增「详设概设评审」决策门', by:'张工', at:'10-07 16:20', cur:true },
+  { v:'v5', note:'测试用例节点重试 1→2', by:'张工', at:'10-05 11:02' },
+  { v:'v4', note:'子流程 dev-func-test 升级引用 @4', by:'李工', at:'10-02 09:41' },
+];
+function HistoryDrawer({ name, onClose }) {
+  if (!name) return null;
+  return (
+    <Drawer title={`版本历史 · ${name}`} width={420} open onClose={onClose}>
+      <Timeline items={VERSIONS.map(v => ({ color: v.cur ? 'green' : 'gray',
+        children: <div><b>{v.v}</b>{v.cur && <Tag color="green" style={{marginLeft:6}}>当前</Tag>}
+          <div style={{fontSize:12}}>{v.note}</div>
+          <Typography.Text type="secondary" style={{fontSize:12}}>{v.by} · {v.at}</Typography.Text></div> }))}/>
+      <Space><Button size="small" onClick={() => message.info('版本 diff 视图（P1 实现）')}>对比 v5 ↔ v6</Button>
+        <Button size="small" onClick={() => message.success('已回滚为当前版本（原型演示）')}>回滚到此版本</Button></Space>
+    </Drawer>
+  );
+}
+function App() {
+  const [hist, setHist] = useState(null);
+  const cols = [
+    { title:'名称', dataIndex:'name' },
+    { title:'当前版本', dataIndex:'ver', className:'xj-mono' },
+    { title:'状态', dataIndex:'status', render:v => <Tag color={STATUS_COLOR[v]}>{v}</Tag> },
+    { title:'被引用', dataIndex:'refs', render:v => v > 0 ? `${v} 处` : '—' },
+    { title:'更新时间', dataIndex:'updated' },
+    { title:'操作', render:(_,r) => <Space>
+        {r.status === 'DRAFT'
+          ? <a onClick={() => Modal.confirm({ title:`发布 ${r.name} ${r.ver}`,
+              content:'发布即版本固化：该版本此后不可变，可被工作流引用、工作区绑定、发布为 App。确定发布？',
+              okText:'发布', onOk:() => message.success(`${r.name} ${r.ver} 已发布，可被引用/绑定（原型演示）`) })}>发布</a>
+          : <a onClick={() => Modal.confirm({ title:`发布新版本 · ${r.name}`,
+              content:'当前版本已固化；发布将生成新版本，既有引用仍钉住旧版本不受影响，升级引用是显式动作。',
+              okText:'发布新版本', onOk:() => message.success('新版本已发布，旧引用不受影响（原型演示）') })}>发布新版本</a>}
+        <a onClick={() => setHist(r.name)}>版本历史</a>
+        <a onClick={() => message.success(`已导出 ${r.name} bundle（原型演示）`)}>导出</a>
+      </Space> },
+  ];
+  return (
+    <Shell active="publish">
+      <Alert className="xj-proto-banner" type="info" showIcon
+        message="静态原型：发布 = 资产版本固化——本页产出「不可变的已发布版本」，它是对内+对外全部消费的唯一事实源；跨资产引用钉住版本；bundle 导入导出支撑跨环境晋升（测试 → 生产）。"/>
+      <Alert type="warning" showIcon style={{marginBottom:12}}
+        message="发布的是什么 / 有啥用：本页发布的是「资产版本」（对内+对外的共同前提），不是对外服务。已发布版本有三条消费路径——"
+        description={<ul style={{margin:'4px 0 0', paddingLeft:18}}>
+          <li><b>工作流引用</b>（对内·组合）：agent/skill/mcp/tool 被画布节点引用，组合进流程；</li>
+          <li><b>工作区绑定</b>（对内·执行）：工作区绑定 agent/workflow 作为执行容器，内部用户使用，<b>无需 AppKey</b>；</li>
+          <li><b>App 绑定 + AppKey</b>（对外·消费）：在「应用管理」页把已发布版本包装成第三方可调用的服务——那是另一层动作，本页不做对外暴露。</li>
+        </ul>}/>
+      <div className="xj-toolbar">
+        <Button onClick={() => message.success('已导出平台 bundle（原型演示）')}>导出 bundle</Button>
+        <Button onClick={() => message.info('导入 bundle：校验 → 冲突提示 → 落库（P5 实现）')}>导入 bundle</Button>
+      </div>
+      <Tabs items={Object.entries(ASSETS).map(([k, rows]) => ({
+        key:k, label:{workflow:'工作流',agent:'Agent',skill:'技能',mcp:'MCP',tool:'工具'}[k],
+        children:<Table rowKey="name" size="middle" columns={cols} dataSource={rows}/> }))}/>
+      <HistoryDrawer name={hist} onClose={() => setHist(null)}/>
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

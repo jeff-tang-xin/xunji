@@ -1,0 +1,27 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: xuanji-server
+  datasource:
+    url: jdbc:postgresql://localhost:5432/xuanji
+    username: postgres
+    password: ${XUANJI_DB_PASSWORD}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+# LiteFlow：启动占位规则（真实执行走 execute2RespWithEL 动态 EL，无需预注册 chain）
+liteflow:
+  rule-source: liteflow/main.el.xml
+
+# 工作区根目录：创建工作区只填项目名，root_path = 根目录/name 动态生成（主文档 4.6）
+xuanji:
+  workspace:
+    root: ./workspaces
+
+logging:
+  level:
+    io.xuanji: INFO
+    com.yomahub: WARN

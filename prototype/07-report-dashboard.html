@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 报表中心（工作报表场景）</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+const { useState } = React;
+const { Layout, Menu, Button, Table, Tag, message, Alert, Card, Statistic, Select, Drawer,
+        Space, Typography, Tooltip, Modal, Empty, Input } = antd;
+const { Sider, Header, Content } = Layout;
+
+/* ---------- 共享外壳 ---------- */
+const MENU = [
+  ['ws','工作区','00-workspace.html'], ['canvas','画布编辑器','01-canvas-editor.html'],
+  ['run','运行监控','02-run-monitor.html'], ['approval','决策工作区','03-approval-center.html'],
+  ['publish','发布中心','04-publish-center.html'], ['agent','Agent 管理台','05-agent-admin.html'],
+  ['app','应用管理','06-app-admin.html'], ['report','报表中心','07-report-dashboard.html'], ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>报表中心 <Tag color="blue">静态原型</Tag><Tag color="purple">工作报表场景</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>对应主文档 1.5 场景路线 ｜ 数据为 mock</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+
+/* ---------- mock：报表定义（可创建的定时任务实体） ----------
+   创建报表 = 命名 + 选择 workflow（必须包含「看板渲染」页面生成节点，创建时校验）
+            + 定时执行计划（SCHEDULE）+ 数据源连接器；平台按计划周期执行 */
+const REPORTS = [
+  { id:'rp_01', name:'销售运营日报', wf:'workflow:sales-daily-report@v2', page:'看板渲染 · board.render',
+    ds:'ERP 业务库（JDBC · connector.ds-erp）', cron:'每日 08:00', enabled:true },
+  { id:'rp_02', name:'库存健康周报', wf:'workflow:inventory-health@v1', page:'看板渲染 · board.render',
+    ds:'WMS 业务库（JDBC · connector.ds-wms）', cron:'每周一 07:30', enabled:true },
+  { id:'rp_03', name:'财务对账月报', wf:'workflow:finance-recon@v3', page:'看板渲染 · board.render',
+    ds:'财务系统 API（connector.ds-fin）', cron:'每月 1 日 06:00', enabled:true },
+  { id:'rp_04', name:'客服质量日报', wf:'workflow:cs-quality-daily@v1', page:'看板渲染 · board.render',
+    ds:'客服工单 API（connector.ds-cs）', cron:'每日 18:00', enabled:false },
+];
+/* 创建报表时的 workflow 候选：仅「包含页面生成节点」的可选（hasPage 校验） */
+const WF_OPTIONS = [
+  { v:'workflow:sales-daily-report@v2', hasPage:true },
+  { v:'workflow:inventory-health@v1',   hasPage:true },
+  { v:'workflow:finance-recon@v3',      hasPage:true },
+  { v:'workflow:cs-quality-daily@v1',   hasPage:true },
+  { v:'workflow:sdlc-standard@v3',      hasPage:false },
+  { v:'workflow:order-approval@v1',     hasPage:false },
+];
+/* ---------- mock：报表执行记录（每次定时执行一条 → 固化一份看板快照；最新一条 = 默认展示的最新报表） ---------- */
+const RUNS = {
+  rp_01: [
+    { runId:'r_a81c', at:'2026-10-08 08:00', status:'SUCCESS', dur:'42s',  snap:'快照 v14', gmv:'286.4', orders:12847 },
+    { runId:'r_a77e', at:'2026-10-07 08:00', status:'SUCCESS', dur:'38s',  snap:'快照 v13', gmv:'281.1', orders:12655 },
+    { runId:'r_a6d2', at:'2026-10-06 08:00', status:'SUCCESS', dur:'40s',  snap:'快照 v12', gmv:'266.2', orders:12103 },
+    { runId:'r_a71b', at:'2026-10-05 08:00', status:'FAILED',  dur:'12s',  snap:'—',        gmv:null,    orders:null },
+  ],
+  rp_02: [
+    { runId:'r_b31e', at:'2026-10-05 07:30', status:'SUCCESS', dur:'51s',  snap:'快照 v3',  gmv:null,    orders:null },
+  ],
+  rp_03: [
+    { runId:'r_c02a', at:'2026-10-01 06:00', status:'SUCCESS', dur:'1m08s', snap:'快照 v2', gmv:null,    orders:null },
+  ],
+  rp_04: [
+    { runId:'r_d44f', at:'2026-10-07 18:00', status:'SUCCESS', dur:'29s',  snap:'快照 v6',  gmv:null,    orders:null },
+  ],
+};
+/* 看板 KPI 随选中执行实例（快照）变化；退款率为该次快照的 mock 值 */
+const kpiOf = run => [
+  { title:'GMV（本快照）', value:run.gmv != null ? `¥${run.gmv}` : '—', suffix:run.gmv != null ? '万' : '', tone:'#1677ff' },
+  { title:'订单数', value:run.orders != null ? run.orders : '—', suffix:run.orders != null ? '单' : '', tone:'#52c41a' },
+  { title:'客单价', value:(run.gmv != null && run.orders) ? `¥${(run.gmv * 10000 / run.orders).toFixed(1)}` : '—', suffix:'', tone:'#722ed1' },
+  { title:'退款率', value:'2.1', suffix:'%', tone:'#fa541c' },
+];
+/* 以下均为「销售运营日报」看板的 mock 业务数据（真实场景来自 ERP 业务库查询结果） */
+const TREND = [242,251,248,260,255,268,262,259,271,275,266,272,281,286.4];
+const CATS = [ ['数码家电',86],['服饰鞋包',64],['美妆个护',52],['食品生鲜',41],['家居日用',28],['图书文娱',15] ];
+const ROWS = [
+  { cat:'数码家电', orders:2841, gmv:'¥98.2万', refund:'1.4%', owner:'华东-李团队' },
+  { cat:'服饰鞋包', orders:3562, gmv:'¥64.1万', refund:'3.2%', owner:'华南-王团队' },
+  { cat:'美妆个护', orders:2418, gmv:'¥52.7万', refund:'1.8%', owner:'华北-张团队' },
+  { cat:'食品生鲜', orders:2663, gmv:'¥38.4万', refund:'2.6%', owner:'西南-赵团队' },
+  { cat:'家居日用', orders:987,  gmv:'¥22.3万', refund:'2.0%', owner:'华东-李团队' },
+  { cat:'图书文娱', orders:376,  gmv:'¥10.7万', refund:'0.9%', owner:'华北-张团队' },
+];
+
+/* ---------- 手绘 SVG 图表（原型零依赖） ---------- */
+function LineChart({ data }) {
+  const W=560, H=200, P=40, min=230, max=295;
+  const pts = data.map((v,i) => [P + i*(W-2*P)/(data.length-1), H-P - (v-min)*(H-2*P)/(max-min)]);
+  const path = pts.map(p => p.join(',')).join(' ');
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`}>
+      {[240,260,280].map(v => { const y = H-P-(v-min)*(H-2*P)/(max-min);
+        return <g key={v}><line x1={P} x2={W-P/2} y1={y} y2={y} stroke="#f0f0f0"/>
+          <text x={4} y={y+4} fontSize="10" fill="#999">{v}万</text></g>; })}
+      <polyline points={path} fill="none" stroke="#1677ff" strokeWidth="2"/>
+      {pts.map(([x,y],i) => <circle key={i} cx={x} cy={y} r="2.5" fill="#1677ff">
+        <title>{`D-${data.length-1-i}：¥${data[i]}万`}</title></circle>)}
+      <text x={P} y={H-8} fontSize="10" fill="#999">14 天前</text>
+      <text x={W-P-30} y={H-8} fontSize="10" fill="#999">昨日</text>
+    </svg>
+  );
+}
+function BarChart({ data }) {
+  const W=560, H=200, P=36, maxV=95, bw=36;
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`}>
+      {data.map(([name,v],i) => { const h = v*(H-2*P)/maxV, x = P + i*(W-2*P)/data.length + 8, y = H-P-h;
+        return <g key={name}>
+          <rect x={x} y={y} width={bw} height={h} rx="3" fill={v>=60?'#1677ff':'#91caff'} opacity="0.9"/>
+          <text x={x+bw/2} y={y-5} fontSize="11" fill="#555" textAnchor="middle">{v}</text>
+          <text x={x+bw/2} y={H-P+14} fontSize="11" fill="#666" textAnchor="middle">{name}</text>
+        </g>; })}
+      <line x1={P} x2={W-P/2} y1={H-P} y2={H-P} stroke="#d9d9d9"/>
+    </svg>
+  );
+}
+
+/* ---------- 嵌入分享（默认始终指向最新一次执行的看板快照） ---------- */
+function ShareModal({ report, open, onClose }) {
+  const url = `https://xuanji.example.com/share/reports/${report.id}/latest?k=ak_live_2b6d8e4f19a7`;
+  const iframe = `<iframe src="${url}" width="1280" height="860" frameborder="0" loading="lazy"></iframe>`;
+  return (
+    <Modal title={`嵌入分享 · ${report.name}`} open={open} onCancel={onClose} footer={null} width={640}>
+      <Alert type="info" showIcon style={{marginBottom:12}}
+        message="分享地址默认指向最新报表（/latest）：每次定时执行生成新快照后，嵌入方无需改地址即自动看到最新报表。如需固定某次历史快照，将地址中 latest 替换为该次 runId（如 /share/reports/rp_01/r_a81c）。"/>
+      <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>分享链接（只读看板 · 默认最新报表）</Typography.Paragraph>
+      <Typography.Paragraph copyable className="xj-mono" style={{fontSize:12}}>{url}</Typography.Paragraph>
+      <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>iframe 嵌入代码</Typography.Paragraph>
+      <Typography.Paragraph copyable={{ text: iframe }} className="xj-mono"
+        style={{fontSize:12, background:'#fafafa', border:'1px solid #f0f0f0', borderRadius:6, padding:8, whiteSpace:'pre-wrap', wordBreak:'break-all'}}>{iframe}</Typography.Paragraph>
+      <Typography.Text type="secondary" style={{fontSize:12}}>访问经 AppKey 鉴权（应用管理台可轮换）；快照固化生成时点数据，历史快照可回看审计。</Typography.Text>
+    </Modal>
+  );
+}
+
+/* ---------- 看板详情（默认最新报表快照，可切换历史快照） ---------- */
+function Dashboard({ report, onBack }) {
+  const [share, setShare] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
+  const runs = RUNS[report.id] || [];
+  const [runSel, setRunSel] = useState(runs[0] && runs[0].runId);
+  const cur = runs.find(r => r.runId === runSel) || runs[0];
+  return (
+    <div>
+      <Space direction="vertical" size={12} style={{width:'100%'}}>
+        <Space wrap>
+          <Button onClick={onBack}>← 返回列表</Button>
+          <Typography.Title level={4} style={{margin:0}}>{report.name}</Typography.Title>
+          <Tooltip title="报表绑定该 workflow 已发布版本（版本钉住）；workflow 必须包含页面生成节点">
+            <Tag color="geekblue">{report.wf}</Tag>
+          </Tooltip>
+          {cur && <Tag color="purple">{cur.snap} · {cur.at}</Tag>}
+          <span style={{flex:1}}/>
+          <span style={{fontSize:12, color:'#888'}}>历史快照：</span>
+          <Select size="small" style={{width:230}} value={runSel} onChange={setRunSel}
+            options={runs.map(r => ({ value:r.runId,
+              label:`${r.at} · ${r.status === 'SUCCESS' ? '成功' : '失败'} · ${r.snap}` }))}/>
+          <Button onClick={() => setLogOpen(true)}>执行记录</Button>
+          <Button onClick={() => setShare(true)}>嵌入分享</Button>
+          <Button onClick={() => message.success('已导出 PDF（原型演示）')}>导出 PDF</Button>
+          <Button type="primary" onClick={() => message.success('已通过邮件连接器分发（原型演示）')}>分发</Button>
+        </Space>
+        <Alert type="info" showIcon
+          message={<span>
+            <b>数据来源：外部业务系统真实业务数据</b>（{report.ds}）——非平台自身数据。
+            链路：SCHEDULE 定时触发（{report.cron}）→ 数据源连接器查询业务库 → 数据加工节点（聚合/对齐）→ Agent 分析摘要 → 看板渲染节点生成页面 → <b>固化为本快照</b>。
+            默认展示最新报表，可切换历史快照回看审计。
+          </span>}/>
+        {cur && cur.status === 'FAILED' ? (
+          <Card size="small"><Empty description={`该次执行失败（run ${cur.runId}），无看板快照；可切换其他历史快照查看`}/></Card>
+        ) : cur && (<>
+          <div style={{display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12}}>
+            {kpiOf(cur).map(k => <Card key={k.title} className="xj-kpi">
+              <Statistic title={k.title} value={k.value} suffix={k.suffix}
+                valueStyle={{color:k.tone, fontSize:26}}/></Card>)}
+          </div>
+          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12}}>
+            <Card size="small" className="xj-chart-card" title="近 14 天 GMV 趋势（万元）"><LineChart data={TREND}/></Card>
+            <Card size="small" className="xj-chart-card" title="各品类 GMV 分布（万元）"><BarChart data={CATS}/></Card>
+          </div>
+          <Card size="small" title={<span>Agent 分析摘要 <Tag color="purple">agent:sales-analyst@v2</Tag></span>}>
+            <Typography.Paragraph style={{marginBottom:6}}>
+              昨日 GMV <b>¥286.4 万</b>（环比 +1.9%，近 14 天复合增长 1.3%/日），订单 12,847 单，客单价 ¥222.9（环比 -0.4%）。
+              <b style={{color:'#fa541c'}}>服饰鞋包退款率 3.2%</b> 高于大盘 1.1pp，且集中在 3 个新上架 SKU，建议质检复核；
+              数码家电受大促预热带动增长 8.2%，库存周转天数降至 18 天，需关注补货。
+            </Typography.Paragraph>
+            <Typography.Text type="secondary" style={{fontSize:12}}>
+              生成方式：数据源连接器执行 ERP 查询（订单/退款/品类三张表）→ 数据加工节点对齐口径 → Agent 按运营分析提示词模板解读 → 看板渲染 → 邮件分发至 8 位订阅者
+            </Typography.Text>
+          </Card>
+          <Card size="small" title="品类明细">
+            <Table size="small" rowKey="cat" pagination={false}
+              columns={[{title:'品类',dataIndex:'cat'},{title:'订单数',dataIndex:'orders'},
+                {title:'GMV',dataIndex:'gmv'},{title:'退款率',dataIndex:'refund',
+                  render:v => <b style={{color:v === '3.2%' ? '#fa541c' : 'inherit'}}>{v}</b>},
+                {title:'负责团队',dataIndex:'owner'}]}
+              dataSource={ROWS}/>
+          </Card>
+        </>)}
+      </Space>
+      {/* 执行记录：每次定时执行一条 → 一份看板快照 */}
+      <Drawer title={`执行记录 · ${report.name}`} width={760} open={logOpen} onClose={() => setLogOpen(false)}>
+        <Alert type="info" showIcon style={{marginBottom:12}}
+          message={`按执行计划「SCHEDULE ${report.cron}」定时执行；每次执行固化一份看板快照，最新一次即报表页默认展示的最新报表。`}/>
+        <Table size="small" rowKey="runId" pagination={false} dataSource={runs}
+          columns={[
+            { title:'执行时间', dataIndex:'at' },
+            { title:'触发方式', render:() => <Tag color="blue">SCHEDULE</Tag> },
+            { title:'状态', dataIndex:'status', render:v => <Tag color={v === 'SUCCESS' ? 'green' : 'red'}>{v}</Tag> },
+            { title:'耗时', dataIndex:'dur' },
+            { title:'生成 run', dataIndex:'runId', className:'xj-mono' },
+            { title:'看板快照', dataIndex:'snap' },
+            { title:'操作', render:(_,r) => <a onClick={() => { setRunSel(r.runId); setLogOpen(false); }}>查看看板</a> },
+          ]}/>
+      </Drawer>
+      <ShareModal report={report} open={share} onClose={() => setShare(false)}/>
+    </div>
+  );
+}
+
+/* ---------- 创建报表（workflow 必须包含页面生成节点 + 定时执行计划） ---------- */
+function CreateModal({ open, onClose, onCreate }) {
+  const [name, setName] = useState('');
+  const [wf, setWf] = useState(null);
+  const [cron, setCron] = useState('每日 08:00');
+  const [ds, setDs] = useState('ERP 业务库（JDBC · connector.ds-erp）');
+  return (
+    <Modal title="创建报表" open={open} onCancel={onClose} width={580} okText="创建并纳入调度"
+      onOk={() => {
+        if (!name.trim() || !wf) { message.warning('请填写报表名称并选择 workflow'); return; }
+        onCreate({ name:name.trim(), wf, cron, ds });
+      }}>
+      <Space direction="vertical" size={12} style={{width:'100%'}}>
+        <div>
+          <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>报表名称</Typography.Paragraph>
+          <Input placeholder="例如：销售运营日报" value={name} onChange={e => setName(e.target.value)}/>
+        </div>
+        <div>
+          <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>
+            来源 workflow（<b style={{color:'#fa541c'}}>必须包含页面生成节点</b>，否则无法产出看板页面）</Typography.Paragraph>
+          <Select style={{width:'100%'}} placeholder="选择已发布 workflow" value={wf} onChange={setWf}
+            options={WF_OPTIONS.map(o => ({ value:o.v, disabled:!o.hasPage,
+              label:<span className="xj-mono">{o.label}{o.hasPage
+                ? <Tag color="green" style={{marginLeft:8}}>含看板渲染节点 ✓</Tag>
+                : <Tag style={{marginLeft:8}}>无页面生成节点</Tag>}</span> }))}/>
+        </div>
+        <div>
+          <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>定时执行计划（SCHEDULE 触发器）</Typography.Paragraph>
+          <Select style={{width:'100%'}} value={cron} onChange={setCron}
+            options={['每日 08:00','每周一 07:30','每月 1 日 06:00','每 15 分钟（演示）'].map(v => ({ value:v, label:v }))}/>
+        </div>
+        <div>
+          <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>数据源连接器（外部业务系统）</Typography.Paragraph>
+          <Select style={{width:'100%'}} value={ds} onChange={setDs}
+            options={['ERP 业务库（JDBC · connector.ds-erp）','WMS 业务库（JDBC · connector.ds-wms）',
+              '财务系统 API（connector.ds-fin）','客服工单 API（connector.ds-cs）'].map(v => ({ value:v, label:v }))}/>
+        </div>
+        <Alert type="info" showIcon
+          message="创建后平台按计划定时执行：每次执行 = 一次 run → 固化一份看板快照。报表页默认展示最新快照，历史快照可回看审计；分享地址默认始终指向最新报表。"/>
+      </Space>
+    </Modal>
+  );
+}
+
+/* ---------- 主页面 ---------- */
+function App() {
+  const [current, setCurrent] = useState(null);
+  const [reports, setReports] = useState(REPORTS);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [shareRow, setShareRow] = useState(null);
+  return (
+    <Shell active="report">
+      <Alert className="xj-proto-banner" type="info" showIcon
+        message="静态原型：报表 = 可创建的定时任务实体——选择一个包含页面生成节点的 workflow + 定时执行计划，平台按计划执行并固化看板快照；详情默认最新快照、可切换历史快照，分享地址默认指向最新报表。"/>
+      {current ? <Dashboard key={current.id} report={current} onBack={() => setCurrent(null)}/> : (
+        <div>
+          <div style={{marginBottom:12}}>
+            <Button type="primary" onClick={() => setCreateOpen(true)}>＋ 创建报表</Button>
+          </div>
+          <Table rowKey="id" size="middle"
+            columns={[
+              { title:'报表名称', dataIndex:'name', render:(v,r) => <a onClick={() => setCurrent(r)}>{v}</a> },
+              { title:'来源 workflow（版本钉住）', dataIndex:'wf', className:'xj-mono' },
+              { title:'页面生成节点', dataIndex:'page', render:v => <Tag color="purple">{v}</Tag> },
+              { title:'数据源（外部业务系统）', dataIndex:'ds', render:v => <Tag color="cyan">{v}</Tag> },
+              { title:'执行计划', render:(_,r) => <span><Tag color="blue">SCHEDULE {r.cron}</Tag>{!r.enabled && <Tag>已停用</Tag>}</span> },
+              { title:'最新执行', render:(_,r) => { const last = (RUNS[r.id] || [])[0];
+                  return last ? <span>{last.at} <Tag color={last.status === 'SUCCESS' ? 'green' : 'red'}>{last.status}</Tag></span> : '—'; } },
+              { title:'操作', render:(_,r) => <Space>
+                  <a onClick={() => setCurrent(r)}>查看看板</a>
+                  <a onClick={() => setShareRow(r)}>嵌入分享</a>
+                </Space> },
+            ]}
+            dataSource={reports}/>
+        </div>
+      )}
+      <CreateModal open={createOpen} onClose={() => setCreateOpen(false)}
+        onCreate={r => {
+          setReports(x => [{ id:'rp_' + String(x.length + 1).padStart(2,'0'),
+            page:'看板渲染 · board.render', enabled:true, ...r }, ...x]);
+          setCreateOpen(false);
+          message.success('报表已创建并纳入调度（原型演示）：按计划定时执行，每次固化一份看板快照');
+        }}/>
+      {shareRow && <ShareModal report={shareRow} open onClose={() => setShareRow(null)}/>}
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

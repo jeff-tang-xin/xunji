@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.xuanji</groupId>
+    <artifactId>xuanji-platform</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <groupId>io.xuanji</groupId>
+  <artifactId>node-basic</artifactId>
+  <name>XuanJi Plugin · Basic Nodes</name>
+  <description>内置业务节点示例（校验/通知）——同时是插件开发的最小参考实现</description>
+
+  <!--
+    插件依赖纪律：仅 xuanji-core。
+    接入成本 = 加这个 Maven 依赖 + @Component，无任何其他注册动作——
+    server 组装点引入本模块后，节点自动出现在画布面板（编译期插拔）。
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>io.xuanji</groupId>
+      <artifactId>xuanji-core</artifactId>
+    </dependency>
+  </dependencies>
+</project>

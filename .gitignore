@@ -1,0 +1,37 @@
+# ---- 构建产物 ----
+target/
+node_modules/
+dist/
+
+# 前端构建产物（npm run build 输出，随构建生成，不入库）
+xuanji-platform/xuanji-server/src/main/resources/static/
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+*.code-workspace
+
+# ---- Agent 运行时（Easy-Claw 工作区元数据，勿改勿删）----
+.easyClaw/
+
+# ---- 平台运行时数据（工作区执行容器）----
+workspaces/
+
+# ---- 日志 ----
+*.log
+
+# ---- 临时/调试产物（API 测试 JSON、临时脚本与目录）----
+tmp_*
+api_*.json
+run_body*.json
+create_body*.json
+canvas_demo.json
+asset_ids.json
+
+# ---- 历史备份（旧前端，git 本身即版本管理）----
+xuanji-platform/legacy-frontend-backup/
+
+# ---- OS ----
+Thumbs.db
+.DS_Store

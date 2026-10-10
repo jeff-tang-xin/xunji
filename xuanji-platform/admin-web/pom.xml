@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  admin-web：管理台前端工程（Vite + React 18 + TS 严格 + AntD 5）。
+  packaging=pom + frontend-maven-plugin：Maven 构建时自动 npm install + npm run build，
+  vite 产物输出到 ../xuanji-server/src/main/resources/static（emptyOutDir 清空重建）。
+  server 以 type=pom 依赖本模块，保证 reactor 构建顺序（前端先于 server 打包）。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.xuanji</groupId>
+    <artifactId>xuanji-platform</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>admin-web</artifactId>
+  <packaging>pom</packaging>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>com.github.eirslett</groupId>
+        <artifactId>frontend-maven-plugin</artifactId>
+        <version>1.15.1</version>
+        <configuration>
+          <installDirectory>target</installDirectory>
+          <workingDirectory>${project.basedir}</workingDirectory>
+        </configuration>
+        <executions>
+          <execution>
+            <id>install-node-and-npm</id>
+            <goals><goal>install-node-and-npm</goal></goals>
+            <phase>generate-resources</phase>
+            <configuration>
+              <nodeVersion>v22.14.0</nodeVersion>
+              <nodeDownloadRoot>https://npmmirror.com/mirrors/node/</nodeDownloadRoot>
+            </configuration>
+          </execution>
+          <execution>
+            <id>npm-install</id>
+            <goals><goal>npm</goal></goals>
+            <phase>generate-resources</phase>
+            <configuration>
+              <arguments>install --no-audit --no-fund</arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>npm-build</id>
+            <goals><goal>npm</goal></goals>
+            <phase>generate-resources</phase>
+            <configuration>
+              <arguments>run build</arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

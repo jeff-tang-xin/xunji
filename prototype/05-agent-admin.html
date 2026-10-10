@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · Agent 管理台</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+const { useState } = React;
+const { Layout, Menu, Button, Table, Tag, message, Alert, Drawer, Form, Input, Select,
+        Checkbox, Radio, InputNumber, Space, Modal } = antd;
+const { Sider, Header, Content } = Layout;
+const MENU = [
+  ['ws','工作区','00-workspace.html'], ['canvas','画布编辑器','01-canvas-editor.html'],
+  ['run','运行监控','02-run-monitor.html'], ['approval','决策工作区','03-approval-center.html'],
+  ['publish','发布中心','04-publish-center.html'], ['agent','Agent 管理台','05-agent-admin.html'],
+  ['app','应用管理','06-app-admin.html'], ['report','报表中心','07-report-dashboard.html'], ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>Agent 管理台 <Tag color="blue">静态原型</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>Agent 全员可配置、不分主子（主文档 4.4）</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+const AGENTS = [
+  { id:1, name:'架构选型评审', model:'OPENAI_PROTOCOL · gpt-4.1', tools:4, status:'PUBLISHED', ver:'v3',
+    skills:['skill:需求分析技能@2','skill:代码评审技能@3'], mcps:['mcp:company-wiki@1','mcp:jira-mcp@1'] },
+  { id:2, name:'测试用例生成', model:'ANTHROPIC_PROTOCOL · claude-sonnet-4', tools:3, status:'PUBLISHED', ver:'v2',
+    skills:['skill:测试设计技能@1'], mcps:['mcp:zentao-mcp@2'] },
+  { id:3, name:'质量分析师', model:'OPENAI_PROTOCOL · deepseek-chat', tools:5, status:'PUBLISHED', ver:'v2',
+    skills:['skill:测试设计技能@1','skill:代码评审技能@3'], mcps:['mcp:company-wiki@1'] },
+  { id:4, name:'文档撰写', model:'OPENAI_PROTOCOL · qwen-max', tools:2, status:'DRAFT', ver:'v1',
+    skills:[], mcps:['mcp:company-wiki@1'] },
+];
+const TOOL_OPTIONS = ['tool:jira.create-issue@1','tool:zentao.create-case@1','mcp:company-wiki.search@1',
+  'mcp:chandao.query-bug@2','tool:ci.query-build@1','agent:code-reviewer@3'];
+const SKILL_OPTIONS = ['skill:需求分析技能@2','skill:测试设计技能@1','skill:代码评审技能@3'];
+const MCP_OPTIONS = ['mcp:company-wiki@1','mcp:jira-mcp@1','mcp:zentao-mcp@2'];
+function EditDrawer({ agent, onClose }) {
+  if (!agent) return null;
+  return (
+    <Drawer title={`编辑 Agent · ${agent.name}`} width={480} open onClose={onClose}
+      extra={<Space><Button onClick={onClose}>取消</Button>
+        <Button type="primary" onClick={() => message.success('已保存草稿（原型演示）')}>保存</Button></Space>}>
+      <Form layout="vertical" initialValues={{
+        protocol:'OPENAI_PROTOCOL', baseUrl:'https://api.deepseek.com/v1', model:'deepseek-chat',
+        prompt:'你是架构选型评审专家，基于候选方案给出评分与推荐理由……',
+        tools:['tool:ci.query-build@1','mcp:company-wiki.search@1'],
+        skills:agent.skills || [], mcps:agent.mcps || [], perm:'ALLOW', maxIter:10 }}>
+        <Form.Item label="名称"><Input/></Form.Item>
+        <Form.Item label="模型接入（协议双轨，Q5 决议）">
+          <Space.Compact block>
+            <Form.Item name="protocol" noStyle><Select style={{width:190}} options={[
+              { value:'OPENAI_PROTOCOL', label:'OPENAI_PROTOCOL' },
+              { value:'ANTHROPIC_PROTOCOL', label:'ANTHROPIC_PROTOCOL' }]}/></Form.Item>
+            <Form.Item name="baseUrl" noStyle><Input style={{width:'auto', flex:1}} placeholder="base_url（官方/兼容端点/自建推理）"/></Form.Item>
+            <Form.Item name="model" noStyle><Input style={{width:150}} placeholder="model"/></Form.Item>
+          </Space.Compact>
+        </Form.Item>
+        <Form.Item label="系统提示词" name="prompt"><Input.TextArea rows={4}/></Form.Item>
+        <Form.Item label="工具绑定（引用钉住已发布版本）" name="tools">
+          <Checkbox.Group options={TOOL_OPTIONS.map(t => ({ value:t, label:<span className="xj-mono">{t}</span> }))}/>
+        </Form.Item>
+        <Alert type="info" showIcon style={{marginBottom:16}}
+          message="能力绑定（Agent 级默认，Q12 决议）"
+          description="此处为 Agent 默认绑定，到处可用；工作流 agent 节点可节点级覆盖（优先级：节点 > Agent 本身，同 id 覆盖、其余保留）"/>
+        <Form.Item label="绑定技能（skill，引用钉住已发布版本）" name="skills">
+          <Select mode="multiple" allowClear placeholder="选择要绑定的技能"
+            options={SKILL_OPTIONS.map(s => ({ value:s, label:<span className="xj-mono">{s}</span> }))}/>
+        </Form.Item>
+        <Form.Item label="绑定 MCP（mcp，引用钉住已发布版本）" name="mcps">
+          <Select mode="multiple" allowClear placeholder="选择要绑定的 MCP 服务"
+            options={MCP_OPTIONS.map(m => ({ value:m, label:<span className="xj-mono">{m}</span> }))}/>
+        </Form.Item>
+        <Form.Item label="权限策略（AgentScope 权限系统，命中 requireApproval 走决策工作区）">
+          <Radio.Group name="perm" options={[
+            { value:'ALLOW', label:'默认放行' },
+            { value:'PATTERN', label:'按模式审批（如 ops.*）' } ]}/>
+        </Form.Item>
+        <Form.Item label="最大迭代次数" name="maxIter"><InputNumber min={1} max={50}/></Form.Item>
+      </Form>
+      <Alert type="info" showIcon message="对等互调：agent:* 引用经平台 agent.invoke 工具递归调用，不使用 AgentScope 主子式 spawn"/>
+    </Drawer>
+  );
+}
+function App() {
+  const [edit, setEdit] = useState(null);
+  const [pub, setPub] = useState(null);
+  return (
+    <Shell active="agent">
+      <Alert className="xj-proto-banner" type="info" showIcon
+        message="静态原型：Agent = agent_config 配置记录（模型/提示词/工具/技能/MCP/权限/迭代上限），发布后版本固化、可被画布与第三方引用。"/>
+      <div className="xj-toolbar"><Button type="primary" onClick={() => message.info('新建 Agent（原型演示）')}>新建 Agent</Button></div>
+      <Table rowKey="id" size="middle" dataSource={AGENTS}
+        expandable={{ expandedRowRender: r => (
+          <Space direction="vertical" size={4}>
+            <span>绑定技能：{(r.skills || []).map(s => <Tag key={s} color="purple" className="xj-mono">{s}</Tag>)}{(r.skills || []).length === 0 && <Tag>未绑定</Tag>}</span>
+            <span>绑定 MCP：{(r.mcps || []).map(m => <Tag key={m} color="geekblue" className="xj-mono">{m}</Tag>)}{(r.mcps || []).length === 0 && <Tag>未绑定</Tag>}</span>
+          </Space>
+        ) }}
+        columns={[
+          { title:'名称', dataIndex:'name', render:(v,r) => <a onClick={() => setEdit(r)}>{v}</a> },
+          { title:'模型', dataIndex:'model', className:'xj-mono' },
+          { title:'工具数', dataIndex:'tools' },
+          { title:'版本', dataIndex:'ver', className:'xj-mono' },
+          { title:'状态', dataIndex:'status', render:v => <Tag color={v === 'PUBLISHED' ? 'green' : 'default'}>{v}</Tag> },
+          { title:'操作', render:(_,r) => <Space>
+              <a onClick={() => setEdit(r)}>编辑</a>
+              <a onClick={() => setPub(r)}>发布</a>
+            </Space> },
+        ]}/>
+      <EditDrawer agent={edit} onClose={() => setEdit(null)}/>
+      <Modal title={`发布 ${pub ? pub.name : ''}`} open={!!pub} onCancel={() => setPub(null)}
+        onOk={() => { message.success(`已发布 ${pub.ver === 'v1' ? 'v1' : 'v' + (parseInt(pub.ver.slice(1)) + 1)}（原型演示）`); setPub(null); }}
+        okText="确认发布">
+        <Alert type="warning" showIcon
+          message="发布即版本固化：已引用本 Agent 的工作流继续使用其钉住的旧版本，升级引用需显式操作（主文档 4.8）"/>
+      </Modal>
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

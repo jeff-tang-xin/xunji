@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 权限管理</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+// 权限管理 · 静态原型：RBAC（用户→角色→菜单）+ 组织树 + 数据权限四档（主文档 v0.9 Q13）
+const { useState } = React;
+const { Layout, Menu, Button, Table, Tag, message, Alert, Modal, Form, Input, Select,
+        TreeSelect, Tree, Radio, Tabs, Card, Space, Typography } = antd;
+const { Sider, Header, Content } = Layout;
+const { Text } = Typography;
+const MENU = [
+  ['ws','工作区','00-workspace.html'], ['canvas','画布编辑器','01-canvas-editor.html'],
+  ['run','运行监控','02-run-monitor.html'], ['approval','决策工作区','03-approval-center.html'],
+  ['publish','发布中心','04-publish-center.html'], ['agent','Agent 管理台','05-agent-admin.html'],
+  ['app','应用管理','06-app-admin.html'], ['report','报表中心','07-report-dashboard.html'],
+  ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>权限管理 <Tag color="blue">静态原型</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>RBAC + 组织树 + 数据权限四档（主文档 v0.9 Q13）</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+// ===== 组织树（mock：parent 形态，玄机科技 → 平台研发部/交付部/质量部，交付部 → 交付一组/交付二组）=====
+const ORG_TREE = [
+  { key:'org-root', title:'玄机科技', value:'org-root', children:[
+    { key:'org-rd', title:'平台研发部', value:'org-rd' },
+    { key:'org-delivery', title:'交付部', value:'org-delivery', children:[
+      { key:'org-d1', title:'交付一组', value:'org-d1' },
+      { key:'org-d2', title:'交付二组', value:'org-d2' },
+    ]},
+    { key:'org-qa', title:'质量部', value:'org-qa' },
+  ]},
+];
+const ORG_NAME = {}, ORG_PARENT = {}, ORG_CHILDREN = {};
+(function walk(nodes, parent) {
+  nodes.forEach(n => {
+    ORG_NAME[n.key] = n.title;
+    ORG_PARENT[n.key] = parent;
+    ORG_CHILDREN[n.key] = (n.children || []).map(c => c.key);
+    walk(n.children || [], n.key);
+  });
+})(ORG_TREE, null);
+function subtreeOf(orgId) {
+  const out = [];
+  (function w(k) { out.push(k); (ORG_CHILDREN[k] || []).forEach(w); })(orgId);
+  return out;
+}
+// ===== 数据权限四档（角色级配置，与菜单可见性正交）=====
+const SCOPE_META = {
+  all:         { label:'全部数据',     color:'geekblue', desc:'可见平台内全部组织的数据' },
+  under_org:   { label:'本组织及下级', color:'cyan',     desc:'可见所属组织及其全部下级组织的数据' },
+  org:         { label:'仅本组织',     color:'green',    desc:'仅可见所属组织自身的数据，不含下级组织' },
+  only_create: { label:'仅本人创建',   color:'orange',   desc:'仅可见本人创建的数据' },
+};
+const SCOPE_ORDER = ['all', 'under_org', 'org', 'only_create'];
+function ScopeTag({ scope }) {
+  const m = SCOPE_META[scope] || {};
+  return <Tag color={m.color}>{m.label || scope}</Tag>;
+}
+// ===== 角色 / 用户 / 演示数据（mock）=====
+const INITIAL_ROLES = [
+  { id:'r-admin',  name:'平台管理员', builtin:true,  scope:'all',        desc:'平台超级管理员：不受组织与数据权限控制（bypass 全量），敏感操作留审计日志' },
+  { id:'r-pm',     name:'项目管理员', builtin:true,  scope:'under_org',  desc:'管理本组织及下级组织的项目、工作流与发布' },
+  { id:'r-member', name:'成员',       builtin:true,  scope:'only_create',desc:'仅可查看与操作本人创建的数据' },
+  { id:'r-qa',     name:'质量负责人', builtin:false, scope:'org',        desc:'仅本组织内的质量数据可见（演示非内置角色）' },
+];
+const INITIAL_USERS = [
+  { id:'u-1', username:'admin',    org:null,          roles:['平台管理员'],        status:'启用', createdAt:'2026-01-01 00:00:00', builtin:true },
+  { id:'u-2', username:'zhangsan', org:'org-rd',      roles:['项目管理员'],        status:'启用', createdAt:'2026-03-12 10:24:00' },
+  { id:'u-3', username:'chenxiao', org:'org-delivery',roles:['项目管理员','成员'], status:'启用', createdAt:'2026-04-02 14:40:00' },
+  { id:'u-4', username:'sunqi',    org:'org-qa',      roles:['质量负责人'],        status:'启用', createdAt:'2026-05-20 09:15:00' },
+  { id:'u-5', username:'lisi',     org:'org-rd',      roles:['成员'],              status:'停用', createdAt:'2026-06-11 16:08:00' },
+];
+const DEMO_WORKFLOWS = [
+  { id:'wf-001', name:'架构选型评审',   org:'org-rd',       creator:'zhangsan', updatedAt:'2026-09-28 18:20' },
+  { id:'wf-002', name:'测试用例生成',   org:'org-rd',       creator:'lisi',     updatedAt:'2026-09-30 10:05' },
+  { id:'wf-003', name:'交付部署流水线', org:'org-delivery', creator:'chenxiao', updatedAt:'2026-10-02 15:42' },
+  { id:'wf-004', name:'客户环境巡检',   org:'org-d1',       creator:'wangwei',  updatedAt:'2026-10-05 09:30' },
+  { id:'wf-005', name:'验收报告生成',   org:'org-d2',       creator:'zhoujie',  updatedAt:'2026-10-06 11:18' },
+  { id:'wf-006', name:'质量回归看板',   org:'org-qa',       creator:'sunqi',    updatedAt:'2026-10-07 16:55' },
+];
+// ===== 菜单树（目录 / 菜单 / 按钮 三级，mock）=====
+const MENU_TREE = [
+  { key:'m-console', type:'目录', title:'管理台', children:[
+    { key:'m-workspace', type:'菜单', title:'工作区', children:[
+      { key:'m-workspace-chat', type:'按钮', title:'发起对话' },
+    ]},
+    { key:'m-publish', type:'菜单', title:'发布中心', children:[
+      { key:'m-publish-do', type:'按钮', title:'发布' },
+      { key:'m-publish-deprecate', type:'按钮', title:'弃用' },
+    ]},
+    { key:'m-agent', type:'菜单', title:'Agent 管理台', children:[
+      { key:'m-agent-new', type:'按钮', title:'新建 Agent' },
+    ]},
+    { key:'m-perm', type:'菜单', title:'权限管理', children:[
+      { key:'m-perm-user', type:'按钮', title:'新建用户' },
+      { key:'m-perm-role', type:'按钮', title:'新建角色' },
+    ]},
+  ]},
+];
+const TYPE_COLOR = { '目录':'purple', '菜单':'blue', '按钮':'default' };
+function decorate(nodes) {
+  return nodes.map(n => ({
+    ...n,
+    title: <span>{n.title} <Tag style={{marginInlineEnd:0}} color={TYPE_COLOR[n.type]}>{n.type}</Tag></span>,
+    children: n.children ? decorate(n.children) : undefined,
+  }));
+}
+const MENU_TREE_DATA = decorate(MENU_TREE);
+// 各角色默认勾选的菜单（mock 记忆，新建角色默认为空 = 不可见任何菜单）
+const INITIAL_MENU_CHECKED = {
+  'r-admin': ['m-console','m-workspace','m-workspace-chat','m-publish','m-publish-do','m-publish-deprecate','m-agent','m-agent-new','m-perm','m-perm-user','m-perm-role'],
+  'r-pm': ['m-console','m-workspace','m-workspace-chat','m-publish','m-publish-do','m-agent','m-agent-new'],
+  'r-member': ['m-console','m-workspace','m-workspace-chat'],
+  'r-qa': ['m-console','m-workspace','m-workspace-chat'],
+};
+// ===== 工具函数 =====
+function genPassword() {
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+  const sets = ['ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghijkmnpqrstuvwxyz', '23456789', '#$%&*@'];
+  const chars = sets.map(pick);
+  const all = sets.join('');
+  while (chars.length < 12) chars.push(pick(all));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = chars[i]; chars[i] = chars[j]; chars[j] = t;
+  }
+  return chars.join('');
+}
+function legacyCopy(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+function copyText(text) {
+  const done = () => message.success('已复制到剪贴板');
+  const fail = () => message.warning('自动复制失败，请手动选择复制');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => { legacyCopy(text) ? done() : fail(); });
+  } else {
+    legacyCopy(text) ? done() : fail();
+  }
+}
+function filterByScope(rows, scope, orgId, username) {
+  if (scope === 'all') return rows;
+  if (scope === 'under_org') { const set = subtreeOf(orgId); return rows.filter(r => set.indexOf(r.org) >= 0); }
+  if (scope === 'org') return rows.filter(r => r.org === orgId);
+  return rows.filter(r => r.creator === username); // only_create
+}
+// ===== 页签①：用户管理 =====
+function UserTab({ users, roles, onCreate }) {
+  const [open, setOpen] = useState(false);
+  const [created, setCreated] = useState(null);
+  const [form] = Form.useForm();
+  const roleOptions = roles.filter(r => r.name !== '平台管理员').map(r => ({ value:r.name, label:r.name }));
+  const submit = () => {
+    form.validateFields().then(vals => {
+      const password = genPassword();
+      onCreate(vals);
+      setCreated({ username: vals.username, password });
+      setOpen(false);
+      form.resetFields();
+    }).catch(() => {});
+  };
+  return (
+    <div>
+      <div className="xj-toolbar">
+        <Button type="primary" onClick={() => setOpen(true)}>新建用户</Button>
+        <Text type="secondary" style={{fontSize:12}}>用户仅由 admin 创建（无自助注册）；角色可多选叠加。</Text>
+      </div>
+      <Table rowKey="id" size="middle" dataSource={users} columns={[
+        { title:'用户名', dataIndex:'username', render:(v, r) => r.builtin
+            ? <Space><b>{v}</b><Tag color="gold">内置</Tag></Space> : v },
+        { title:'所属组织', dataIndex:'org', render:(v, r) => r.builtin
+            ? <Text type="secondary">—（bypass）</Text> : (ORG_NAME[v] || v) },
+        { title:'角色', dataIndex:'roles', render:(v, r) => r.builtin
+            ? <Space wrap><Tag color="gold">平台管理员</Tag><Tag color="purple">不受组织与数据权限控制</Tag></Space>
+            : (v || []).map(name => <Tag key={name} color="blue">{name}</Tag>) },
+        { title:'状态', dataIndex:'status', render:v => <Tag color={v === '启用' ? 'green' : 'default'}>{v}</Tag> },
+        { title:'创建时间', dataIndex:'createdAt', className:'xj-mono' },
+        { title:'操作', render:(_, r) => r.builtin
+            ? <Text type="secondary">内置账号</Text>
+            : <a onClick={() => message.info('原型演示：重置密码将生成新的随机密码并一次性展示')}>重置密码</a> },
+      ]}/>
+      <Modal title="新建用户" open={open} onOk={submit} okText="创建" cancelText="取消"
+        onCancel={() => { setOpen(false); form.resetFields(); }}>
+        <Alert type="info" showIcon style={{marginBottom:16}}
+          message="用户仅由管理员创建（无自助注册）；创建成功后生成随机密码，明文仅展示一次，由 admin 转交用户。" />
+        <Form form={form} layout="vertical">
+          <Form.Item name="username" label="用户名" rules={[{ required:true, message:'请输入用户名' }]}>
+            <Input placeholder="如 chenxiao" />
+          </Form.Item>
+          <Form.Item name="org" label="所属组织" rules={[{ required:true, message:'请选择所属组织' }]}>
+            <TreeSelect treeData={ORG_TREE} placeholder="选择组织" showSearch treeNodeFilterProp="title" />
+          </Form.Item>
+          <Form.Item name="roles" label="角色（可多选叠加）" rules={[{ required:true, message:'至少选择一个角色' }]}>
+            <Select mode="multiple" options={roleOptions} placeholder="选择角色（平台管理员为系统内置，不可授予）" />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal title="用户创建成功" open={!!created} onCancel={() => setCreated(null)}
+        footer={<Button type="primary" onClick={() => setCreated(null)}>我已保存，关闭</Button>}>
+        {created && <div>
+          <Alert type="warning" showIcon style={{marginBottom:16}}
+            message="初始密码仅展示一次，请立即复制并转交用户；关闭后不可再查看（平台不存储明文密码）。" />
+          <p style={{margin:'0 0 8px'}}>用户名：<b>{created.username}</b></p>
+          <p style={{margin:'0 0 8px'}}>初始密码：</p>
+          <div style={{display:'flex', alignItems:'center', gap:12, background:'#fafafa', border:'1px solid #e8e8e8', borderRadius:6, padding:'10px 14px'}}>
+            <span className="xj-mono" style={{fontSize:16, fontWeight:600, letterSpacing:1}}>{created.password}</span>
+            <Button size="small" onClick={() => copyText(created.password)}>复制</Button>
+          </div>
+          <p style={{margin:'12px 0 0'}}>
+            <Text type="secondary" style={{fontSize:12}}>提示：admin 账号由系统首次启动自动初始化，随机密码仅控制台输出一次。</Text>
+          </p>
+        </div>}
+      </Modal>
+    </div>
+  );
+}
+// ===== 页签②：角色管理 =====
+function RoleTab({ roles, onCreate, onDelete }) {
+  const [open, setOpen] = useState(false);
+  const [form] = Form.useForm();
+  const submit = () => {
+    form.validateFields().then(vals => {
+      onCreate(vals);
+      setOpen(false);
+      form.resetFields();
+      message.success('角色已创建（原型演示）');
+    }).catch(() => {});
+  };
+  const del = (r) => Modal.confirm({
+    title: `删除角色「${r.name}」？`,
+    content: '删除后，被授予该角色的用户将失去对应的菜单可见性与数据范围（原型演示）。',
+    okText: '删除', okButtonProps: { danger:true }, cancelText: '取消',
+    onOk: () => { onDelete(r.id); message.success('已删除（原型演示）'); },
+  });
+  return (
+    <div>
+      <div className="xj-toolbar">
+        <Button type="primary" onClick={() => setOpen(true)}>新建角色</Button>
+        <Text type="secondary" style={{fontSize:12}}>数据范围为角色级配置；菜单可见性在「菜单权限」页签单独配置，两者正交。</Text>
+      </div>
+      <Table rowKey="id" size="middle" dataSource={roles} columns={[
+        { title:'角色名', dataIndex:'name', render:(v, r) => <Space>{v}{r.builtin && <Tag color="gold">内置</Tag>}</Space> },
+        { title:'数据范围', dataIndex:'scope', render:v => <ScopeTag scope={v}/> },
+        { title:'内置', dataIndex:'builtin', render:v => v ? <Tag color="gold">是</Tag> : <Tag>否</Tag> },
+        { title:'描述', dataIndex:'desc' },
+        { title:'操作', render:(_, r) => r.builtin
+            ? <Text type="secondary">内置角色，不可删除</Text>
+            : <a onClick={() => del(r)}>删除</a> },
+      ]}/>
+      <Modal title="新建角色" open={open} onOk={submit} okText="创建" cancelText="取消"
+        onCancel={() => { setOpen(false); form.resetFields(); }}>
+        <Form form={form} layout="vertical" initialValues={{ scope:'under_org' }}>
+          <Form.Item name="name" label="角色名" rules={[{ required:true, message:'请输入角色名' }]}>
+            <Input placeholder="如 交付项目经理" />
+          </Form.Item>
+          <Form.Item name="scope" label="数据范围（角色级配置，四档）" rules={[{ required:true, message:'请选择数据范围' }]}>
+            <Radio.Group style={{display:'flex', flexDirection:'column', gap:10}}>
+              {SCOPE_ORDER.map(s => (
+                <Radio key={s} value={s}>
+                  <Space size={8} wrap><ScopeTag scope={s}/><Text type="secondary">{SCOPE_META[s].desc}</Text></Space>
+                </Radio>
+              ))}
+            </Radio.Group>
+          </Form.Item>
+          <Form.Item name="desc" label="描述（可选）"><Input.TextArea rows={2} placeholder="角色职责说明" /></Form.Item>
+        </Form>
+        <Alert type="info" showIcon
+          message="菜单可见性与数据范围正交：创建角色后请在「菜单权限」页签勾选该角色可见的菜单与按钮。" />
+      </Modal>
+    </div>
+  );
+}
+// ===== 页签③：菜单权限 =====
+function MenuTab({ roles, menuChecked, setMenuChecked }) {
+  const [roleId, setRoleId] = useState('r-pm');
+  const activeId = roles.some(r => r.id === roleId) ? roleId : (roles[0] && roles[0].id);
+  const checked = menuChecked[activeId] || [];
+  const onCheck = (keys) => {
+    const ks = Array.isArray(keys) ? keys : keys.checked;
+    setMenuChecked(prev => ({ ...prev, [activeId]: ks }));
+  };
+  return (
+    <div style={{display:'flex', gap:16, alignItems:'flex-start'}}>
+      <Card size="small" title="菜单树（目录 / 菜单 / 按钮）" style={{width:340, flexShrink:0}}>
+        <Tree treeData={MENU_TREE_DATA} defaultExpandAll selectable={false}/>
+        <p style={{margin:'8px 0 0'}}>
+          <Text type="secondary" style={{fontSize:12}}>目录 → 菜单 → 按钮三级；按钮级权限控制页面内操作（如 发布 / 弃用）。</Text>
+        </p>
+      </Card>
+      <Card size="small" title="角色可见菜单" style={{flex:1}}
+        extra={<Select value={activeId} onChange={setRoleId} style={{width:180}}
+          options={roles.map(r => ({ value:r.id, label:r.name }))} />}>
+        <Alert type="info" showIcon style={{marginBottom:12}}
+          message="菜单可见性与数据范围正交：菜单树决定「能用什么功能」，数据范围决定「能看到哪些数据」，随角色独立配置、互不推导。" />
+        <Tree checkable defaultExpandAll checkedKeys={checked} onCheck={onCheck} treeData={MENU_TREE_DATA}/>
+      </Card>
+    </div>
+  );
+}
+// ===== 页签④：组织与数据范围 =====
+function OrgTab({ roles, users }) {
+  const [roleId, setRoleId] = useState('r-pm');
+  const [userId, setUserId] = useState('u-3');
+  const activeRole = roles.find(r => r.id === roleId) || roles[0];
+  const demoUsers = users.filter(u => !u.builtin);
+  const user = demoUsers.find(u => u.id === userId) || demoUsers[0] || { org:null, username:'' };
+  const bypass = activeRole && activeRole.name === '平台管理员';
+  const scope = activeRole ? activeRole.scope : 'all';
+  const rows = bypass ? DEMO_WORKFLOWS : filterByScope(DEMO_WORKFLOWS, scope, user.org, user.username);
+  const hidden = DEMO_WORKFLOWS.length - rows.length;
+  return (
+    <div>
+      <Alert type="warning" showIcon style={{marginBottom:12}}
+        message="平台管理员不受组织和数据权限控制：bypass 全量数据，敏感操作留审计日志（主文档 v0.9 Q13）。" />
+      <div style={{display:'flex', gap:16, alignItems:'flex-start'}}>
+        <Card size="small" title="组织树（用户归属组织）" style={{width:300, flexShrink:0}}>
+          <Tree treeData={ORG_TREE} defaultExpandAll selectable={false}/>
+          <p style={{margin:'8px 0 0'}}>
+            <Text type="secondary" style={{fontSize:12}}>组织为树形（parent）；数据范围以用户所属组织为参照系。</Text>
+          </p>
+        </Card>
+        <Card size="small" title="数据范围演示（mock 工作流列表）" style={{flex:1}}>
+          <Space wrap style={{marginBottom:12}}>
+            <span>角色：</span>
+            <Select value={activeRole && activeRole.id} onChange={setRoleId} style={{width:170}}
+              options={roles.map(r => ({ value:r.id, label:r.name }))} />
+            <span>演示用户：</span>
+            <Select value={user.id} onChange={setUserId} style={{width:210}}
+              options={demoUsers.map(u => ({ value:u.id, label:`${u.username}（${ORG_NAME[u.org] || '—'}）` }))} />
+          </Space>
+          <div style={{marginBottom:8}}>
+            <Space wrap>
+              <Text type="secondary">当前生效：</Text>
+              <ScopeTag scope={scope}/>
+              {bypass && <Tag color="gold">bypass 全量</Tag>}
+              <Text>可见 {rows.length} / {DEMO_WORKFLOWS.length} 条{hidden > 0 ? `（已按数据范围隐藏 ${hidden} 条）` : ''}</Text>
+            </Space>
+          </div>
+          <Table rowKey="id" size="small" dataSource={rows} pagination={false} columns={[
+            { title:'工作流', dataIndex:'name' },
+            { title:'所属组织', dataIndex:'org', render:v => ORG_NAME[v] || v },
+            { title:'创建人', dataIndex:'creator', className:'xj-mono' },
+            { title:'更新时间', dataIndex:'updatedAt', className:'xj-mono' },
+          ]}/>
+          <p style={{margin:'12px 0 0'}}>
+            <Text type="secondary" style={{fontSize:12}}>
+              演示说明：under_org / org 以演示用户所属组织为基准（如 chenxiao 属交付部：under_org 可见交付部 + 交付一组/二组，org 仅交付部本身）；only_create 仅显示该用户创建的行；all 全量可见。
+            </Text>
+          </p>
+        </Card>
+      </div>
+    </div>
+  );
+}
+// ===== 根组件 =====
+function App() {
+  const [users, setUsers] = useState(INITIAL_USERS);
+  const [roles, setRoles] = useState(INITIAL_ROLES);
+  const [menuChecked, setMenuChecked] = useState(INITIAL_MENU_CHECKED);
+  const createUser = (vals) => setUsers(prev => [...prev, {
+    id: 'u-' + (prev.length + 1) + '-' + Math.floor(Math.random() * 1000),
+    username: vals.username, org: vals.org, roles: vals.roles,
+    status: '启用', createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+  }]);
+  const createRole = (vals) => setRoles(prev => [...prev, {
+    id: 'r-' + (prev.length + 1) + '-' + Math.floor(Math.random() * 1000),
+    name: vals.name, scope: vals.scope, builtin: false, desc: vals.desc || '（原型演示角色）',
+  }]);
+  const deleteRole = (id) => setRoles(prev => prev.filter(r => r.id !== id));
+  return (
+    <Shell active="perm">
+      <Alert className="xj-proto-banner" type="info" showIcon
+        message="静态原型：RBAC（用户→角色→菜单，角色可叠加）+ 组织树 + 数据权限四档（all / under_org / org / only_create，角色级配置，与菜单可见性正交）；用户仅由 admin 创建，密码随机生成、明文一次性展示（主文档 v0.9 Q13）。"/>
+      <Tabs defaultActiveKey="user" items={[
+        { key:'user', label:'用户管理', children:<UserTab users={users} roles={roles} onCreate={createUser}/> },
+        { key:'role', label:'角色管理', children:<RoleTab roles={roles} onCreate={createRole} onDelete={deleteRole}/> },
+        { key:'menu', label:'菜单权限', children:<MenuTab roles={roles} menuChecked={menuChecked} setMenuChecked={setMenuChecked}/> },
+        { key:'org',  label:'组织与数据范围', children:<OrgTab roles={roles} users={users}/> },
+      ]}/>
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

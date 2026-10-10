@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 运行监控</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect } = React;
+const { Layout, Menu, Button, Table, Tag, message, Alert, Steps, Card, Space, Typography } = antd;
+const { Sider, Header, Content } = Layout;
+const MENU = [
+  ['ws','工作区','00-workspace.html'], ['canvas','画布编辑器','01-canvas-editor.html'],
+  ['run','运行监控','02-run-monitor.html'], ['approval','决策工作区','03-approval-center.html'],
+  ['publish','发布中心','04-publish-center.html'], ['agent','Agent 管理台','05-agent-admin.html'],
+  ['app','应用管理','06-app-admin.html'], ['report','报表中心','07-report-dashboard.html'], ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>运行监控 <Tag color="blue">静态原型</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>对应 docs/detail/06 §1 ｜ SSE 用定时器模拟</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+const RUNS = [
+  { id:'r_9f2c', def:'SDLC-全流程编排@v6', trigger:'WEBHOOK · Jira issue.updated', start:'09:12:03', status:'RUNNING' },
+  { id:'r_9e88', def:'SDLC-全流程编排@v6', trigger:'MANUAL', start:'08:55:41', status:'SUCCESS' },
+  { id:'r_9d31', def:'每日构建质量报告@v3', trigger:'SCHEDULE 09:00', start:'09:00:00', status:'SUCCESS' },
+  { id:'r_9c04', def:'需求吞吐周报@v2', trigger:'SCHEDULE 周一 08:30', start:'10-05 08:30', status:'FAILED' },
+];
+const NODES = [
+  { title:'需求设计评审', desc:'agent:requirement-review@2', io:{input:'{ report: "需求说明书 v2.1" }', output:'{ score: 92, issues: 3 }'} },
+  { title:'原型设计评审', desc:'agent:prototype-review@1', io:{input:'{ prototype: "PRD-原型链接" }', output:'{ problems: 5, severity: "中" }'} },
+  { title:'架构选型评审', desc:'agent:arch-review@3', io:{input:'{ candidates: ["LiteFlow","Camunda"] }', output:'{ choice: "LiteFlow", reasons: [...] }'} },
+  { title:'测试用例生成', desc:'agent:case-writer@2', io:{input:'{ scope: "主流程+异常分支" }', output:'{ cases: 47, coverage: "88%" }'} },
+  { title:'详设概设评审', desc:'agent:detail-review@1  ⚡决策门（产物待审阅）', io:{input:'{ detailDesign: "详设 v1.0" }', output:'产物 v1 → 决策工作区审阅中'} },
+  { title:'开发与功能测试', desc:'workflow:dev-func-test@4', io:{input:'—', output:'—'} },
+  { title:'运维部署', desc:'connector.jira.deploy@1', io:{input:'—', output:'—'} },
+];
+const GATE_AT = 4; // 第 5 个节点挂起（决策门）
+function RunDetail({ run, onBack }) {
+  const [step, setStep] = useState(3);
+  const [sel, setSel] = useState(2);
+  useEffect(() => {
+    const t = setInterval(() => setStep(s => (s >= GATE_AT ? (clearInterval(t), s) : s + 1)), 1400);
+    return () => clearInterval(t);
+  }, []);
+  const suspended = step >= GATE_AT;
+  return (
+    <div style={{display:'flex', gap:12}}>
+      <Card size="small" style={{flex:1}} title={<Space><Button size="small" onClick={onBack}>← 返回</Button>
+        <span>run {run.id}</span><Tag color={suspended ? 'orange' : 'blue'}>{suspended ? 'SUSPENDED（等待决策）' : 'RUNNING'}</Tag></Space>}>
+        <Alert type={suspended ? 'warning' : 'info'} showIcon style={{marginBottom:12}}
+          message={suspended
+            ? '节点「详设概设评审」命中决策门：产物「详设文档 v1」待审阅（批注/修改），上下文已快照持久化；决策后修改产物写回 run 上下文并从该节点续跑'
+            : '节点状态实时推进中（原型用定时器模拟 SSE 事件流 node.start / node.finish）'}
+          action={suspended && <Button size="small" type="primary" onClick={() => { window.location.href = '03-approval-center.html'; }}>进入决策工作区</Button>}/>
+        <Steps direction="vertical" size="small" current={step}
+          onChange={i => i <= step && setSel(i)}
+          items={NODES.map((n, i) => ({
+            title: n.title, description: n.desc,
+            status: i < step ? 'finish' : i === step ? (suspended ? 'error' : 'process') : 'wait',
+          }))}/>
+      </Card>
+      <Card size="small" style={{width:420}} title={`节点输入 / 输出 · ${NODES[sel].title}`}>
+        <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>INPUT</Typography.Paragraph>
+        <pre className="xj-mono" style={{background:'#fafafa', padding:10, borderRadius:6}}>{NODES[sel].io.input}</pre>
+        <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>OUTPUT</Typography.Paragraph>
+        <pre className="xj-mono" style={{background:'#fafafa', padding:10, borderRadius:6}}>{NODES[sel].io.output}</pre>
+        <Typography.Text type="secondary" style={{fontSize:12}}>
+          事件流：run.start / node.start / node.finish / run.suspended / run.finish（03 文档 §7）
+        </Typography.Text>
+      </Card>
+    </div>
+  );
+}
+function App() {
+  const [sel, setSel] = useState(null);
+  return (
+    <Shell active="run">
+      <Alert className="xj-proto-banner" type="info" showIcon
+        message="静态原型：点击 run 查看详情，节点状态每 1.4s 推进一步，至「详设概设评审」命中决策门转 SUSPENDED。"/>
+      {sel ? <RunDetail run={sel} onBack={() => setSel(null)}/> : (
+        <Table rowKey="id" size="middle"
+          columns={[
+            { title:'Run ID', dataIndex:'id', className:'xj-mono', render:(v,r) => <a onClick={() => setSel(r)}>{v}</a> },
+            { title:'工作流（版本）', dataIndex:'def' },
+            { title:'触发方式', dataIndex:'trigger' },
+            { title:'开始时间', dataIndex:'start', className:'xj-mono' },
+            { title:'状态', dataIndex:'status', render:v => <Tag color={{RUNNING:'blue',SUCCESS:'green',FAILED:'red',SUSPENDED:'orange'}[v]}>{v}</Tag> },
+            { title:'操作', render:(_,r) => <a onClick={() => setSel(r)}>查看</a> },
+          ]}
+          dataSource={RUNS}/>
+      )}
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

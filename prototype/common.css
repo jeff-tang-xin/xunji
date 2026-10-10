@@ -1,0 +1,28 @@
+/* 玄机万象 · 静态原型共享外壳样式 */
+html, body, #root { height: 100%; margin: 0; }
+.xj-logo {
+  height: 48px; display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 600; font-size: 15px; letter-spacing: 1px;
+  background: rgba(255,255,255,.08); margin: 8px; border-radius: 6px;
+}
+.xj-sider .ant-menu { border-inline-end: none; }
+.xj-header {
+  background: #fff; padding: 0 16px; display: flex; align-items: center;
+  justify-content: space-between; border-bottom: 1px solid #f0f0f0; height: 48px;
+}
+.xj-content { padding: 16px; overflow: auto; }
+.xj-proto-banner {
+  margin-bottom: 12px; font-size: 12px;
+}
+.xj-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.xj-canvas-wrap {
+  border: 1px solid #e8e8e8; border-radius: 8px; background: #fafafa; height: calc(100vh - 210px); min-height: 420px;
+}
+.xj-panel-item {
+  padding: 6px 10px; margin: 4px 0; border: 1px solid #e8e8e8; border-radius: 6px;
+  background: #fff; cursor: pointer; font-size: 13px; user-select: none;
+}
+.xj-panel-item:hover { border-color: #1677ff; color: #1677ff; }
+.xj-kpi .ant-card-body { padding: 16px; }
+.xj-chart-card .ant-card-head { min-height: 40px; }
+.xj-mono { font-family: Consolas, Monaco, monospace; font-size: 12px; }

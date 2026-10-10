@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 画布编辑器</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="vendor/logic-flow.css">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/dayjs-customParseFormat.js"></script>
+<script src="vendor/dayjs-weekday.js"></script>
+<script src="vendor/dayjs-localeData.js"></script>
+<script src="vendor/dayjs-weekOfYear.js"></script>
+<script src="vendor/dayjs-weekYear.js"></script>
+<script src="vendor/dayjs-advancedFormat.js"></script>
+<script src="vendor/dayjs-quarterOfYear.js"></script>
+<script>
+  dayjs.extend(window.dayjs_plugin_customParseFormat);
+  dayjs.extend(window.dayjs_plugin_weekday);
+  dayjs.extend(window.dayjs_plugin_localeData);
+  dayjs.extend(window.dayjs_plugin_weekOfYear);
+  dayjs.extend(window.dayjs_plugin_weekYear);
+  dayjs.extend(window.dayjs_plugin_advancedFormat);
+  dayjs.extend(window.dayjs_plugin_quarterOfYear);
+  dayjs.locale('zh-cn');
+</script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/logic-flow.min.js"></script>
+<script>/* LogicFlow 2.x UMD 全局名为 Core（命名空间含 LogicFlow/default），此处统一暴露 window.LogicFlow */
+window.LogicFlow = (window.Core && (window.Core.LogicFlow || window.Core.default)) || window.LogicFlow;</script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect, useRef } = React;
+const { Layout, Menu, Button, Drawer, Form, Input, Switch, Select, InputNumber,
+        Modal, Tag, message, Alert, Collapse, Space, Typography, Checkbox } = antd;
+
+/* 平台内置节点图标：vendor 未单独打包 @ant-design/icons UMD，此处内联同形 SVG（PlayCircleOutlined / StopCircleOutlined） */
+const IconPlayCircle = (props) => (
+  <svg viewBox="64 64 896 896" width="1em" height="1em" fill="currentColor" aria-hidden="true" focusable="false" {...props}>
+    <path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z"/>
+    <path d="M416 304l288 208-288 208z"/>
+  </svg>
+);
+const IconStopCircle = (props) => (
+  <svg viewBox="64 64 896 896" width="1em" height="1em" fill="currentColor" aria-hidden="true" focusable="false" {...props}>
+    <path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z"/>
+    <path d="M400 368h224a32 32 0 0 1 32 32v224a32 32 0 0 1-32 32H400a32 32 0 0 1-32-32V400a32 32 0 0 1 32-32z"/>
+  </svg>
+);
+const BUILTIN_ICONS = { play: IconPlayCircle, stop: IconStopCircle };
+const { Sider, Header, Content } = Layout;
+
+/* ---------- 共享外壳 ---------- */
+const MENU = [
+  ['ws','工作区','00-workspace.html'], ['canvas','画布编辑器','01-canvas-editor.html'],
+  ['run','运行监控','02-run-monitor.html'], ['approval','决策工作区','03-approval-center.html'],
+  ['publish','发布中心','04-publish-center.html'], ['agent','Agent 管理台','05-agent-admin.html'],
+  ['app','应用管理','06-app-admin.html'], ['report','报表中心','07-report-dashboard.html'], ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>画布编辑器 <Tag color="blue">静态原型</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>对应详细设计 docs/detail/06 §1 ｜ 数据为 mock</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+
+/* ---------- mock 数据：示例流程（平台内置 START/END + AGENT/ATOMIC 节点，对应 03 文档画布 JSON v1 与主文档 Q10/Q12 决议） ---------- */
+const GRAPH = {
+  nodes: [
+    { id:'start', type:'rect', x:220, y:80,  text:'开始', kind:'START' },
+    { id:'n1', type:'rect', x:220, y:200, text:'技术调研', kind:'AGENT' },
+    { id:'n2', type:'rect', x:220, y:320, text:'方案初稿', kind:'AGENT' },
+    { id:'n3', type:'rect', x:220, y:440, text:'归档', kind:'ATOMIC' },
+    { id:'end', type:'rect', x:220, y:560, text:'结束', kind:'END' },
+  ],
+  edges: [ ['start','n1'],['n1','n2'],['n2','n3'],['n3','end'] ]
+    .map(([s,t],i) => ({ id:'e'+i, sourceNodeId:s, targetNodeId:t, type:'polyline' })),
+};
+const NODE_DETAIL = {
+  start:{ name:'开始', kind:'START', inputSchema:{ message:'string', attachments:'file[]' } },
+  n1:{ name:'技术调研', kind:'AGENT', refId:'agent:tech-research@1', gate:false, retry:1, timeoutMs:180000,
+       params:'调研维度：框架选型 / 社区活跃度 / 许可协议',
+       inputSchema:{ message:'string' }, inputFrom:'开始节点流程输入 message → input.message',
+       outputSchema:{ report:'string', refs:'array' },
+       skills:['需求分析技能@2'], mcps:['company-wiki@1'] },
+  n2:{ name:'方案初稿', kind:'AGENT', refId:'agent:proposal-draft@1', gate:false, retry:1, timeoutMs:180000,
+       params:'基于调研报告产出方案初稿文档',
+       inputSchema:{ report:'string' }, inputFrom:'上游 n1 输出 report → input.report',
+       outputSchema:{ summary:'string', doc:'object' },
+       skills:['测试设计技能@1'], mcps:['jira-mcp@1'] },
+  n3:{ name:'归档', kind:'ATOMIC', refId:'connector.archive.doc@1', gate:false, retry:0, timeoutMs:60000,
+       params:'目标：文档中心 / 项目空间',
+       inputSchema:{ doc:'object' }, inputFrom:'上游 n2 输出 doc → input.doc',
+       outputSchema:{ archiveId:'string' } },
+  end:{ name:'结束', kind:'END', outputSchema:{ summary:'string', doc:'object', archiveId:'string' } },
+};
+/* 能力绑定可选项（Q12：MCP 与 skill 同为 agent 可绑定能力；agent 级默认绑定之外，工作流 agent 节点可节点级覆盖） */
+const SKILL_OPTIONS = ['需求分析技能@2', '测试设计技能@1'];
+const MCP_OPTIONS = ['company-wiki@1', 'jira-mcp@1'];
+const PANEL = [
+  { key:'builtin', header:'平台内置', builtin:true,
+    items:[ { name:'开始节点', icon:'play', color:'#52c41a' }, { name:'结束节点', icon:'stop', color:'#ff4d4f' } ] },
+  { key:'agent', header:'Agent 节点（已发布 agent_config）', items:['需求设计评审','原型设计评审','架构选型评审','测试用例生成','文档撰写'] },
+  { key:'conn',  header:'连接器节点', items:['Jira·创建 Issue','禅道·建用例','云效·触发流水线','云效·查询构建'] },
+];
+
+/* ---------- 画布 ---------- */
+function Canvas({ lfRef, onNodeClick }) {
+  const box = useRef(null);
+  useEffect(() => {
+    if (typeof LogicFlow === 'undefined') { box.current.innerHTML = '<p style="padding:24px;color:#999">LogicFlow 加载失败（vendor 缺失）</p>'; return; }
+    const lf = new LogicFlow({ container: box.current, grid: { size: 10, visible: true } });
+    lf.setTheme({ rect: { fill:'#fff', stroke:'#1677ff', strokeWidth:1.5, radius:6 },
+                  polyline: { stroke:'#bfbfbf', strokeWidth:1.5 } });
+    lf.render(GRAPH);
+    lf.on('node:click', ({ data }) => onNodeClick(data.id));
+    lfRef.current = lf;
+  }, []);
+  return <div ref={box} className="xj-canvas-wrap"/>;
+}
+
+/* ---------- 属性抽屉 ---------- */
+function SchemaBlock({ title, tag, tagColor, schema, note }) {
+  const entries = Object.entries(schema || {});
+  return (
+    <div style={{ border:'1px solid #f0f0f0', borderRadius:6, padding:'8px 12px', background:'#fafafa' }}>
+      <Space size={6}>
+        <Typography.Text strong style={{fontSize:13}}>{title}</Typography.Text>
+        {tag && <Tag color={tagColor} style={{marginInlineEnd:0, fontSize:11, lineHeight:'18px'}}>{tag}</Tag>}
+      </Space>
+      {entries.length === 0
+        ? <div style={{color:'#999', fontSize:12, marginTop:4}}>未声明（发布校验要求节点声明输入 / 输出 schema）</div>
+        : entries.map(([k, t]) => (
+          <div key={k} style={{fontSize:12, marginTop:4}}>
+            <code className="xj-mono" style={{color:'#1677ff'}}>{k}</code>
+            <span style={{color:'#999', margin:'0 6px'}}>:</span>
+            <code className="xj-mono" style={{color:'#555'}}>{t}</code>
+          </div>))}
+      {note && <div style={{color:'#999', fontSize:12, marginTop:6}}>{note}</div>}
+    </div>
+  );
+}
+function PropDrawer({ open, nodeId, onClose }) {
+  const d = NODE_DETAIL[nodeId] || { name:'新节点', kind:'AGENT', refId:'', gate:false, retry:0, timeoutMs:60000, params:'',
+                                     inputSchema:{}, outputSchema:{}, skills:[], mcps:[] };
+  const isStart = d.kind === 'START', isEnd = d.kind === 'END';
+  const isBuiltin = isStart || isEnd;
+  return (
+    <Drawer title={<Space size={6}>{`节点属性 · ${nodeId}`}{isBuiltin && <Tag color="orange" style={{marginInlineEnd:0}}>平台内置</Tag>}</Space>}
+      width={420} open={open} onClose={onClose}
+      extra={<Space><Button onClick={onClose}>取消</Button><Button type="primary" onClick={() => { message.success('已保存（原型演示）'); onClose(); }}>保存</Button></Space>}>
+      {isBuiltin ? (
+        <Space direction="vertical" style={{width:'100%'}} size={12}>
+          <Alert type="warning" showIcon
+            message="平台内置节点：画布固定存在、不可删除，插件不可提供（主文档 Q10 决议）"/>
+          <SchemaBlock title={isStart ? '流程输入声明' : '流程输出声明'}
+            tag={isStart ? '工作区用户输入' : '流程出口'} tagColor={isStart ? 'green' : 'red'}
+            schema={isStart ? d.inputSchema : d.outputSchema}
+            note={isStart
+              ? '工作区用户输入（对话 / 附件）作为流程级输入，作为首个节点的上游数据源'
+              : '流程结束时的流程级输出，经统一 API（runs 查询 / chat-messages）返回调用方'}/>
+        </Space>
+      ) : (
+        <>
+          <Form layout="vertical" initialValues={d} key={nodeId}>
+            <Form.Item label="节点名称" name="name"><Input/></Form.Item>
+            <Form.Item label="引用组件 refId（发布时校验存在且 enabled）" name="refId">
+              <Select options={['agent:tech-research@1','agent:proposal-draft@1','connector.archive.doc@1',
+                'agent:requirement-review@2','workflow:dev-func-test@4'].map(v => ({ value:v, label:v }))}/>
+            </Form.Item>
+            <Form.Item label="节点参数（按组件 paramSchema 动态渲染）" name="params"><Input.TextArea rows={2}/></Form.Item>
+            <Form.Item label={<Space>决策门（执行前挂起等人决策）<Switch name="gate" defaultChecked={d.gate}/></Space>}>
+              <Space direction="vertical" style={{width:'100%'}}>
+                <Select defaultValue="workspace" options={[
+                  { value:'workspace', label:'交互形态：决策工作区（产物审阅+批注+修改）' },
+                  { value:'form', label:'交互形态：简单表单（通过/驳回/调参）' } ]}/>
+                <Select defaultValue="auto" options={[
+                  { value:'auto', label:'审阅产物：上游节点输出（自动）' },
+                  { value:'custom', label:'审阅产物：指定 artifact' } ]}/>
+                <Select defaultValue="24h" options={['1h','4h','24h','72h'].map(v => ({ value:v, label:'超时 '+v+'（超时升级 ESCALATE）' }))}/>
+              </Space>
+            </Form.Item>
+            <Form.Item label="驳回行为">
+              <Select defaultValue="redo" options={[
+                { value:'redo', label:'驳回并重做 — Agent 按批注重生成产物，再次进入决策门' },
+                { value:'terminate', label:'驳回终止 — run 按失败路径结束' },
+                { value:'rollback', label:'驳回回退 — 回到指定节点重跑' } ]}/>
+            </Form.Item>
+            <Space size="large">
+              <Form.Item label="失败重试次数" name="retry"><InputNumber min={0} max={5}/></Form.Item>
+              <Form.Item label="执行超时 (ms)" name="timeoutMs"><InputNumber step={30000}/></Form.Item>
+            </Space>
+          </Form>
+          <Typography.Title level={5} style={{fontSize:14, margin:'8px 0'}}>输入 / 输出</Typography.Title>
+          <Space direction="vertical" style={{width:'100%'}} size={8}>
+            <SchemaBlock title="输入 schema" tag="来自上游 mapping" tagColor="blue" schema={d.inputSchema}
+              note={d.inputFrom ? `edge.mapping（JSONPath）：${d.inputFrom}` : '下游节点经 edge.mapping（JSONPath）引入上游输出作为输入'}/>
+            <SchemaBlock title="输出 schema" tag="供下游 mapping 引用" tagColor="blue" schema={d.outputSchema}
+              note="下游节点经 edge.mapping（JSONPath）按字段引入"/>
+          </Space>
+          {d.kind === 'AGENT' && (
+            <div style={{marginTop:16}}>
+              <Typography.Title level={5} style={{fontSize:14, margin:'0 0 8px'}}>能力绑定（skills / MCP）</Typography.Title>
+              <Alert type="info" showIcon style={{marginBottom:12}}
+                message="节点级绑定优先于 Agent 默认绑定（同 id 覆盖，其余保留）——主文档 Q12 决议"/>
+              <Form layout="vertical" initialValues={d} key={nodeId + '-cap'}>
+                <Form.Item label="Skills（技能）" name="skills">
+                  <Checkbox.Group options={SKILL_OPTIONS}/>
+                </Form.Item>
+                <Form.Item label="MCP 服务" name="mcps">
+                  <Checkbox.Group options={MCP_OPTIONS}/>
+                </Form.Item>
+              </Form>
+            </div>
+          )}
+          <Alert type="info" showIcon style={{marginTop:8}}
+            message="交互式决策：产物审阅 + 批注 + 在线修改；决策通过后修改后产物写回 run 上下文流向下游节点（03 文档 §5）"/>
+        </>
+      )}
+    </Drawer>
+  );
+}
+
+/* ---------- 发布对话框 ---------- */
+function PublishModal({ open, onClose }) {
+  const checks = [
+    ['✅','语法校验：画布 JSON Schema v1 通过'],
+    ['✅','引用校验：3 个 refId 均存在且 enabled；AGENT 引用均为 PUBLISHED 版本（START/END 为平台内置，无需引用）'],
+    ['✅','图校验：拓扑排序通过，无环；START/END 内置节点校验通过；决策门配置与节点能力匹配'],
+    ['✅','编译：THEN(node_start,node_n1,node_n2,node_n3,node_end) 生成成功'],
+    ['⚠️','警告 1 条：节点 n3（归档）未配置决策门，将按自动执行处理'],
+  ];
+  return (
+    <Modal title="发布《SDLC-全流程编排》" open={open} onCancel={onClose}
+      footer={<Space><Button onClick={onClose}>取消</Button>
+        <Button type="primary" onClick={() => { message.success('已发布 v7，新 run 使用新版本（原型演示）'); onClose(); }}>确认发布</Button></Space>}>
+      {checks.map(([ic, t], i) => <p key={i} style={{margin:'8px 0', fontSize:13}}>{ic} {t}</p>)}
+      <Alert type="warning" showIcon style={{marginTop:8}}
+        message="发布即版本固化：wf_definition_version 新增记录，进行中 run 按原版本继续"/>
+    </Modal>
+  );
+}
+
+/* ---------- 主页面 ---------- */
+function App() {
+  const lfRef = useRef(null);
+  const [drawer, setDrawer] = useState({ open:false, nodeId:null });
+  const [pub, setPub] = useState(false);
+  const addNode = (name) => {
+    if (lfRef.current) {
+      lfRef.current.addNode({ type:'rect', x: 380 + Math.round(Math.random()*80), y: 120 + Math.round(Math.random()*300), text: name });
+      message.info(`已添加节点「${name}」（原型演示，连线在真实工程中拖拽完成）`);
+    }
+  };
+  return (
+    <Shell active="canvas">
+      <Alert className="xj-proto-banner" type="info" showIcon
+        message="静态原型：点击画布节点 → 属性抽屉；点击左侧面板项 → 添加节点；右上「发布」→ 校验流程。数据为 mock。"/>
+      <div className="xj-toolbar">
+        <Typography.Title level={5} style={{margin:0}}>SDLC-全流程编排 <Tag>v6（草稿）</Tag></Typography.Title>
+        <span style={{flex:1}}/>
+        <Button onClick={() => message.success('草稿已保存（原型演示）')}>保存草稿</Button>
+        <Button type="primary" onClick={() => setPub(true)}>发布</Button>
+      </div>
+      <div style={{display:'flex', gap:12}}>
+        <div style={{width:230, flexShrink:0}}>
+          <Collapse defaultActiveKey={['builtin','agent','conn']} size="small"
+            items={PANEL.map(g => ({ key:g.key,
+              label: g.builtin
+                ? <Space size={6}>{g.header}<Tag color="orange" style={{marginInlineEnd:0, fontSize:11, lineHeight:'18px'}}>内置 · 不可删除</Tag></Space>
+                : g.header,
+              children: g.items.map(it => {
+                const name = typeof it === 'string' ? it : it.name;
+                const BIcon = g.builtin ? BUILTIN_ICONS[it.icon] : null;
+                return (
+                  <div key={name} className="xj-panel-item"
+                    onClick={() => g.builtin
+                      ? message.info(`「${name}」为平台内置节点，画布固定存在，无需手动添加（原型演示）`)
+                      : addNode(name)}>
+                    {BIcon
+                      ? <Space size={6}><BIcon style={{color:it.color, fontSize:15}}/><span>{name}</span></Space>
+                      : <span>＋ {name}</span>}
+                  </div>
+                );
+              }) }))}/>
+        </div>
+        <div style={{flex:1}}>
+          <Canvas lfRef={lfRef} onNodeClick={(id) => setDrawer({ open:true, nodeId:id })}/>
+        </div>
+      </div>
+      <PropDrawer open={drawer.open} nodeId={drawer.nodeId} onClose={() => setDrawer({ open:false, nodeId:null })}/>
+      <PublishModal open={pub} onClose={() => setPub(false)}/>
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

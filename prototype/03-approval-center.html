@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 决策工作区</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="common.css">
+<style>
+  .art-frame { border: 2px dashed #d9d9d9; border-radius: 10px; padding: 20px; background: #fff; position: relative; }
+  .art-frame .art-label { position: absolute; top: -12px; left: 16px; background: #fff; padding: 0 8px; font-size: 12px; color: #8c8c8c; }
+  .region { position: relative; border-radius: 6px; transition: all .15s; }
+  .region.annotate { cursor: copy; border: 1px dashed #fa8c16; padding: 6px; margin: 2px 0; }
+  .region.annotate:hover { background: #fff7e6; }
+  .pin { position: absolute; top: -8px; right: -8px; z-index: 5; }
+  .edit-hint { border-bottom: 1px dashed #1677ff; cursor: text; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect } = React;
+const { Layout, Menu, Button, Tag, message, Alert, Card, Space, Typography, Input,
+        Tabs, Badge, Modal, Table, Radio, Empty, Timeline, Spin, Select } = antd;
+const { Sider, Header, Content } = Layout;
+
+/* ---------- 共享外壳 ---------- */
+const MENU = [
+  ['ws','工作区','00-workspace.html'],
+  ['canvas','画布编辑器','01-canvas-editor.html'], ['run','运行监控','02-run-monitor.html'],
+  ['approval','决策工作区','03-approval-center.html'], ['publish','发布中心','04-publish-center.html'],
+  ['agent','Agent 管理台','05-agent-admin.html'], ['app','应用管理','06-app-admin.html'],
+  ['report','报表中心','07-report-dashboard.html'], ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>决策工作区 <Tag color="blue">静态原型</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>批注意见 → Agent 重生成 → 再审批（循环直至通过）｜ 也可从工作区对话内决策</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+
+/* ---------- mock：待办（来自各工作区的决策请求） ---------- */
+const TODOS = [
+  { id:'t1', kind:'ARTIFACT', ws:'ws_1（订单系统 · SDLC）', run:'r_9f2c', node:'需求设计评审',
+    title:'订单管理页 · UI 需求稿 v1', by:'agent:requirement-writer@2', wait:'25m', next:'原型设计评审',
+    desc:'Agent 已产出 UI 需求稿。请批注意见——批注将驱动 Agent 重生成下一版，循环直至你审批通过；也可编辑模式直接修改。' },
+  { id:'t2', kind:'TOOL', ws:'ws_1（订单系统 · SDLC）', run:'r_9f2c', node:'架构选型评审',
+    title:'Agent 请求调用 connector.jira.delete-issue', by:'agent:arch-review@3', wait:'18m',
+    desc:'未命中绑定授权的自动放行规则，转人工逐次授权（AgentScope 权限系统回调）' },
+  { id:'t3', kind:'ARTIFACT', ws:'ws_2（主数据治理）', run:'r_9c11', node:'治理方案决策',
+    title:'数据治理方案 v1（清理重复数据）', by:'workflow:data-governance@1', wait:'1d 3h', next:'修复执行',
+    desc:'清理 12,408 条重复记录，影响 3 张表。可批注调整范围后要求重生成，或直接放行。' },
+];
+
+/* ---------- 产物 mock：Agent 生成的 UI 需求稿（可批注区域 + 可编辑文本） ---------- */
+const INIT_ART = { title:'订单管理', subtitle:'展示近 30 天订单，支持按状态与关键字筛选', btn:'查 询', colAct:'操作' };
+
+/* 可批注区域容器（applied = 该区域批注已落实到当前版本） */
+function Region({ id, name, mode, anns, applied, onAnnotate, children }) {
+  const mine = anns.filter(a => a.region === id && !a.resolved);
+  return (
+    <div className={'region' + (mode === 'annotate' ? ' annotate' : '')}
+      onClick={() => mode === 'annotate' && onAnnotate({ id, name })}>
+      {applied && <Tag color="green" style={{position:'absolute', top:-12, right:0, zIndex:5, fontSize:10, lineHeight:'16px'}}>已按批注调整</Tag>}
+      {mine.map(a => <span key={a.id} className="pin"><Badge size="small" count={a.id} color="#fa8c16"/></span>)}
+      {children}
+    </div>
+  );
+}
+/* 可编辑文本 */
+function Editable({ value, active, onSave, style }) {
+  const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  if (!active) return <span className="edit-hint" style={style}>{value}</span>;
+  return <Input size="small" value={v} onChange={e => setV(e.target.value)} autoFocus
+    onBlur={() => v !== value && onSave(value, v)} onPressEnter={() => v !== value && onSave(value, v)}
+    style={{width:'100%'}}/>;
+}
+
+/* ---------- 产物审阅工作区（批注 → 重生成 → 再审批 循环） ---------- */
+function Workspace({ todo, onDone }) {
+  const [mode, setMode] = useState('view');            // view | annotate | edit
+  const [version, setVersion] = useState(1);
+  const [art, setArt] = useState({...INIT_ART});
+  const [anns, setAnns] = useState([]);                // {id, region, regionName, text, resolved}
+  const [edits, setEdits] = useState([]);              // {id, field, before, after}
+  const [rounds, setRounds] = useState([]);            // [{from, n, to}]
+  const [regen, setRegen] = useState(false);
+  const [result, setResult] = useState(null);
+  const [annTarget, setAnnTarget] = useState(null);    // {id, name}
+  const [annText, setAnnText] = useState('');
+
+  const unresolved = anns.filter(a => !a.resolved);
+  const appliedRegions = [...new Set(anns.filter(a => a.resolved).map(a => a.region))];
+
+  const saveEdit = (field, before, after) => {
+    setArt(a => ({...a, [field]: after}));
+    setEdits(es => [...es, { id:es.length+1, field, before, after }]);
+    message.success('已修改，将合并进下一版本');
+  };
+  const addAnn = () => {
+    if (!annText.trim() || !annTarget) return;
+    setAnns(a => [...a, { id:a.length+1, region:annTarget.id, regionName:annTarget.name, text:annText, resolved:false }]);
+    setAnnText(''); setAnnTarget(null);
+  };
+  /* 主循环：提交批注 → Agent 重生成新版本 → 再审批 */
+  const submitRegen = () => {
+    const n = unresolved.length;
+    if (!n) return;
+    setRegen(true);
+    setTimeout(() => {
+      setRegen(false);
+      const to = version + 1;
+      setRounds(r => [...r, { from:'v'+version, n, to:'v'+to }]);
+      setAnns(a => a.map(x => ({...x, resolved:true})));   // 批注已落实到新版本
+      setVersion(to);
+      message.success(`Agent 已按 ${n} 条批注重生成 v${to}，请继续审阅`);
+    }, 1600);
+  };
+  const decide = dec => {
+    if (dec === 'APPROVE') {
+      setResult({ type:'success',
+        text:`产物 v${version} 审批通过（${rounds.length} 轮批注重生成 + ${edits.length} 处直接修改）→ 最终版本与批注历史写回 run 上下文 → 下一节点「${todo.next}」输入已更新，run ${todo.run} 恢复 RUNNING。决策只是下一步的前提。` });
+    } else {
+      setResult({ type:'error', text:`已驳回：run ${todo.run} 按定义配置的驳回路径处理（回退/终止）。` });
+    }
+    onDone(todo.id);
+  };
+
+  const v2Subtitle = appliedRegions.includes('title') ? '展示近 30 天订单，支持按状态、下单渠道与关键字筛选' : art.subtitle;
+
+  return (
+    <div>
+      <Space direction="vertical" size={10} style={{width:'100%'}}>
+        <Space wrap>
+          <Typography.Title level={5} style={{margin:0}}>{todo.title}</Typography.Title>
+          <Tag color="geekblue">来自工作区 {todo.ws}</Tag>
+          <Tag className="xj-mono">run {todo.run}</Tag><Tag className="xj-mono">{todo.by}</Tag>
+          <Tag color="orange">等待 {todo.wait}</Tag>
+          <span style={{flex:1}}/>
+          <Radio.Group value={mode} onChange={e => setMode(e.target.value)} buttonStyle="solid" size="small">
+            <Radio.Button value="view">查看</Radio.Button>
+            <Radio.Button value="annotate">批注模式</Radio.Button>
+            <Radio.Button value="edit">编辑模式</Radio.Button>
+          </Radio.Group>
+        </Space>
+        <Alert type="info" showIcon
+          message={<span><b>{todo.desc}</b>　评审循环：<b>批注意见 → Agent 按批注重生成新版本 → 再审批</b>（可多轮）；通过后最终版本 + 批注历史写回 run 上下文，流向下游节点。</span>}/>
+        {result && <Alert type={result.type} showIcon message={result.text}
+          action={<Button size="small" onClick={() => { setResult(null); setAnns([]); setEdits([]); setRounds([]); setArt({...INIT_ART}); setVersion(1); setMode('view'); }}>重置演示</Button>}/>}
+
+        <div style={{display:'flex', gap:12, alignItems:'flex-start'}}>
+          {/* 产物画布 */}
+          <div className="art-frame" style={{flex:1}}>
+            <span className="art-label">Agent 产物 · UI 需求稿 {result && result.type === 'success' ? `v${version}（已写回 run 上下文）` : `v${version}`}（{mode === 'annotate' ? '点击橙色区域添加批注' : mode === 'edit' ? '点击虚线文本直接修改' : '切换上方模式进行批注/修改'}）</span>
+            {regen && <div style={{position:'absolute', inset:0, zIndex:10, background:'rgba(255,255,255,.88)',
+              display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', borderRadius:10}}>
+              <Spin/><div style={{marginTop:10, color:'#555'}}>Agent 正在按 {unresolved.length} 条批注重生成 v{version + 1}…</div>
+            </div>}
+            <Region id="title" name="页面标题区" mode={mode} anns={anns} applied={appliedRegions.includes('title')} onAnnotate={setAnnTarget}>
+              <Editable value={art.title} active={mode === 'edit'} onSave={(b,a) => saveEdit('title', b, a)}
+                style={{fontSize:20, fontWeight:700}}/>
+              <div style={{marginTop:4}}>
+                <Editable value={v2Subtitle} active={mode === 'edit'} onSave={(b,a) => saveEdit('subtitle', b, a)}
+                  style={{fontSize:12, color:'#888'}}/>
+              </div>
+            </Region>
+            <Region id="filter" name="筛选条件区" mode={mode} anns={anns} applied={appliedRegions.includes('filter')} onAnnotate={setAnnTarget}>
+              <Space style={{margin:'12px 0'}} wrap>
+                <Input size="small" style={{width:130}} placeholder="订单状态" disabled={mode !== 'edit'}/>
+                {appliedRegions.includes('filter') && <Select size="small" style={{width:110}} placeholder="下单渠道" disabled/>}
+                <Input size="small" style={{width:170}} placeholder="客户 / 订单号" disabled={mode !== 'edit'}/>
+                <Editable value={art.btn} active={mode === 'edit'} onSave={(b,a) => saveEdit('btn', b, a)}/>
+              </Space>
+            </Region>
+            <Region id="table" name="订单列表区" mode={mode} anns={anns} applied={appliedRegions.includes('table')} onAnnotate={setAnnTarget}>
+              <Table size="small" pagination={false} rowKey="no"
+                columns={[
+                  { title:'订单号', dataIndex:'no', className:'xj-mono' },
+                  { title:'客户', dataIndex:'cust' },
+                  { title:'金额', dataIndex:'amt', sorter:false },
+                  { title:'状态', dataIndex:'st', render:v => <Tag color={v === '已支付' ? 'green' : 'orange'}>{v}</Tag> },
+                  { title:'下单时间', dataIndex:'time', className:'xj-mono' },
+                  { title:<Editable value={art.colAct} active={mode === 'edit'} onSave={(b,a) => saveEdit('colAct', b, a)}/>,
+                    dataIndex:'act',
+                    render:() => <Region id="actions" name="行操作列" mode={mode} anns={anns} applied={appliedRegions.includes('actions')} onAnnotate={setAnnTarget}>
+                      <Space><a>详情</a><a>取消订单</a></Space></Region> },
+                ]}
+                dataSource={[
+                  { no:'SO-20261008-001', cust:'华东经销商 A', amt:'¥12,800', st:'已支付', time:'10-08 09:12' },
+                  { no:'SO-20261008-002', cust:'华南零售 B',   amt:'¥3,450',  st:'待支付', time:'10-08 09:05' },
+                  { no:'SO-20261007-088', cust:'华北直销 C',   amt:'¥56,200', st:'已支付', time:'10-07 17:40' },
+                ]}/>
+            </Region>
+          </div>
+          {/* 批注 / 修改 / 轮次 */}
+          <Card size="small" style={{width:300}}
+            title="批注与修改" extra={<Tag>{unresolved.length} 待落实 / {edits.length} 修改</Tag>}>
+            {rounds.length > 0 && <Timeline style={{margin:'0 0 10px 6px'}}
+              items={[...rounds.map((r, i) => ({ color:'green',
+                  children:<span style={{fontSize:12}}>第 {i+1} 轮：{r.from} 批注 {r.n} 条 → 重生成 {r.to}</span> })),
+                { color:'blue', children:<span style={{fontSize:12}}>v{version} 审批中</span> }]}/>}
+            <Tabs size="small" items={[
+              { key:'a', label:`批注 ${anns.length}`,
+                content: anns.length === 0 ? <Empty description="批注模式下点击产物区域" image={Empty.PRESENTED_IMAGE_SIMPLE}/>
+                  : <div style={{maxHeight:220, overflowY:'auto'}}>
+                    {anns.map(a => <div key={a.id} style={{borderBottom:'1px solid #f0f0f0', padding:'6px 0', fontSize:12}}>
+                      <Tag color={a.resolved ? 'green' : 'orange'}>{a.regionName}{a.resolved ? ' · 已落实' : ''}</Tag>
+                      <div style={{marginTop:2}}>{a.text}</div></div>)}</div> },
+              { key:'e', label:`修改 ${edits.length}`,
+                content: edits.length === 0 ? <Empty description="编辑模式下点击虚线文本" image={Empty.PRESENTED_IMAGE_SIMPLE}/>
+                  : <div style={{maxHeight:220, overflowY:'auto'}}>
+                    {edits.map(e => <div key={e.id} style={{borderBottom:'1px solid #f0f0f0', padding:'6px 0', fontSize:12}}>
+                      <Tag>{e.field}</Tag>
+                      <div><span style={{color:'#999', textDecoration:'line-through'}}>{e.before}</span> → <b>{e.after}</b></div></div>)}</div> },
+            ]}/>
+          </Card>
+        </div>
+
+        {/* 决策栏 */}
+        <Card size="small">
+          <Space wrap>
+            <span style={{fontSize:13, color:'#666'}}>评审循环（决策只是下一步的前提）：</span>
+            <Button type="primary" loading={regen} disabled={unresolved.length === 0 || !!result}
+              onClick={submitRegen}>提交批注，要求重生成（{unresolved.length}）</Button>
+            <Button type={unresolved.length === 0 ? 'default' : 'primary'} disabled={!!result || regen}
+              onClick={() => decide('APPROVE')}>通过 — 产物 v{version} 流向「{todo.next}」</Button>
+            <Button danger disabled={!!result || regen} onClick={() => decide('REJECT')}>驳回 — 终止/回退</Button>
+          </Space>
+        </Card>
+      </Space>
+
+      {/* 批注输入 */}
+      <Modal title={`添加批注 · ${annTarget ? annTarget.name : ''}`} open={!!annTarget} onOk={addAnn}
+        onCancel={() => setAnnTarget(null)} okText="添加批注" cancelText="取消">
+        <Input.TextArea rows={3} value={annText} onChange={e => setAnnText(e.target.value)}
+          placeholder="例如：筛选区增加「下单渠道」下拉；列表默认按金额降序…"/>
+      </Modal>
+    </div>
+  );
+}
+
+/* ---------- 工具审批（简单表单决策，与产物审阅对比） ---------- */
+function ToolApproval({ todo, onDone }) {
+  const [dec, setDec] = useState('APPROVE');
+  return (
+    <Card size="small" style={{maxWidth:640}}>
+      <Alert type="info" showIcon style={{marginBottom:12}} message={todo.desc}/>
+      <Typography.Paragraph><Tag color="geekblue">{todo.ws}</Tag>
+        <Tag className="xj-mono">run {todo.run}</Tag><Tag className="xj-mono">{todo.by}</Tag>
+        <Tag color="orange">等待 {todo.wait}</Tag></Typography.Paragraph>
+      <Radio.Group value={dec} onChange={e => setDec(e.target.value)}>
+        <Space direction="vertical">
+          <Radio value="APPROVE">放行本次工具调用</Radio>
+          <Radio value="DENY">拒绝本次调用（Agent 收到拒绝结果继续推理）</Radio>
+        </Space>
+      </Radio.Group>
+      <div style={{marginTop:16}}>
+        <Button type="primary" onClick={() => { message.success('已决策，Agent 继续推理循环（原型演示）'); onDone(todo.id); }}>提交决策</Button>
+      </div>
+    </Card>
+  );
+}
+
+/* ---------- 主页面 ---------- */
+function App() {
+  const [todos, setTodos] = useState(TODOS);
+  const [sel, setSel] = useState('t1');
+  const todo = todos.find(t => t.id === sel);
+  return (
+    <Shell active="approval">
+      <div style={{display:'flex', gap:12, alignItems:'flex-start'}}>
+        <Card size="small" style={{width:250, flexShrink:0}} title={`待办 ${todos.length}`}>
+          {todos.length === 0 ? <Empty description="全部已决策" image={Empty.PRESENTED_IMAGE_SIMPLE}/> :
+            todos.map(t => (
+              <div key={t.id} className="xj-panel-item" onClick={() => setSel(t.id)}
+                style={{borderColor: sel === t.id ? '#1677ff' : undefined, background: sel === t.id ? '#e6f4ff' : undefined}}>
+                <div style={{fontWeight:600, fontSize:13}}>{t.title}</div>
+                <div style={{fontSize:12, color:'#888', marginTop:2}}>
+                  <Tag color={t.kind === 'ARTIFACT' ? 'purple' : 'cyan'} style={{marginRight:4}}>
+                    {t.kind === 'ARTIFACT' ? '产物审阅' : '工具审批'}</Tag>{t.node} · {t.wait}
+                </div>
+                <div style={{fontSize:11, color:'#aaa', marginTop:2}}>{t.ws}</div>
+              </div>))}
+        </Card>
+        <div style={{flex:1}}>
+          {!todo ? <Empty description="请选择待办"/> :
+            todo.kind === 'ARTIFACT' ? <Workspace todo={todo} onDone={id => setTodos(ts => ts.filter(t => t.id !== id))}/>
+              : <ToolApproval todo={todo} onDone={id => setTodos(ts => ts.filter(t => t.id !== id))}/>}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 工作区</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="common.css">
+<style>
+  .chat-box { flex:1; overflow-y:auto; padding:16px 20px; background:#f7f8fa; }
+  .msg { margin-bottom:14px; display:flex; }
+  .msg .bubble { max-width:78%; border-radius:10px; padding:10px 14px; font-size:13px; line-height:1.7; }
+  .msg.user { justify-content:flex-end; }
+  .msg.user .bubble { background:#1677ff; color:#fff; border-bottom-right-radius:2px; }
+  .msg.agent .bubble { background:#fff; border:1px solid #e8e8e8; border-bottom-left-radius:2px; }
+  .msg.system { justify-content:center; }
+  .msg.system .bubble { background:transparent; color:#999; font-size:12px; padding:2px 8px; }
+  .ws-item { border:1px solid #e8e8e8; border-radius:8px; padding:10px 12px; margin-bottom:10px; cursor:pointer; transition:all .15s; background:#fff; }
+  .ws-item:hover { border-color:#1677ff; }
+  .ws-item.active { border-color:#1677ff; background:#e6f4ff; }
+  .dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:6px; vertical-align:2px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect, useRef } = React;
+const { Layout, Menu, Button, Tag, message, Alert, Card, Space, Typography, Input,
+        Drawer, Table, Spin, Modal, Segmented, Upload } = antd;
+const { Sider, Header, Content } = Layout;
+
+/* ---------- 共享外壳 ---------- */
+const MENU = [
+  ['ws','工作区','00-workspace.html'],
+  ['canvas','画布编辑器','01-canvas-editor.html'], ['run','运行监控','02-run-monitor.html'],
+  ['approval','决策工作区','03-approval-center.html'], ['publish','发布中心','04-publish-center.html'],
+  ['agent','Agent 管理台','05-agent-admin.html'], ['app','应用管理','06-app-admin.html'],
+  ['report','报表中心','07-report-dashboard.html'], ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>工作区 <Tag color="blue">静态原型</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>工作区路径 = 系统配置根目录/项目名 ｜ 绑定 Agent / 工作流（二选一·版本钉住）｜ 输入触发流程 · 运行中随时接入 ｜ Agent 决策授权在绑定时完成</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+
+/* ---------- mock：工作区（系统配置根目录 + 项目名 → 动态生成工作区路径） ---------- */
+const WS_ROOT = 'D:\\xuanji\\workspaces';   // 系统设置 → 存储配置中设定的根目录（平台级）
+const WS_LIST = [
+  { id:'ws_1', name:'order-sys', title:'订单系统 · SDLC', binding:{ type:'workflow', ref:'workflow:sdlc-standard@v3' },
+    run:null, status:'IDLE', agents:3 },
+  { id:'ws_2', name:'mdm-governance', title:'主数据治理', binding:{ type:'workflow', ref:'workflow:data-governance@v1' },
+    run:'r_9c11', status:'SUSPENDED', agents:2 },
+  { id:'ws_3', name:'code-review', title:'代码评审', binding:{ type:'agent', ref:'agent:code-reviewer@3' },
+    run:null, status:'IDLE', agents:1 },
+];
+/* Q11：工作区仅能绑定 agent 或 workflow（二选一，版本钉住，如 agent:code-reviewer@3 / workflow:sdlc-standard@v3） */
+const AGENTS = [
+  { ref:'agent:requirement-writer@2', desc:'需求撰写 · 生成 UI 需求稿 / PRD' },
+  { ref:'agent:prototype-reviewer@1', desc:'原型评审 · Figma 原型走查与意见' },
+  { ref:'agent:dev-codegen@3', desc:'开发代码生成 · 按详设生成代码' },
+  { ref:'agent:code-reviewer@3', desc:'代码评审 · PR 评审与风险扫描' },
+];
+const WORKFLOWS = [
+  { ref:'workflow:sdlc-standard@v3', desc:'SDLC 标准流程 · 需求→设计→开发→测试→部署 7 阶段' },
+  { ref:'workflow:data-governance@v1', desc:'主数据治理 · 探查→诊断→治理决策→修复' },
+  { ref:'workflow:weekly-report@v2', desc:'周报生成 · 数据源→Agent 分析→看板渲染' },
+];
+const bindLabel = b => (b.type === 'agent' ? '🤖 ' : '📋 ') + b.ref;
+const wsPath = w => WS_ROOT + '\\' + w.name;   // 工作区路径 = 根目录 + 项目名（动态生成，用户不手填路径）
+/* 绑定时一次性完成的 Agent 决策授权 */
+const AUTH = [
+  { agent:'agent:requirement-writer@2', auto:'ops.read.* · confluence.page.create', need:'产物需人工审批（决策门 WORKSPACE）' },
+  { agent:'agent:prototype-reviewer@1', auto:'ops.read.*', need:'figma.export 逐次授权' },
+  { agent:'agent:dev-codegen@3', auto:'git.write.* · ci.trigger.*', need:'产物自动过（仅审计）' },
+];
+
+/* ---------- 对话消息渲染 ---------- */
+function Msg({ m, onTool, dec, onDecAnn, onDecRegen, onDecApprove }) {
+  if (m.type === 'system')
+    return <div className="msg system"><div className="bubble">{m.text}</div></div>;
+  if (m.type === 'user')
+    return (
+      <div className="msg user">
+        {m.inject && <Tag color="orange" style={{alignSelf:'center', marginRight:8, fontSize:11}}>运行中接入 · 已注入当前阶段</Tag>}
+        <div className="bubble">
+          {m.atts && m.atts.length > 0 && <div style={{marginBottom:4}}>
+            {m.atts.map((a, i) => <Tag key={i} style={{fontSize:11, marginRight:4}}>{a.kind === 'image' ? '🖼' : '📄'} {a.name}</Tag>)}
+          </div>}
+          {m.text}</div>
+      </div>);
+  if (m.type === 'agent')
+    return <div className="msg agent"><div className="bubble">
+      <Tag className="xj-mono" style={{marginRight:6}}>{m.agent}</Tag>{m.text}</div></div>;
+  if (m.type === 'stage')
+    return <div className="msg agent"><div className="bubble">
+      <b>{m.n}</b> <Tag className="xj-mono">{m.agent}</Tag>
+      <div style={{marginTop:4}}>{m.body}{m.streaming && <Spin size="small" style={{marginLeft:8}}/>}</div></div></div>;
+  if (m.type === 'tool' && m.policy === 'auto')
+    return <div className="msg agent"><div className="bubble" style={{background:'#f6ffed', borderColor:'#b7eb8f'}}>
+      🔧 <code>{m.tool}</code> <Tag color="green">已自动放行</Tag>
+      <div style={{fontSize:12, color:'#888', marginTop:2}}>授权策略：{m.note}（绑定时已授权，无需人工）</div></div></div>;
+  if (m.type === 'tool')
+    return <div className="msg agent"><div className="bubble" style={{background:'#fff7e6', borderColor:'#ffd591'}}>
+      🔧 <code>{m.tool}</code>{m.phase === 'pending' && <Tag color="orange">待授权</Tag>}
+      {m.phase === 'approved' && <Tag color="green">已放行（人工授权）</Tag>}
+      {m.phase === 'denied' && <Tag color="red">已拒绝</Tag>}
+      <div style={{fontSize:12, color:'#888', marginTop:2}}>授权策略：逐次授权（绑定时配置）</div>
+      {m.phase === 'pending' && <Space style={{marginTop:8}}>
+        <Button size="small" type="primary" onClick={() => onTool('approved')}>放行本次调用</Button>
+        <Button size="small" danger onClick={() => onTool('denied')}>拒绝</Button>
+      </Space>}</div></div>;
+  if (m.type === 'artifact')
+    return <div className="msg agent"><div className="bubble" style={{background:'#f9f0ff', borderColor:'#d3adf7'}}>
+      📄 产物：<b>{m.name}</b> <Tag color="purple">{m.ver}</Tag>
+      {m.note && <div style={{fontSize:12, color:'#888', marginTop:2}}>{m.note}</div>}
+      <div style={{marginTop:6}}><a href="03-approval-center.html" target="_blank">打开完整审阅（批注/修改）→</a></div></div></div>;
+  if (m.type === 'decision')
+    return <div className="msg agent"><div className="bubble" style={{border:'1px solid #1677ff', background:'#fff'}}>
+      ⚡ <b>决策请求 · {m.title}</b> <Tag color="orange">第 {m.round} 轮审批</Tag>
+      <div style={{fontSize:12, color:'#888', margin:'4px 0'}}>授权策略：{m.policy}</div>
+      {dec.phase === 'pending' && <div>
+        <Input.TextArea rows={2} value={dec.text} onChange={e => onDecAnn(e.target.value)}
+          placeholder="批注意见（将驱动 Agent 重生成下一版）：例如筛选区增加「下单渠道」…"/>
+        <Space style={{marginTop:8}}>
+          <Button size="small" disabled={!dec.text.trim()} onClick={onDecRegen}>提交批注，要求重生成</Button>
+          <Button size="small" type="primary" onClick={onDecApprove}>通过，进入下一阶段</Button>
+          <a href="03-approval-center.html" target="_blank" style={{fontSize:12}}>完整审阅 →</a>
+        </Space></div>}
+      {dec.phase === 'regen' && <div style={{padding:'8px 0'}}>
+        <Spin size="small"/> <span style={{marginLeft:8}}>Agent 正在按批注重生成 v{m.round + 1}…</span></div>}
+      {dec.phase === 'done' && <Tag color="green">已通过 · 产物写回 run 上下文</Tag>}
+    </div></div>;
+  return null;
+}
+
+/* ---------- 嵌入分享（工作区 → 第三方系统嵌入消费） ---------- */
+function ShareModal({ ws, open, onClose }) {
+  const url = `https://xuanji.example.com/embed/ws/${ws.id}?k=ak_live_7f3e9c21b8d4`;
+  const iframe = `<iframe src="${url}" width="480" height="720" frameborder="0" loading="lazy"></iframe>`;
+  const widget = `<script src="https://xuanji.example.com/widget.js" data-workspace="${ws.id}" data-key="ak_live_7f3e9c21b8d4" defer><\/script>`;
+  return (
+    <Modal title={`嵌入分享 · ${ws.title}`} open={open} onCancel={onClose} footer={null} width={640}>
+      <Alert type="info" showIcon style={{marginBottom:12}}
+        message="嵌入消费走统一 API 入口 + AppKey（纯 key · Bearer + HTTPS + 限流）：对话式工作区可经 Chat Widget 或 iframe 嵌入第三方系统，SSE 阶段事件流透传，Agent 决策授权沿用绑定配置。"/>
+      <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>分享链接（只读对话视图）</Typography.Paragraph>
+      <Typography.Paragraph copyable className="xj-mono" style={{fontSize:12}}>{url}</Typography.Paragraph>
+      <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>iframe 嵌入代码</Typography.Paragraph>
+      <Typography.Paragraph copyable={{ text: iframe }} className="xj-mono"
+        style={{fontSize:12, background:'#fafafa', border:'1px solid #f0f0f0', borderRadius:6, padding:8, whiteSpace:'pre-wrap', wordBreak:'break-all'}}>{iframe}</Typography.Paragraph>
+      <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:4}}>Chat Widget 脚本（对话气泡挂件）</Typography.Paragraph>
+      <Typography.Paragraph copyable={{ text: widget }} className="xj-mono"
+        style={{fontSize:12, background:'#fafafa', border:'1px solid #f0f0f0', borderRadius:6, padding:8, whiteSpace:'pre-wrap', wordBreak:'break-all'}}>{widget}</Typography.Paragraph>
+      <Typography.Text type="secondary" style={{fontSize:12}}>AppKey 在应用管理台创建与轮换；嵌入地址绑定当前工作流已发布版本（版本钉住）。</Typography.Text>
+    </Modal>
+  );
+}
+
+/* ---------- 工作区对话（ws_1 完整演示） ---------- */
+function WorkspaceChat({ ws, onPatch }) {
+  const [msgs, setMsgs] = useState([]);
+  const [dec, setDec] = useState({ round:1, text:'', phase:'pending' });
+  const [tool, setTool] = useState({ phase:'pending' });
+  const [input, setInput] = useState('');
+  const [atts, setAtts] = useState([]);        // Q11：待发送附件（先上传工作区目录，再以相对路径引用）
+  const [runId, setRunId] = useState(ws.run);  // null = 无运行（IDLE）：只有输入内容才触发流程
+  const [drawer, setDrawer] = useState(false);
+  const [share, setShare] = useState(false);
+  const [draftType, setDraftType] = useState(ws.binding.type);  // 绑定抽屉草稿：agent / workflow 二选一
+  const [draftRef, setDraftRef] = useState(ws.binding.ref);
+  const boxRef = useRef(null);
+  const idRef = useRef(0);
+  const imgSeq = useRef(0);
+  const timersRef = useRef([]);
+  const nextId = () => ++idRef.current;
+  const push = m => setMsgs(x => [...x, { id:nextId(), ...m }]);
+
+  useEffect(() => () => timersRef.current.forEach(clearTimeout), []);
+
+  useEffect(() => { boxRef.current && (boxRef.current.scrollTop = boxRef.current.scrollHeight); }, [msgs, dec]);
+
+  /* 决策交互：批注 → 重生成 → 再审批（循环）；通过 → 下一阶段 */
+  const onDecRegen = () => {
+    const n = dec.text.trim();
+    push({ type:'user', text:`【批注】${n}` });
+    push({ type:'agent', agent:'agent:requirement-writer@2', text:`已收到批注意见，正在按批注重生成 v${dec.round + 1}…` });
+    setDec(d => ({ ...d, phase:'regen' }));
+    setTimeout(() => {
+      push({ type:'artifact', name:'订单管理页 · UI 需求稿', ver:`v${dec.round + 1}`,
+        note:'已按批注调整：筛选区增加「下单渠道」、列表默认按金额降序' });
+      push({ type:'decision', title:`UI 需求稿 v${dec.round + 1}`, round:dec.round + 1,
+        policy:'产物需人工审批（requirement-writer，绑定时授权）' });
+      setDec({ round:dec.round + 1, text:'', phase:'pending' });
+    }, 1600);
+  };
+  const onDecApprove = () => {
+    push({ type:'user', text:'通过，进入下一阶段' });
+    push({ type:'system', text:`决策通过：产物 v${dec.round} 与批注历史写回 run 上下文 → 阶段 ① 完成` });
+    setDec(d => ({ ...d, phase:'done' }));
+    setTimeout(() => {
+      push({ type:'stage', n:'阶段 ② 原型设计评审', agent:'agent:prototype-reviewer@1', body:'开始原型评审，需要导出 Figma 原型…' });
+      push({ type:'tool', tool:'figma.export', phase:'pending' });
+    }, 900);
+  };
+  const onTool = phase => {
+    setTool({ phase });
+    if (phase === 'approved') {
+      push({ type:'system', text:'已放行（人工授权）→ 阶段 ② 继续执行' });
+      setTimeout(() => {
+        push({ type:'stage', n:'阶段 ② 原型设计评审', agent:'agent:prototype-reviewer@1', body:'原型评审完成，产物「原型评审意见 v1」已生成。后续阶段依次推进（原型演示到此）。' });
+      }, 900);
+    } else {
+      push({ type:'agent', agent:'agent:prototype-reviewer@1', text:'收到拒绝结果，调整方案：改用本地原型导出后继续评审。' });
+    }
+  };
+  /* Q9：只有输入内容才触发流程——CHAT_INPUT 触发，输入内容 = 开始节点流程输入 */
+  const startRun = (text, myAtts) => {
+    const rid = 'r_' + Math.random().toString(16).slice(2, 6);
+    setRunId(rid);
+    onPatch({ status:'RUNNING', run:rid });
+    push({ type:'user', text:text || '（提交附件）', atts:myAtts.length ? myAtts : undefined });
+    push({ type:'system', text:'流程已由输入触发 (CHAT_INPUT) · 输入内容 = 开始节点流程输入' });
+    push({ type:'system', text:`run ${rid} 启动 · ${ws.binding.ref} · SSE 通道 /api/workspaces/${ws.id}/stream` });
+    const seq = ws.binding.type === 'agent' ? [
+      () => push({ type:'stage', n:'Agent 执行', agent:ws.binding.ref,
+        body:'正在读取开始节点输入（用户消息与附件）与工作区文件，开始执行…', streaming:true }),
+      () => push({ type:'tool', policy:'auto', tool:'git.read.*', note:'git.read.*' }),
+      () => { setMsgs(x => x.map(m => m.streaming ? {...m, streaming:false} : m));
+        push({ type:'artifact', name:'代码评审报告', ver:'v1',
+          note:'已采纳开始节点输入；产物写回 run 上下文（原型演示到此）' }); },
+    ] : [
+      () => push({ type:'stage', n:'阶段 ① 需求设计', agent:'agent:requirement-writer@2',
+        body:'正在读取工作区路径 D:\\xuanji\\workspaces\\order-sys 与需求输入，开始生成 UI 需求…', streaming:true }),
+      () => push({ type:'tool', policy:'auto', tool:'confluence.page.create', note:'ops.read.* · confluence.*' }),
+      () => { setMsgs(x => x.map(m => m.streaming ? {...m, streaming:false} : m));
+        push({ type:'artifact', name:'订单管理页 · UI 需求稿', ver:'v1',
+          note:'含页面结构、筛选条件、列表字段与操作定义' }); },
+      () => push({ type:'decision', title:'UI 需求稿 v1', round:1,
+        policy:'产物需人工审批（requirement-writer，绑定时授权）' }),
+    ];
+    timersRef.current = seq.map((fn, i) => setTimeout(fn, 600 + i * 900));
+  };
+
+  /* Q9：运行中随时接入——追加指令/附件经 RunInputPort 注入 run，当前执行节点采纳 */
+  const send = () => {
+    const text = input.trim();
+    if (!text && atts.length === 0) return;
+    const myAtts = atts;
+    setInput(''); setAtts([]);
+    if (!runId) { startRun(text, myAtts); return; }
+    push({ type:'user', text:text || '（提交附件）', atts:myAtts.length ? myAtts : undefined, inject:true });
+    setTimeout(() => push({ type:'agent', agent:ws.binding.type === 'agent' ? ws.binding.ref : 'agent:requirement-writer@2',
+      text:'已通过 RunInputPort 注入当前 run，当前执行节点将在下一步采纳' +
+        (myAtts.length ? '（含附件：' + myAtts.map(a => a.name).join('、') + '）' : '') + '（原型演示）。' }), 700);
+  };
+
+  /* Q11 附件：上传按钮（仅 .md/.png/.jpg，beforeUpload 返回 false 阻止真实上传，mock） */
+  const beforeUpload = file => {
+    if (!/\.(md|png|jpe?g)$/i.test(file.name)) { message.error('仅支持 .md / .png / .jpg 附件'); return false; }
+    setAtts(x => [...x, { name:file.name, kind:/\.(png|jpe?g)$/i.test(file.name) ? 'image' : 'md' }]);
+    message.success('附件已上传工作区目录：' + file.name);
+    return false;
+  };
+
+  /* Q11 附件：Ctrl+V 粘贴图片直传（clipboardData.items 找 image） */
+  const onPaste = e => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    const imgs = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind === 'file' && it.type && it.type.startsWith('image')) imgs.push(it);
+    }
+    if (!imgs.length) return;
+    e.preventDefault();
+    setAtts(x => [...x, ...imgs.map(() => {
+      imgSeq.current += 1;
+      return { name:imgSeq.current === 1 ? '粘贴的图片.png' : '粘贴的图片-' + imgSeq.current + '.png', kind:'image' };
+    })]);
+    message.success(imgs.length > 1 ? '已捕获 ' + imgs.length + ' 张粘贴图片' : '已捕获粘贴图片');
+  };
+
+  /* Q11 绑定：agent / workflow 二选一，保存后钉住已发布版本 */
+  const saveBind = () => {
+    onPatch({ binding:{ type:draftType, ref:draftRef } });
+    message.success('绑定已更新：' + draftRef + '（钉住已发布版本，重新绑定后生效）');
+    setDrawer(false);
+  };
+
+  return (
+    <div style={{display:'flex', flexDirection:'column', height:'100%'}}>
+      <Space style={{marginBottom:10}} wrap>
+        <Typography.Title level={5} style={{margin:0}}>{ws.title}</Typography.Title>
+        {runId && <Tag className="xj-mono">run {runId}</Tag>}
+        <Tag className="xj-mono">{bindLabel(ws.binding)}</Tag>
+        <Tag color={ws.status === 'RUNNING' ? 'green' : ws.status === 'SUSPENDED' ? 'orange' : 'default'}>
+          <span className="dot" style={{background:ws.status === 'RUNNING' ? '#52c41a' : ws.status === 'SUSPENDED' ? '#fa8c16' : '#bbb'}}/>{ws.status}</Tag>
+        <span style={{flex:1}}/>
+        <Button onClick={() => setShare(true)}>嵌入分享</Button>
+        <Button onClick={() => { setDraftType(ws.binding.type); setDraftRef(ws.binding.ref); setDrawer(true); }}>绑定与授权</Button>
+      </Space>
+      <div className="chat-box" ref={boxRef} style={{border:'1px solid #e8e8e8', borderRadius:10}}>
+        {msgs.length === 0 ? (
+          <div style={{minHeight:'100%', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', textAlign:'center'}}>
+            <div style={{fontSize:42, marginBottom:10}}>💬</div>
+            <div style={{fontSize:15, fontWeight:600, color:'#555'}}>
+              {runId ? '运行中的 run 已就绪 · 输入内容随时接入' : '输入内容以启动流程'}</div>
+            <div style={{fontSize:12, color:'#999', marginTop:8, lineHeight:1.9}}>
+              {runId ? '当前 run 由输入触发（CHAT_INPUT）；追加指令 / Ctrl+V 粘贴图片 / 上传 .md 附件，将注入当前 run 由执行节点采纳'
+                : '当前工作区无运行中的 run：只有输入内容才会触发流程（CHAT_INPUT 触发，输入内容 = 开始节点流程输入）'}
+            </div>
+          </div>
+        ) : msgs.map(m => <Msg key={m.id} m={{...m, phase:m.type === 'tool' ? tool.phase : undefined}}
+          dec={dec} onDecAnn={t => setDec(d => ({...d, text:t}))}
+          onDecRegen={onDecRegen} onDecApprove={onDecApprove} onTool={onTool}/>)}
+      </div>
+      {atts.length > 0 && (
+        <div style={{marginTop:8}}>
+          <span style={{fontSize:12, color:'#888'}}>附件（先上传工作区目录，再以相对路径引用）：</span>
+          {atts.map((a, i) => <Tag key={i} className="xj-mono" closable color={a.kind === 'image' ? 'blue' : 'purple'}
+            onClose={() => setAtts(x => x.filter((_, j) => j !== i))}>{a.kind === 'image' ? '🖼' : '📄'} {a.name}</Tag>)}
+        </div>
+      )}
+      <div style={{marginTop:10, display:'flex', gap:8}}>
+        <Upload beforeUpload={beforeUpload} showUploadList={false} accept=".md,.png,.jpg,.jpeg">
+          <Button title="上传附件（仅 .md / .png / .jpg），先上传工作区目录再引用相对路径">📎 附件</Button>
+        </Upload>
+        <Input style={{flex:1}} value={input} onChange={e => setInput(e.target.value)} onPressEnter={send} onPaste={onPaste}
+          placeholder="输入内容启动/推进流程，支持 Ctrl+V 粘贴图片"/>
+        <Button type="primary" onClick={send}>发送</Button>
+      </div>
+
+      {/* 绑定与授权 */}
+      <Drawer title="工作区 · 绑定与授权" width={560} open={drawer} onClose={() => setDrawer(false)}>
+        <Space direction="vertical" size={14} style={{width:'100%'}}>
+          <Card size="small" title="工作区路径（系统配置根目录 + 项目名，动态生成）">
+            <Space direction="vertical" style={{width:'100%'}}>
+              <div><span style={{fontSize:12, color:'#888'}}>系统配置根目录（系统设置 → 存储配置）：</span>
+                <Tag className="xj-mono" color="purple">{WS_ROOT}</Tag></div>
+              <div><span style={{fontSize:12, color:'#888'}}>项目名字：</span>
+                <Input size="small" style={{width:180}} value={ws.name} disabled/>
+                <span style={{fontSize:12, color:'#888', marginLeft:8}}>只需填项目名，路径自动生成</span></div>
+              <div><span style={{fontSize:12, color:'#888'}}>工作区路径（自动生成）：</span>
+                <Tag className="xj-mono" color="blue">{wsPath(ws)}</Tag></div>
+            </Space>
+          </Card>
+          <Card size="small" title="绑定目标（Agent / 工作流 二选一 · 版本钉住）">
+            <div style={{marginBottom:10}}>
+              <span style={{fontSize:12, color:'#888'}}>当前绑定：</span>
+              <Tag className="xj-mono" color={ws.binding.type === 'agent' ? 'cyan' : 'geekblue'}>{bindLabel(ws.binding)}</Tag>
+              <span style={{fontSize:12, color:'#888', marginLeft:8}}>跨资产引用钉住已发布版本，变更绑定保存后生效</span>
+            </div>
+            <Segmented value={draftType} onChange={v => { setDraftType(v); setDraftRef(null); }}
+              options={[{ label:'🤖 绑定 Agent', value:'agent' }, { label:'📋 绑定工作流', value:'workflow' }]}/>
+            <div style={{marginTop:10}}>
+              {(draftType === 'agent' ? AGENTS : WORKFLOWS).map(a => (
+                <div key={a.ref} onClick={() => setDraftRef(a.ref)}
+                  style={{border:'1px solid ' + (draftRef === a.ref ? '#1677ff' : '#e8e8e8'),
+                    background: draftRef === a.ref ? '#e6f4ff' : '#fff', borderRadius:8, padding:'8px 10px', marginBottom:8, cursor:'pointer'}}>
+                  <Tag className="xj-mono">{a.ref}</Tag>
+                  {ws.binding.ref === a.ref && <Tag color="blue">当前绑定</Tag>}
+                  <div style={{fontSize:12, color:'#888', marginTop:2}}>{a.desc}</div>
+                </div>))}
+            </div>
+            <Button size="small" type="primary" disabled={!draftRef || (draftType === ws.binding.type && draftRef === ws.binding.ref)}
+              onClick={saveBind}>保存绑定</Button>
+          </Card>
+          <Card size="small" title="Agent 决策授权（绑定时一次性完成）">
+            <Table size="small" rowKey="agent" pagination={false} dataSource={AUTH}
+              columns={[{ title:'Agent', dataIndex:'agent', className:'xj-mono' },
+                { title:'工具自动放行', dataIndex:'auto', render:v => <Tag color="green">{v}</Tag> },
+                { title:'需人工决策', dataIndex:'need', render:v => <Tag color="orange">{v}</Tag> }]}/>
+          </Card>
+          <Alert type="info" showIcon
+            message="授权在绑定工作区时一次性完成：运行时各 Agent 的决策请求按此策略路由——命中自动放行规则的工具调用直接执行；需人工决策的（产物审批/逐次授权）以决策卡片形式出现在本对话流中，用户在对话内完成批注与决策。变更授权需重新绑定生效。"/>
+        </Space>
+      </Drawer>
+
+      {/* 嵌入分享（第三方系统嵌入消费） */}
+      <ShareModal ws={ws} open={share} onClose={() => setShare(false)}/>
+    </div>
+  );
+}
+
+/* ---------- 主页面 ---------- */
+function App() {
+  const [wsList, setWsList] = useState(WS_LIST);
+  const [sel, setSel] = useState('ws_1');
+  const ws = wsList.find(w => w.id === sel);
+  const onPatch = patch => setWsList(x => x.map(w => w.id === ws.id ? { ...w, ...patch } : w));
+  return (
+    <Shell active="ws">
+      <div style={{display:'flex', gap:12, height:'100%'}}>
+        <div style={{width:250, flexShrink:0}}>
+          <Button type="dashed" block style={{marginBottom:10}}
+            onClick={() => message.info('新建工作区：填项目名（路径自动生成）→ 绑定 Agent/工作流（二选一）→ 配 Agent 授权（原型演示）')}>+ 新建工作区</Button>
+          {wsList.map(w => (
+            <div key={w.id} className={'ws-item' + (sel === w.id ? ' active' : '')} onClick={() => setSel(w.id)}>
+              <div style={{fontWeight:600, fontSize:13}}>{w.title}</div>
+              <div style={{fontSize:12, color:'#888', marginTop:2}}>
+                <span className="dot" style={{background:w.status === 'RUNNING' ? '#52c41a' : w.status === 'SUSPENDED' ? '#fa8c16' : '#bbb'}}/>
+                {w.status}{w.run ? ' · run ' + w.run : ' · 未启动'}</div>
+              <div style={{fontSize:11, color:'#aaa', marginTop:2}}>{wsPath(w)}</div>
+              <div style={{marginTop:4}}><Tag className="xj-mono" style={{fontSize:10}}>{bindLabel(w.binding)}</Tag></div>
+            </div>))}
+          <Alert type="info" showIcon style={{marginTop:6, fontSize:12}}
+            message="工作区 = 项目名（路径 = 系统配置根目录/项目名，动态生成）+ 绑定 Agent / 工作流（二选一·版本钉住）+ Agent 决策授权。只有输入内容才触发流程（CHAT_INPUT），运行中可随时接入；阶段事件以标准 SSE 事件流输出到对话页交互。"/>
+        </div>
+        <div style={{flex:1, minWidth:0}}>
+          {ws.id === 'ws_2'
+            ? <Card><Alert type="warning" showIcon message="run r_9c11 处于 SUSPENDED（治理方案决策待审阅）"
+                action={<Button size="small" type="primary" href="03-approval-center.html">打开决策工作区</Button>}/></Card>
+            : <WorkspaceChat key={ws.id} ws={ws} onPatch={onPatch}/>}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

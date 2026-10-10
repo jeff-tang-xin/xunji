@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  启动占位规则：真实执行走 execute2RespWithEL 动态 EL（RunService），
+  无需预注册 chain。此文件仅为满足 starter 的 rule-source 配置要求。
+-->
+<chain name="dummy">THEN(node_dispatch.tag("dummy"))</chain>

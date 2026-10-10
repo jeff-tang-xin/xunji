@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.xuanji</groupId>
+    <artifactId>xuanji-platform</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>xuanji-server</artifactId>
+  <name>XuanJi Server</name>
+  <description>Spring Boot 应用：REST/SSE/Webhook/发布流水线/审批中心/调度器（唯一组装点）</description>
+
+  <!--
+    组装点：唯一允许依赖全部实现模块的地方。
+    新插件接入 = 这里加一行依赖 + Spring 自动装配，核心与既有插件零改动。
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>io.xuanji</groupId>
+      <artifactId>xuanji-core</artifactId>
+    </dependency>
+    <!-- admin-web（pom 包装）：仅用于 reactor 构建排序（前端 npm build 先于 server 打包） -->
+    <dependency>
+      <groupId>io.xuanji</groupId>
+      <artifactId>admin-web</artifactId>
+      <type>pom</type>
+    </dependency>
+    <dependency>
+      <groupId>io.xuanji</groupId>
+      <artifactId>xuanji-agent-scope</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.xuanji</groupId>
+      <artifactId>node-basic</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- 编排引擎（P0 闭环）：LiteFlow 动态 EL 执行 -->
+    <dependency>
+      <groupId>com.yomahub</groupId>
+      <artifactId>liteflow-spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- 认证：仅 crypto（BCrypt），不引全套 Security 过滤器链
+         （管理台 RBAC 与 App AppKey 是两个鉴权域，拦截器自管更清晰） -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-crypto</artifactId>
+    </dependency>
+
+    <!-- 持久化：PostgreSQL + Flyway（Q2 决议，V1 基线见 db/migration） -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <version>${spring-boot.version}</version>
+        <executions>
+          <execution>
+            <goals><goal>repackage</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

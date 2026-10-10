@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.xuanji</groupId>
+    <artifactId>xuanji-platform</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>xuanji-agent-scope</artifactId>
+  <name>XuanJi AgentScope Adapter</name>
+  <description>AgentRuntime 的 AgentScope 实现（唯一允许 import io.agentscope 的模块）</description>
+
+  <!--
+    依赖纪律：core + AgentScope 扩展模块；禁止依赖 server / plugins。
+    io.agentscope 的 import 只出现在本模块——API 变动风险被物理隔离在此适配层内
+    （主文档风险 #1）。模型接入走 OPENAI_PROTOCOL 扩展（Q5 双轨之一）。
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>io.xuanji</groupId>
+      <artifactId>xuanji-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.agentscope</groupId>
+      <artifactId>agentscope</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.agentscope</groupId>
+      <artifactId>agentscope-extensions-model-openai</artifactId>
+    </dependency>
+  </dependencies>
+</project>

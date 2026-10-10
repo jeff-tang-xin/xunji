@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.xuanji</groupId>
+  <artifactId>xuanji-platform</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>XuanJi Platform</name>
+  <description>玄机万象 · DevOps 全链路编排平台（单体模块化，接口边界按微服务标准设计）</description>
+
+  <!--
+    模块依赖规则（编译期强制插拔的基础，见 docs/detail/01-engineering.md §1）：
+    - xuanji-core        仅三方基础库（Spring context / Jackson / SLF4J），不含任何具体实现
+    - xuanji-agent-scope core + AgentScope（io.agentscope 的 import 只允许出现在此模块）
+    - plugins/*          仅 core（插件方接入的全部成本 = 一个 Maven 依赖 + @Component）
+    - xuanji-server      core + agent-scope + 全部 plugins（唯一组装点）
+  -->
+  <modules>
+    <module>xuanji-bom</module>
+    <module>xuanji-core</module>
+    <module>xuanji-agent-scope</module>
+    <module>admin-web</module>
+    <module>xuanji-server</module>
+    <module>plugins/node-basic</module>
+  </modules>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <!-- 版本基线（docs/detail/01-engineering.md §2）——属性在根 POM 定义，全模块继承
+         （BOM import 只传播 dependencyManagement，不传播 properties） -->
+    <spring-boot.version>3.5.0</spring-boot.version>
+    <liteflow.version>2.16.0</liteflow.version>
+    <agentscope.version>2.0.4</agentscope.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- 版本唯一出处：xuanji-bom -->
+      <dependency>
+        <groupId>io.xuanji</groupId>
+        <artifactId>xuanji-bom</artifactId>
+        <version>${project.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>3.13.0</version>
+          <configuration>
+            <!-- Spring Framework 6.1+ 反射取参数名（@PathVariable/@RequestParam 等）必需 -->
+            <parameters>true</parameters>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>3.2.5</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>

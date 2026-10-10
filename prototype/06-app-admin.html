@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 应用管理</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/dayjs.min.js"></script>
+<script src="vendor/antd.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script type="text/babel" data-presets="env,react">
+const { useState } = React;
+const { Layout, Menu, Button, Table, Tag, message, Alert, Modal, Input, Space, Typography, Tooltip,
+        Drawer, Form, Select, Segmented } = antd;
+const { Sider, Header, Content } = Layout;
+const MENU = [
+  ['ws','工作区','00-workspace.html'], ['canvas','画布编辑器','01-canvas-editor.html'],
+  ['run','运行监控','02-run-monitor.html'], ['approval','决策工作区','03-approval-center.html'],
+  ['publish','发布中心','04-publish-center.html'], ['agent','Agent 管理台','05-agent-admin.html'],
+  ['app','应用管理','06-app-admin.html'], ['report','报表中心','07-report-dashboard.html'], ['perm','权限管理','08-permissions.html'],
+];
+function Shell({ active, children }) {
+  return (
+    <Layout style={{height:'100vh'}}>
+      <Sider className="xj-sider" width={200} theme="dark">
+        <div className="xj-logo">玄机万象 · XuanJi</div>
+        <Menu theme="dark" mode="inline" selectedKeys={[active]}
+          items={MENU.map(([k,label,href]) => ({ key:k, label:<a style={{color:'inherit'}} href={href}>{label}</a> }))}/>
+      </Sider>
+      <Layout>
+        <Header className="xj-header">
+          <span style={{fontWeight:600}}>应用管理 <Tag color="blue">静态原型</Tag></span>
+          <span style={{color:'#999',fontSize:12}}>发布即可被消费（主文档 4.9）</span>
+        </Header>
+        <Content className="xj-content">{children}</Content>
+      </Layout>
+    </Layout>
+  );
+}
+const APPS = [
+  { id:'app_7a1', name:'需求门户-评审入口', bound:'workflow:SDLC-全流程编排@v6', keys:2, status:'ENABLED' },
+  { id:'app_b3c', name:'运维值班助手', bound:'agent:ops-assistant@v2', keys:1, status:'ENABLED' },
+  { id:'app_c9d', name:'质量周报订阅', bound:'workflow:每日构建质量报告@v3', keys:1, status:'DISABLED' },
+];
+const WF_ASSETS = ['workflow:sdlc-standard@v3','workflow:weekly-report@v2'];
+const AGENT_ASSETS = ['agent:code-reviewer@3','agent:doc-writer@1'];
+const EMBED = `<script src="https://xuanji.example.com/embed/v1/chat.js"
+  data-app-id="app_7a1"
+  data-app-key="app-****（嵌入专用 scope）"
+  data-mode="floating"><\/script>`;
+function KeyModal({ app, onClose }) {
+  if (!app) return null;
+  return (
+    <Modal title="AppKey 已创建（明文仅此一次）" open onCancel={onClose}
+      footer={<Button type="primary" onClick={onClose}>我已保存</Button>}>
+      <Alert type="warning" showIcon style={{marginBottom:12}}
+        message="平台只存哈希（SHA-256 + salt），关闭后无法再次查看明文，只能轮换重建"/>
+      <Input.Search readOnly value="app-Xk29fQ7mPz3vR8wL5tY2nE6sJd4aHb1c" enterButton="复制"
+        onSearch={() => message.success('已复制（原型演示）')} className="xj-mono"/>
+      <Typography.Paragraph type="secondary" style={{marginTop:12, fontSize:12}}>
+        调用方式：Authorization: Bearer app-Xk29… ｜ 端点：POST /api/v1/apps/{app.id}/runs ｜ 限流 100 req/min ｜ 纯 key + HTTPS（Q8 决议）
+      </Typography.Paragraph>
+    </Modal>
+  );
+}
+function EmbedModal({ app, onClose }) {
+  if (!app) return null;
+  return (
+    <Modal title={`页面嵌入 · ${app.name}`} open onCancel={onClose} footer={<Button type="primary" onClick={onClose}>完成</Button>}>
+      <Alert type="info" showIcon style={{marginBottom:12}}
+        message="chat.js 零依赖（Shadow DOM 隔离样式）；父页域名需在 App 白名单内"/>
+      <pre className="xj-mono" style={{background:'#fafafa', padding:12, borderRadius:6, whiteSpace:'pre-wrap'}}>{EMBED}</pre>
+      <Button onClick={() => message.success('嵌入代码已复制（原型演示）')}>复制代码</Button>
+    </Modal>
+  );
+}
+function AppFormDrawer({ target, onClose }) {
+  const isEdit = !!target.bound;
+  const [assetType, setAssetType] = useState(isEdit && target.bound.indexOf('agent:') === 0 ? 'agent' : 'workflow');
+  const [asset, setAsset] = useState(isEdit ? target.bound : undefined);
+  const options = (assetType === 'agent' ? AGENT_ASSETS : WF_ASSETS)
+    .map(a => ({ value:a, label:<span className="xj-mono">{a}</span> }));
+  return (
+    <Drawer title={isEdit ? `编辑 App · ${target.name}` : '新建 App'} width={480} open onClose={onClose}
+      extra={<Space><Button onClick={onClose}>取消</Button>
+        <Button type="primary" onClick={() => message.success(isEdit ? '已保存（原型演示）' : 'App 已创建：可在列表「创建凭据」生成 AppKey 对外发布（原型演示）')}>保存</Button></Space>}>
+      <Form layout="vertical" initialValues={{ name: isEdit ? target.name : '' }}>
+        <Form.Item label="App 名称" name="name"><Input placeholder="面向第三方的应用名称"/></Form.Item>
+        <Form.Item label="绑定资产（版本钉住，类型二选一）">
+          <Segmented value={assetType} onChange={v => { setAssetType(v); setAsset(undefined); }}
+            options={[{ value:'workflow', label:'📋 工作流' }, { value:'agent', label:'🤖 Agent' }]}/>
+        </Form.Item>
+        <Form.Item label={assetType === 'agent' ? '已发布 Agent 资产' : '已发布工作流资产'}>
+          <Select style={{width:'100%'}} placeholder="选择已发布资产（钉住具体版本）" value={asset}
+            onChange={setAsset} options={options}/>
+        </Form.Item>
+        <Alert type="info" showIcon style={{marginBottom:8}}
+          message={assetType === 'agent'
+            ? '对话型应用：第三方经 chat-messages(SSE) 端点对话'
+            : '流程型应用：第三方经 runs 端点触发'}/>
+        <Typography.Paragraph type="secondary" style={{fontSize:12, marginBottom:0}}>
+          两种类型均以 AppKey（Bearer + HTTPS + 限流）对外发布；绑定 Agent 的 App 同样在「创建凭据」配置 Key。
+        </Typography.Paragraph>
+      </Form>
+    </Drawer>
+  );
+}
+function App() {
+  const [keyApp, setKeyApp] = useState(null);
+  const [embedApp, setEmbedApp] = useState(null);
+  const [formApp, setFormApp] = useState(null);
+  return (
+    <Shell active="app">
+      <Alert className="xj-proto-banner" type="info" showIcon
+        message="静态原型：App = 已发布资产的「对外消费」路径——资产先在发布中心固化版本，App 钉住该版本并配 AppKey 对外服务（workflow / agent 二选一）；第三方经统一 API + AppKey 消费，或 chat.js / iframe 嵌入。"/>
+      <Alert type="warning" showIcon style={{marginBottom:12}}
+        message="App 发布的是什么 / 有啥用：App 发布的不是资产本身（版本已在发布中心固化），而是「对外消费合同」——绑定哪个已发布版本 + 谁能调（AppKey/scope）+ 怎么调（统一 API / chat.js / iframe）+ 调用治理（限流/白名单）。"
+        description="边界：App 只覆盖「对外」这一条路径。平台内部用户走工作区（绑定同一批已发布资产，身份是平台用户 + 决策授权，无需 AppKey）；第三方走 App（身份是 AppKey）。资产发新版本不影响既有 App（钉住旧版），升级绑定是显式动作。"/>
+      <div className="xj-toolbar"><Button type="primary" onClick={() => setFormApp({ id:null, name:'', bound:'' })}>新建 App</Button></div>
+      <Table rowKey="id" size="middle" dataSource={APPS}
+        columns={[
+          { title:'App ID', dataIndex:'id', className:'xj-mono' },
+          { title:'名称', dataIndex:'name' },
+          { title:'绑定资产（版本钉住）', dataIndex:'bound', className:'xj-mono',
+            render:v => <Tooltip title="升级绑定版本 = 显式操作，不影响进行中 run"><span>{v.indexOf('agent:') === 0 ? '🤖' : '📋'} {v}</span></Tooltip> },
+          { title:'AppKey 数', dataIndex:'keys' },
+          { title:'状态', dataIndex:'status', render:v => <Tag color={v === 'ENABLED' ? 'green' : 'default'}>{v}</Tag> },
+          { title:'操作', render:(_,r) => <Space>
+              <a onClick={() => setFormApp(r)}>编辑</a>
+              <a onClick={() => setKeyApp(r)}>创建凭据</a>
+              <a onClick={() => setEmbedApp(r)}>嵌入代码</a>
+              <a onClick={() => message.info('轮换：旧 key 保留 24h 重叠期（原型演示）')}>轮换 Key</a>
+            </Space> },
+        ]}/>
+      {formApp && <AppFormDrawer target={formApp} onClose={() => setFormApp(null)}/>}
+      <KeyModal app={keyApp} onClose={() => setKeyApp(null)}/>
+      <EmbedModal app={embedApp} onClose={() => setEmbedApp(null)}/>
+    </Shell>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

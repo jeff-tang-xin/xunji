@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.xuanji</groupId>
+  <artifactId>xuanji-bom</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>XuanJi BOM</name>
+  <description>三方依赖版本统一管理（LiteFlow / AgentScope / Spring Boot 版本唯一出处）</description>
+
+  <!--
+    版本在此写字面量（版本唯一出处）：Maven 3.6.3 对 import BOM 自身的 parent
+    属性插值不可靠（${...} 会以字面量进入仓库坐标），故 BOM 内不用属性引用。
+    根 POM 的同名属性仅供子模块 plugin version 等场景使用，两者需人工保持一致。
+  -->
+  <dependencyManagement>
+    <dependencies>
+      <!-- Spring Boot 生态（spring-context / jackson / slf4j 版本均由其管理） -->
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>3.5.0</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!-- 平台内部模块 -->
+      <dependency>
+        <groupId>io.xuanji</groupId>
+        <artifactId>xuanji-core</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+      </dependency>
+      <dependency>
+        <groupId>io.xuanji</groupId>
+        <artifactId>xuanji-agent-scope</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+      </dependency>
+      <dependency>
+        <groupId>io.xuanji</groupId>
+        <artifactId>admin-web</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <type>pom</type>
+      </dependency>
+      <dependency>
+        <groupId>io.xuanji</groupId>
+        <artifactId>node-basic</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+      </dependency>
+
+      <!-- 编排引擎：LiteFlow（引擎封装阶段引入 server，版本在此锁定） -->
+      <dependency>
+        <groupId>com.yomahub</groupId>
+        <artifactId>liteflow-spring-boot-starter</artifactId>
+        <version>2.16.0</version>
+      </dependency>
+
+      <!-- Agent 运行时：AgentScope Java（io.agentscope 只允许出现在 xuanji-agent-scope）。
+           ReActAgent 位于聚合 jar agentscope（io.agentscope.core.ReActAgent） -->
+      <dependency>
+        <groupId>io.agentscope</groupId>
+        <artifactId>agentscope</artifactId>
+        <version>2.0.4</version>
+      </dependency>
+      <dependency>
+        <groupId>io.agentscope</groupId>
+        <artifactId>agentscope-extensions-model-openai</artifactId>
+        <version>2.0.4</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>玄机万象 · 静态原型导航</title>
+<link rel="stylesheet" href="vendor/reset.css">
+<style>
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #f5f6f8; margin: 0; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 40px 24px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  .sub { color: #666; margin-bottom: 28px; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .card { background: #fff; border: 1px solid #e8e8e8; border-radius: 10px; padding: 18px; text-decoration: none; color: inherit; display: block; transition: all .15s; }
+  .card:hover { border-color: #1677ff; box-shadow: 0 4px 14px rgba(22,119,255,.12); transform: translateY(-2px); }
+  .card h3 { margin: 0 0 8px; font-size: 16px; color: #1677ff; }
+  .card p { margin: 0; font-size: 13px; color: #666; line-height: 1.6; }
+  .tag { display: inline-block; font-size: 11px; background: #e6f4ff; color: #1677ff; border-radius: 4px; padding: 1px 8px; margin-left: 8px; vertical-align: 2px; }
+  .note { margin-top: 28px; font-size: 13px; color: #888; line-height: 1.8; background: #fff; border: 1px dashed #d9d9d9; border-radius: 8px; padding: 14px 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>玄机万象 <span style="color:#1677ff">XuanJi</span><span class="tag">静态原型 v0.1</span></h1>
+  <div class="sub">全流程编排与自定义 Agent 平台 · 页面静态预览（数据为 mock，经本地 HTTP 预览：http://localhost:8321/）</div>
+  <div class="grid">
+    <a class="card" href="00-workspace.html"><h3>① 工作区</h3>项目名（路径 = 系统配置根目录/项目名，动态生成）+ 工作流绑定 + Agent 决策授权；阶段化 SSE 对话交互。</a>
+    <a class="card" href="01-canvas-editor.html"><h3>② 画布编辑器</h3>节点面板 + LogicFlow 画布 + 属性抽屉（决策门/重试/超时）+ 发布校验。SDLC 七阶段示例流程。</a>
+    <a class="card" href="02-run-monitor.html"><h3>③ 运行监控</h3>run 列表 + 节点状态实时推进（模拟 SSE）+ 节点输入输出查看 + SUSPENDED 审批入口。</a>
+    <a class="card" href="03-approval-center.html"><h3>④ 决策工作区</h3>交互式决策：产物审阅 + 实时批注 + 在线修改；决策只是下一步的前提（修改后产物流向下游节点）。</a>
+    <a class="card" href="04-publish-center.html"><h3>⑤ 发布中心</h3>五类资产统一生命周期（草稿→发布→弃用→下线）、版本历史、bundle 导入导出。</a>
+    <a class="card" href="05-agent-admin.html"><h3>⑥ Agent 管理台</h3>agent_config 全配置化：模型协议双轨 / 提示词 / 工具绑定 / 权限策略 / 发布。</a>
+    <a class="card" href="06-app-admin.html"><h3>⑦ 应用管理</h3>App 绑定已发布资产、AppKey 创建（明文一次性展示）、限流白名单、嵌入代码生成。</a>
+    <a class="card" href="07-report-dashboard.html"><h3>⑧ 报表中心 <span class="tag">工作报表场景</span></h3>workflow 周期生成的数据报表：报表列表 → 看板详情（KPI / 趋势图 / Agent 分析摘要 / 明细）。</a>
+    <a class="card" href="08-permissions.html"><h3>⑨ 权限管理 <span class="tag">RBAC</span></h3>用户→角色→菜单 RBAC、组织树、数据权限四档（all / under_org / org / only_create）；用户仅由 admin 创建，密码明文一次性展示。</a>
+  </div>
+  <div class="note">
+    <b>原型说明</b>：本组页面为<b>静态原型</b>（React 18 + AntD 5 + LogicFlow 2 UMD 本地包，mock 数据内联），用于在 P1 开发前确认布局与交互，不连接任何后端。
+    每页顶部有原型说明条，标注对应详细设计文档章节（docs/detail/06-frontend-and-delivery.md §1）。
+    交互深度：布局静态展示 + 抽屉/弹窗可点 + 运行监控定时器模拟 SSE。
+  </div>
+</div>
+</body>
+</html>
