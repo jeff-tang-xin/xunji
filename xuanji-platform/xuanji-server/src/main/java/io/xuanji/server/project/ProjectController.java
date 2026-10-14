@@ -30,10 +30,13 @@ public class ProjectController {
 
     private final ProjectService projects;
     private final ProjectChatService projectChat;
+    private final ProjectTemplateService templates;
 
-    public ProjectController(ProjectService projects, ProjectChatService projectChat) {
+    public ProjectController(ProjectService projects, ProjectChatService projectChat,
+                             ProjectTemplateService templates) {
         this.projects = projects;
         this.projectChat = projectChat;
+        this.templates = templates;
     }
 
     /** 项目列表（数据权限过滤，仅 PROJECT 类型）。 */
@@ -45,14 +48,14 @@ public class ProjectController {
     /** 模板列表（供前端创建项目下拉动态加载）。注意须在 /{id} 之前声明，避免被路径变量捕获。 */
     @GetMapping("/templates")
     public Object templates(@RequestAttribute(LoginUser.ATTR) LoginUser user) {
-        return projects.templates();
+        return templates.templates();
     }
 
     /** 模板详情：主信息 + 全部节点（规范/要求/方法论/交付物），供模板编辑表单回填。 */
     @GetMapping("/templates/{code}")
     public Object templateDetail(@RequestAttribute(LoginUser.ATTR) LoginUser user,
                                  @PathVariable String code) {
-        return projects.templateDetail(code);
+        return templates.templateDetail(code);
     }
 
     /**
@@ -62,7 +65,7 @@ public class ProjectController {
     @PostMapping("/templates")
     public Object createTemplate(@RequestAttribute(LoginUser.ATTR) LoginUser user,
                                  @RequestBody Map<String, Object> body) {
-        return projects.createTemplate(body);
+        return templates.createTemplate(body);
     }
 
     /** 更新模板：改 name/description，nodes 整体替换；code 不可改，内置模板允许改知识内容。 */
@@ -70,14 +73,14 @@ public class ProjectController {
     public Object updateTemplate(@RequestAttribute(LoginUser.ATTR) LoginUser user,
                                  @PathVariable String code,
                                  @RequestBody Map<String, Object> body) {
-        return projects.updateTemplate(code, body);
+        return templates.updateTemplate(code, body);
     }
 
     /** 删除模板（连带删除其节点）；内置模板 builtin=true 拒绝删除。 */
     @DeleteMapping("/templates/{code}")
     public Object deleteTemplate(@RequestAttribute(LoginUser.ATTR) LoginUser user,
                                  @PathVariable String code) {
-        return projects.deleteTemplate(code);
+        return templates.deleteTemplate(code);
     }
 
     /** 创建项目（模板驱动生成节点链）。 */

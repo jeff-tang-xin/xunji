@@ -1,5 +1,7 @@
 package io.xuanji.server.project;
 
+import static io.xuanji.server.project.ProjectSupport.*;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.xuanji.server.auth.DataScopeFilter;
 import io.xuanji.server.auth.LoginUser;
@@ -30,7 +32,6 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,20 +46,9 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 public class ProjectService {
     private static final Logger log = LoggerFactory.getLogger(ProjectService.class);
-    private static final Pattern TEMPLATE_CODE = Pattern.compile("[a-z0-9_-]{1,32}");
-    private static final int NODE_TYPE_MAX = 24;
-    private static final int OWNER_ROLE_MAX = 32;
-    private static final int DELIVERABLE_MAX = 256;
-    private static final int AGENT_NAME_MAX = 64;
-    private static final List<String> STAGE_ORDER = List.of("REQUIREMENT", "DEVELOP", "OPERATE");
-    private static final Map<String, String> STAGE_LABEL = Map.of("REQUIREMENT", "需求", "DEVELOP", "开发", "OPERATE", "运维");
-    private static final String STAGE_OPERATE = "OPERATE";
-    private static final String STAGE_REQUIREMENT = "REQUIREMENT";
     private static final String PM_AGENT = "project_manager";
     private static final Set<String> FORCE_TYPES = Set.of("RELEASE", "DEPLOY", "DB", "DATABASE", "DATA_FIX");
-    private static final List<String> CAPABILITY_KEYS = List.of("tools", "skills", "mcps", "connectors", "artifacts", "urls", "agents", "workflow", "servers");
     private static final String MODE_LEGACY = "LEGACY";
-    private static final Map<String, String> TYPE_STAGE = Map.ofEntries(Map.entry("DISCUSS", "REQUIREMENT"), Map.entry("INITIATION", "REQUIREMENT"), Map.entry("PROJECT_DOC", "REQUIREMENT"), Map.entry("REQUIREMENT", "REQUIREMENT"), Map.entry("PRD", "REQUIREMENT"), Map.entry("PROTOTYPE", "REQUIREMENT"), Map.entry("UI_DESIGN", "REQUIREMENT"), Map.entry("ARCHITECTURE", "DEVELOP"), Map.entry("DESIGN", "DEVELOP"), Map.entry("TEST_CASE", "DEVELOP"), Map.entry("DEVELOP", "DEVELOP"), Map.entry("SMOKE", "DEVELOP"), Map.entry("SUBMIT", "DEVELOP"), Map.entry("TEST", "DEVELOP"), Map.entry("REVIEW", "DEVELOP"), Map.entry("RELEASE", "OPERATE"), Map.entry("DEPLOY", "OPERATE"), Map.entry("OPS", "OPERATE"), Map.entry("BUGFIX", "OPERATE"), Map.entry("MONITOR", "OPERATE"), Map.entry("DB", "OPERATE"), Map.entry("DATABASE", "OPERATE"));
     @Autowired
     private ProjectRepository repo;
     @Autowired
@@ -75,6 +65,8 @@ public class ProjectService {
     private DefinitionService definitionService;
     @Autowired
     private StagePlanCompiler planCompiler;
+    @Autowired
+    private ProjectTemplateService templateService;
     @Value(value="${xuanji.workspace.root:./workspaces}")
     private String workspaceRoot;
     private final ExecutorService autoFlowExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -102,7 +94,7 @@ public class ProjectService {
         this.createProjectDirectories(rootPath);
         long planId = this.draftStagePlan(user, wsId, currentStage, 1);
         if (template != null && !template.isBlank()) {
-            this.applyTemplateStages(wsId, template, user.username());
+            templateService.applyTemplateStages(wsId, template, user.username());
         }
         Object reqWf = body.get("requirement_workflow");
         String boundWf = null;
@@ -123,11 +115,11 @@ public class ProjectService {
             for (String k : CAPABILITY_KEYS) {
                 cap.put(k, "workflow".equals(k) ? wfRef : List.of());
             }
-            this.repo.upsertStageCapability(wsId, STAGE_REQUIREMENT, this.toJson(cap), "创建项目时预设", user.username());
+            this.repo.upsertStageCapability(wsId, STAGE_REQUIREMENT, toJson(objectMapper, cap), "创建项目时预设", user.username());
             boundWf = wfRef;
         }
-        List<String> presetServers = this.strList(body.get("servers"));
-        List<String> presetConnectors = this.strList(body.get("connectors"));
+        List<String> presetServers = strList(objectMapper, body.get("servers"));
+        List<String> presetConnectors = strList(objectMapper, body.get("connectors"));
         if (!presetServers.isEmpty() || !presetConnectors.isEmpty()) {
             LinkedHashMap<String, Object> cap = new LinkedHashMap<String, Object>();
             for (String k : CAPABILITY_KEYS) {
@@ -135,7 +127,7 @@ public class ProjectService {
             }
             List<Map<String, Object>> existing = this.repo.findStageCapability(wsId, STAGE_OPERATE);
             if (!existing.isEmpty()) {
-                cap.putAll(this.parseJsonMap(existing.get(0).get("capability_json")));
+                cap.putAll(parseJsonMap(objectMapper, existing.get(0).get("capability_json")));
             }
             if (!presetServers.isEmpty()) {
                 cap.put("servers", presetServers);
@@ -143,7 +135,7 @@ public class ProjectService {
             if (!presetConnectors.isEmpty()) {
                 cap.put("connectors", presetConnectors);
             }
-            this.repo.upsertStageCapability(wsId, STAGE_OPERATE, this.toJson(cap), "创建项目时绑定", user.username());
+            this.repo.upsertStageCapability(wsId, STAGE_OPERATE, toJson(objectMapper, cap), "创建项目时绑定", user.username());
         }
         LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("id", wsId);
@@ -165,148 +157,6 @@ public class ProjectService {
     public List<Map<String, Object>> list(LoginUser user) {
         DataScopeFilter.Clause c = DataScopeFilter.of(user, "org_id", "created_by");
         return this.workspaceRepo.findProjectsByScope(c.sql(), c.args().toArray());
-    }
-
-    public List<Map<String, Object>> templates() {
-        List<Map<String, Object>> rows = this.repo.findTemplates();
-        for (Map<String, Object> r : rows) {
-            r.put("stages", this.parseJsonMap(r.get("stages_json")));
-        }
-        return rows;
-    }
-
-    public Map<String, Object> templateDetail(String code) {
-        Map<String, Object> tpl = this.requireTemplate(code);
-        long templateId = ((Number)tpl.get("id")).longValue();
-        ArrayList nodes = new ArrayList();
-        for (Map<String, Object> tn : this.repo.findTemplateNodes(templateId)) {
-            LinkedHashMap<String, Object> n = new LinkedHashMap<String, Object>();
-            n.put("type", tn.get("type"));
-            n.put("seq", tn.get("seq"));
-            n.put("owner_role", tn.get("owner_role"));
-            n.put("agent_name", tn.get("agent_name"));
-            n.put("workflow_def_id", tn.get("workflow_def_id"));
-            n.put("standards", this.parseStringList(tn.get("standards")));
-            n.put("requirements", this.parseStringList(tn.get("requirements")));
-            n.put("methodology", tn.get("methodology"));
-            n.put("deliverable", tn.get("deliverable"));
-            n.put("depends_on", this.parseIntList(tn.get("depends_on")));
-            n.put("preconditions", this.parseStringList(tn.get("preconditions")));
-            nodes.add(n);
-        }
-        LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
-        result.put("id", tpl.get("id"));
-        result.put("code", tpl.get("code"));
-        result.put("name", tpl.get("name"));
-        result.put("description", tpl.get("description"));
-        result.put("builtin", tpl.get("builtin"));
-        result.put("stages", this.parseJsonMap(tpl.get("stages_json")));
-        result.put("nodes", nodes);
-        return result;
-    }
-
-    @Transactional
-    public Map<String, Object> createTemplate(Map<String, Object> body) {
-        String code = this.requireText(body.get("code"), "code");
-        if (!TEMPLATE_CODE.matcher(code).matches()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "code 只能由小写字母/数字/下划线/连字符组成且长度 1-32（当前: " + code + "）");
-        }
-        if (!this.repo.findTemplateByCode(code).isEmpty()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "code 已被占用: " + code);
-        }
-        String name = this.limited(this.requireText(body.get("name"), "name"), 128, "name");
-        String description = this.limited(this.blankToNull(body.get("description")), 512, "description");
-        List<Map<String, Object>> nodes = this.normalizeTemplateNodes(body.get("nodes"));
-        String stagesJson = this.normalizeTemplateStages(body.get("stages"));
-        long templateId = this.repo.insertTemplate(code, name, description, stagesJson);
-        this.insertTemplateNodes(templateId, nodes);
-        log.info("template created: code={} nodes={} stages={}", new Object[]{code, nodes.size(), stagesJson == null ? 0 : stagesJson.length()});
-        return this.templateDetail(code);
-    }
-
-    @Transactional
-    public Map<String, Object> updateTemplate(String code, Map<String, Object> body) {
-        Map<String, Object> tpl = this.requireTemplate(code);
-        String bodyCode = this.blankToNull(body.get("code"));
-        if (bodyCode != null && !bodyCode.equals(code)) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "code 不可修改（路径: " + code + "，body: " + bodyCode + "）");
-        }
-        String name = this.limited(this.requireText(body.get("name"), "name"), 128, "name");
-        String description = this.limited(this.blankToNull(body.get("description")), 512, "description");
-        List<Map<String, Object>> nodes = this.normalizeTemplateNodes(body.get("nodes"));
-        String stagesJson = this.normalizeTemplateStages(body.get("stages"));
-        long templateId = ((Number)tpl.get("id")).longValue();
-        this.repo.updateTemplate(templateId, name, description, stagesJson);
-        if (body.get("nodes") != null) {
-            this.repo.deleteTemplateNodes(templateId);
-            this.insertTemplateNodes(templateId, nodes);
-        }
-        return this.templateDetail(code);
-    }
-
-    @Transactional
-    public Map<String, Object> deleteTemplate(String code) {
-        Map<String, Object> tpl = this.requireTemplate(code);
-        if (Boolean.TRUE.equals(tpl.get("builtin"))) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "内置模板不可删除: " + code + "（可复制其节点自建模板）");
-        }
-        this.repo.deleteTemplateByCode(code);
-        LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
-        result.put("deleted", true);
-        result.put("code", code);
-        return result;
-    }
-
-    private String normalizeTemplateStages(Object raw) {
-        if (raw == null) {
-            return null;
-        }
-        if (!(raw instanceof Map)) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "stages 应为对象");
-        }
-        Map m = (Map)raw;
-        LinkedHashMap out = new LinkedHashMap();
-        for (String stage : List.of(STAGE_REQUIREMENT, "DEVELOP", STAGE_OPERATE)) {
-            Object s = m.get(stage);
-            if (s == null) continue;
-            if (!(s instanceof Map)) {
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "stages." + stage + " 应为对象");
-            }
-            Map sm = (Map)s;
-            LinkedHashMap<String, Object> cap = new LinkedHashMap<String, Object>();
-            Object wf = sm.get("workflow");
-            cap.put("workflow", wf == null ? "" : String.valueOf(wf).trim());
-            for (String k : List.of("agents", "servers", "connectors")) {
-                cap.put(k, this.strList(sm.get(k)));
-            }
-            out.put(stage, cap);
-        }
-        return out.isEmpty() ? null : this.toJson(out);
-    }
-
-    private void applyTemplateStages(String wsId, String templateCode, String username) {
-        Map tpl = this.repo.findTemplateByCode(templateCode).stream().findFirst().orElse(null);
-        if (tpl == null || tpl.get("stages_json") == null) {
-            return;
-        }
-        Map<String, Object> stages = this.parseJsonMap(tpl.get("stages_json"));
-        String note = "来自模板 " + templateCode;
-        for (String stage : List.of(STAGE_REQUIREMENT, "DEVELOP", STAGE_OPERATE)) {
-            Map sm;
-            Object s = stages.get(stage);
-            if (!(s instanceof Map) || (sm = (Map)s).isEmpty()) continue;
-            LinkedHashMap<String, Object> cap = new LinkedHashMap<String, Object>();
-            for (String k : CAPABILITY_KEYS) {
-                if ("workflow".equals(k)) {
-                    Object wf = sm.get("workflow");
-                    cap.put(k, wf == null ? "" : String.valueOf(wf).trim());
-                    continue;
-                }
-                cap.put(k, this.strList(sm.get(k)));
-            }
-            this.repo.upsertStageCapability(wsId, stage, this.toJson(cap), note, username);
-        }
-        log.info("template stages applied: ws={} template={}", (Object)wsId, (Object)templateCode);
     }
 
     public Map<String, Object> get(LoginUser user, String id) {
@@ -337,7 +187,7 @@ public class ProjectService {
     public Map<String, Object> runNode(LoginUser user, String wsId, String nodeId) {
         this.requireWorkspaceVisible(user, wsId);
         Map<String, Object> node = this.requireNodeInWorkspace(wsId, nodeId);
-        List<String> dependsOn = this.parseStringList(node.get("depends_on"));
+        List<String> dependsOn = parseStringList(objectMapper, node.get("depends_on"));
         for (String depId : dependsOn) {
             Map dep = this.repo.findNodeById(depId).stream().findFirst().orElse(null);
             if (dep != null && "DONE".equals(dep.get("status"))) continue;
@@ -372,7 +222,7 @@ public class ProjectService {
         if (!this.repo.isDefinitionPublished(definitionId)) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "工作流 #" + definitionId + " 不存在或未发布（须 status=PUBLISHED）");
         }
-        String refJson = this.toJson(Map.of("definitionId", definitionId));
+        String refJson = toJson(objectMapper, Map.of("definitionId", definitionId));
         this.repo.updateNodeWorkflowRef(nodeId, refJson);
         LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("node_id", nodeId);
@@ -471,301 +321,15 @@ public class ProjectService {
         String filePath = body.get("file_path") == null ? null : body.get("file_path").toString();
         String contentMd = body.get("content_md") == null ? null : body.get("content_md").toString();
         String status = body.get("status") == null ? "FINAL" : body.get("status").toString();
-        Integer version = this.parseVersion(body.get("version"));
+        Integer version = parseVersion(body.get("version"));
         this.repo.insertArtifact(wsId, nodeId, kind, name, type, filePath, contentMd, version, status, user.username());
         if ("DELIVERABLE".equals(kind) && (node = (Map)this.repo.findNodeById(nodeId).stream().findFirst().orElse(null)) != null) {
-            List<String> inputs = this.parseStringList(node.get("input_refs"));
-            List<String> outputs = this.parseStringList(node.get("output_refs"));
+            List<String> inputs = parseStringList(objectMapper, node.get("input_refs"));
+            List<String> outputs = parseStringList(objectMapper, node.get("output_refs"));
             outputs.add(name + "@" + String.valueOf(version == null ? "latest" : version));
-            this.repo.updateNodeRefs(nodeId, this.toJson(inputs), this.toJson(outputs));
+            this.repo.updateNodeRefs(nodeId, toJson(objectMapper, inputs), toJson(objectMapper, outputs));
         }
         return Map.of("registered", true, "kind", kind, "name", name);
-    }
-
-    private Map<String, Object> requireTemplate(String code) {
-        return (Map)this.repo.findTemplateByCode(code).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "模板不存在: " + code));
-    }
-
-    private List<Map<String, Object>> normalizeTemplateNodes(Object raw) {
-        List list;
-        if (raw == null) {
-            return new ArrayList<Map<String, Object>>();
-        }
-        if (!(raw instanceof List) || (list = (List)raw).isEmpty()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "nodes 不能为空（模板至少包含一个节点，或改用 stages 阶段预设）");
-        }
-        ArrayList<Map<String, Object>> nodes = new ArrayList<Map<String, Object>>();
-        for (int i = 0; i < list.size(); ++i) {
-            Object e = list.get(i);
-            if (!(e instanceof Map)) {
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "nodes[" + i + "] 必须是对象");
-            }
-            Map m = (Map)e;
-            Map<String, Object> e2 = this.asStringMap(m);
-            String label = "nodes[" + i + "]";
-            String type = this.limited(this.requireText(e2.get("type"), label + ".type"), 24, label + ".type");
-            String ownerRole = this.limited(this.requireText(e2.get("owner_role"), label + ".owner_role"), 32, label + ".owner_role");
-            int seq = this.requireSeq(e2.get("seq"), label + ".seq");
-            String deliverable = this.limited(this.blankToNull(e2.get("deliverable")), 256, label + ".deliverable");
-            String agentName = this.limited(this.blankToNull(e2.get("agent_name")), 64, label + ".agent_name");
-            Long workflowDefId = this.optionalLong(e2.get("workflow_def_id"), label + ".workflow_def_id");
-            String stage = ProjectService.resolveStage(e2.get("stage"), type);
-            LinkedHashMap<String, Object> n = new LinkedHashMap<String, Object>();
-            n.put("type", type);
-            n.put("seq", seq);
-            n.put("owner_role", ownerRole);
-            n.put("agent_name", agentName);
-            n.put("workflow_def_id", workflowDefId);
-            n.put("stage", stage);
-            n.put("standards", this.requireStringList(e2.get("standards"), label + ".standards"));
-            n.put("requirements", this.requireStringList(e2.get("requirements"), label + ".requirements"));
-            n.put("methodology", this.blankToNull(e2.get("methodology")));
-            n.put("deliverable", deliverable);
-            n.put("depends_on", this.requireIntList(e2.get("depends_on"), label + ".depends_on"));
-            n.put("preconditions", this.requireStringList(e2.get("preconditions"), label + ".preconditions"));
-            nodes.add(n);
-        }
-        HashSet<Integer> seqs = new HashSet<Integer>();
-        for (Map map : nodes) {
-            int seq = (Integer)map.get("seq");
-            if (seqs.add(seq)) continue;
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "seq 重复: " + seq);
-        }
-        for (int expected = 1; expected <= nodes.size(); ++expected) {
-            if (seqs.contains(expected)) continue;
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "seq 必须从 1 起连续，缺少 seq=" + expected + "（当前共 " + nodes.size() + " 个节点）");
-        }
-        for (Map map : nodes) {
-            int seq = (Integer)map.get("seq");
-            for (Object depObj : (List)map.get("depends_on")) {
-                int dep = (Integer)depObj;
-                if (!seqs.contains(dep)) {
-                    throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "节点 seq=" + seq + " 的 depends_on 引用了不存在的 seq=" + dep);
-                }
-                if (dep < seq) continue;
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "节点 seq=" + seq + " 的 depends_on 必须小于自身 seq（引用 seq=" + dep + " 会成环或自依赖）");
-            }
-        }
-        return nodes;
-    }
-
-    private void insertTemplateNodes(long templateId, List<Map<String, Object>> nodes) {
-        for (Map<String, Object> n : nodes) {
-            this.repo.insertTemplateNode(templateId, (String)n.get("type"), (Integer)n.get("seq"), this.toJson(n.get("standards")), this.toJson(n.get("requirements")), (String)n.get("methodology"), (String)n.get("deliverable"), this.toJson(n.get("depends_on")), this.toJson(n.get("preconditions")), (String)n.get("owner_role"), (String)n.get("agent_name"), (Long)n.get("workflow_def_id"), (String)n.get("stage"));
-        }
-    }
-
-    private Long optionalLong(Object v, String label) {
-        if (v == null) {
-            return null;
-        }
-        if (v instanceof Number) {
-            Number num = (Number)v;
-            long lv = num.longValue();
-            if (lv <= 0L) {
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " 必须是正整数（当前: " + lv + "）");
-            }
-            return lv;
-        }
-        String s = String.valueOf(v).trim();
-        if (s.isEmpty()) {
-            return null;
-        }
-        try {
-            long lv = Long.parseLong(s);
-            if (lv <= 0L) {
-                throw new NumberFormatException();
-            }
-            return lv;
-        }
-        catch (NumberFormatException ex) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " 必须是正整数（当前: " + s + "）");
-        }
-    }
-
-    private Map<String, Object> asStringMap(Map<?, ?> m) {
-        LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
-        for (Map.Entry<?, ?> e : m.entrySet()) {
-            result.put(String.valueOf(e.getKey()), e.getValue());
-        }
-        return result;
-    }
-
-    private String requireText(Object v, String label) {
-        String s = this.blankToNull(v);
-        if (s == null) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " is required");
-        }
-        return s;
-    }
-
-    private String limited(String value, int max, String label) {
-        if (value != null && value.length() > max) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " 超长（" + value.length() + " > " + max + "）");
-        }
-        return value;
-    }
-
-    private int requireSeq(Object v, String label) {
-        Integer seq = this.toInteger(v);
-        if (seq == null || seq < 1) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " 必须是从 1 开始的整数（当前: " + String.valueOf(v) + "）");
-        }
-        return seq;
-    }
-
-    private Integer toInteger(Object v) {
-        if (v instanceof Number) {
-            Number n = (Number)v;
-            return n.intValue();
-        }
-        if (v != null) {
-            try {
-                return Integer.parseInt(v.toString().trim());
-            }
-            catch (NumberFormatException numberFormatException) {
-                // empty catch block
-            }
-        }
-        return null;
-    }
-
-    private List<String> requireStringList(Object v, String label) {
-        if (v == null) {
-            return List.of();
-        }
-        if (!(v instanceof List)) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " 必须是字符串数组");
-        }
-        List list = (List)v;
-        ArrayList<String> result = new ArrayList<String>();
-        for (Object o : list) {
-            String s = this.blankToNull(o);
-            if (s == null) {
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " 含空项（第 " + (result.size() + 1) + " 项）");
-            }
-            result.add(s);
-        }
-        return result;
-    }
-
-    private List<Integer> requireIntList(Object v, String label) {
-        if (v == null) {
-            return List.of();
-        }
-        if (!(v instanceof List)) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " 必须是 seq 整数数组");
-        }
-        List list = (List)v;
-        ArrayList<Integer> result = new ArrayList<Integer>();
-        for (Object o : list) {
-            Integer i = this.toInteger(o);
-            if (i == null || i < 1) {
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, label + " 含非法 seq: " + String.valueOf(o));
-            }
-            result.add(i);
-        }
-        return result;
-    }
-
-    private List<Map<String, Object>> buildNodeChainFromTemplate(String wsId, Map<String, Object> tpl, Map<String, Object> scopes, String stageFilter) {
-        long templateId = ((Number)tpl.get("id")).longValue();
-        String template = String.valueOf(tpl.get("code"));
-        List<Map<String, Object>> tplNodes = this.repo.findTemplateNodes(templateId);
-        if (tplNodes.isEmpty()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "模板无节点: " + template);
-        }
-        ArrayList<Map<String, Object>> picked = new ArrayList<Map<String, Object>>();
-        for (Map<String, Object> map : tplNodes) {
-            if (stageFilter != null && !stageFilter.equals(ProjectService.resolveStage(map.get("stage"), map.get("type")))) continue;
-            picked.add(map);
-        }
-        if (picked.isEmpty() && stageFilter != null) {
-            LinkedHashMap<String, Object> fallback = new LinkedHashMap<String, Object>();
-            fallback.put("type", "OPS");
-            fallback.put("seq", 1);
-            fallback.put("owner_role", "运维");
-            fallback.put("agent_name", "devops");
-            fallback.put("workflow_def_id", null);
-            fallback.put("standards", List.of());
-            fallback.put("requirements", List.of());
-            fallback.put("methodology", null);
-            fallback.put("deliverable", "运维阶段工作记录");
-            fallback.put("depends_on", List.of());
-            fallback.put("preconditions", List.of());
-            fallback.put("stage", stageFilter);
-            picked.add(fallback);
-            log.info("模板 {} 无 {} 阶段节点，老项目使用兜底 OPS 节点", (Object)template, (Object)stageFilter);
-        }
-        if (picked.isEmpty()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "模板无可用节点: " + template);
-        }
-        HashSet<Integer> kept = new HashSet<Integer>();
-        for (Map map : picked) {
-            kept.add(((Number)map.get("seq")).intValue());
-        }
-        ArrayList<Map<String, Object>> arrayList = new ArrayList<Map<String, Object>>();
-        for (Map map : picked) {
-            int seq = ((Number)map.get("seq")).intValue();
-            LinkedHashMap<String, Object> n = new LinkedHashMap<String, Object>();
-            n.put("id", this.depId(wsId, seq));
-            n.put("type", map.get("type"));
-            n.put("seq", seq);
-            n.put("status", "NOT_STARTED");
-            n.put("depends_on", this.mapSeqToIds(wsId, this.retainKeptDeps(this.parseIntList(map.get("depends_on")), kept, seq)));
-            n.put("preconditions", this.parseStringList(map.get("preconditions")));
-            n.put("workflow_ref", this.snapshotWorkflowRef(map.get("workflow_def_id"), template, seq));
-            n.put("input_refs", List.of());
-            n.put("output_refs", List.of());
-            n.put("owner_role", map.get("owner_role"));
-            n.put("stage", ProjectService.resolveStage(map.get("stage"), map.get("type")));
-            n.put("iteration", 1);
-            n.put("scope", this.blankToNull(scopes.get(String.valueOf(seq))));
-            arrayList.add(n);
-        }
-        return arrayList;
-    }
-
-    private List<Integer> retainKeptDeps(List<Integer> deps, Set<Integer> kept, int seq) {
-        ArrayList<Integer> out = new ArrayList<Integer>();
-        for (Integer dep : deps) {
-            if (kept.contains(dep)) {
-                out.add(dep);
-                continue;
-            }
-            log.info("节点 seq={} 依赖的 seq={} 不在生成范围内（阶段过滤），已丢弃该依赖边", (Object)seq, (Object)dep);
-        }
-        return out;
-    }
-
-    private static String resolveStage(Object rawStage, Object rawType) {
-        String s;
-        String string = s = rawStage == null ? "" : String.valueOf(rawStage).trim().toUpperCase();
-        if (STAGE_ORDER.contains(s)) {
-            return s;
-        }
-        String t = rawType == null ? "" : String.valueOf(rawType).trim().toUpperCase();
-        return TYPE_STAGE.getOrDefault(t, "DEVELOP");
-    }
-
-    private static String stageLabel(String stage) {
-        return STAGE_LABEL.getOrDefault(stage, stage);
-    }
-
-    private static String nodeStage(Map<String, Object> node) {
-        return ProjectService.resolveStage(node.get("stage"), node.get("type"));
-    }
-
-    private static int iterationOf(Map<String, Object> node) {
-        int n;
-        Object it = node.get("iteration");
-        if (it instanceof Number) {
-            Number num = (Number)it;
-            n = num.intValue();
-        } else {
-            n = 1;
-        }
-        return n;
     }
 
     private Map<String, Object> requireProject(LoginUser user, String wsId) {
@@ -787,7 +351,7 @@ public class ProjectService {
             if (STAGE_OPERATE.equals(stage)) break;
             boolean hasNode = false;
             for (Map<String, Object> n : nodes) {
-                if (!stage.equals(ProjectService.nodeStage(n)) || ProjectService.iterationOf(n) != 1) continue;
+                if (!stage.equals(nodeStage(n)) || iterationOf(n) != 1) continue;
                 hasNode = true;
                 if ("DONE".equals(String.valueOf(n.get("status")))) continue;
                 return stage;
@@ -805,9 +369,9 @@ public class ProjectService {
             ArrayList<Map<String, Object>> firstRound = new ArrayList<Map<String, Object>>();
             TreeSet<Integer> iterations = new TreeSet<Integer>();
             for (Map<String, Object> n2 : nodes) {
-                if (!stage.equals(ProjectService.nodeStage(n2))) continue;
+                if (!stage.equals(nodeStage(n2))) continue;
                 stageNodes.add(n2);
-                int it = ProjectService.iterationOf(n2);
+                int it = iterationOf(n2);
                 iterations.add(it);
                 if (it != 1) continue;
                 firstRound.add(n2);
@@ -819,7 +383,7 @@ public class ProjectService {
             }
             LinkedHashMap<String, Object> v = new LinkedHashMap<String, Object>();
             v.put("stage", stage);
-            v.put("label", ProjectService.stageLabel(stage));
+            v.put("label", stageLabel(stage));
             v.put("status", status);
             v.put("resident", STAGE_OPERATE.equals(stage));
             v.put("current", stage.equals(currentStage));
@@ -897,31 +461,31 @@ public class ProjectService {
         int iteration = this.currentIteration(wsId, current);
         Map stagePlan = this.repo.findCurrentStagePlan(wsId, current, iteration).stream().findFirst().orElse(null);
         if (stagePlan == null) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, ProjectService.stageLabel(current) + "阶段还没有规划，无法推进：先让 PM 出规划并经人批准");
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段还没有规划，无法推进：先让 PM 出规划并经人批准");
         }
         if (!"APPROVED".equals(String.valueOf(stagePlan.get("status")))) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, ProjectService.stageLabel(current) + "阶段规划当前是 " + String.valueOf(stagePlan.get("status")) + "，需人批准并开始执行后才能推进");
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段规划当前是 " + String.valueOf(stagePlan.get("status")) + "，需人批准并开始执行后才能推进");
         }
         if (stagePlan.get("exec_run_id") == null) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, ProjectService.stageLabel(current) + "阶段规划已批准但没有生成执行体（exec_run_id 为空），请驳回该规划后重发，或检查服务端日志中的编译失败原因");
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段规划已批准但没有生成执行体（exec_run_id 为空），请驳回该规划后重发，或检查服务端日志中的编译失败原因");
         }
         String stageRunId = String.valueOf(stagePlan.get("exec_run_id"));
         Map<String, Object> stageRun = this.runService.getRun(stageRunId);
         String runStatus = String.valueOf(stageRun.get("status"));
         if (!"SUCCESS".equals(runStatus)) {
             ArrayList<String> open = new ArrayList<String>();
-            for (Map<String, Object> nr : this.mapList(stageRun.get("nodes"))) {
+            for (Map<String, Object> nr : mapList(objectMapper, stageRun.get("nodes"))) {
                 String st = String.valueOf(nr.get("status"));
                 if ("SUCCESS".equals(st)) continue;
-                open.add(this.strOr(nr.get("node_name"), String.valueOf(nr.get("node_id"))) + "（" + st + "）");
+                open.add(strOr(nr.get("node_name"), String.valueOf(nr.get("node_id"))) + "（" + st + "）");
             }
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, ProjectService.stageLabel(current) + "阶段流程尚未跑完（run " + stageRunId + " 状态 " + runStatus + "）" + (String)(open.isEmpty() ? "" : "，未走完的节点：" + String.join("、", open)) + "；若停在决策门，请先在待决策中完成审批");
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段流程尚未跑完（run " + stageRunId + " 状态 " + runStatus + "）" + (String)(open.isEmpty() ? "" : "，未走完的节点：" + String.join("、", open)) + "；若停在决策门，请先在待决策中完成审批");
         }
-        Map summary = (Map)this.repo.findCurrentStageSummary(wsId, current, iteration).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "请先由 PM 产出「" + ProjectService.stageLabel(current) + "阶段收口总结」并经人批准，再推进阶段"));
+        Map summary = (Map)this.repo.findCurrentStageSummary(wsId, current, iteration).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "请先由 PM 产出「" + stageLabel(current) + "阶段收口总结」并经人批准，再推进阶段"));
         if (!"APPROVED".equals(String.valueOf(summary.get("status")))) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "收口总结当前为 " + String.valueOf(summary.get("status")) + "，需人批准后才能推进阶段");
         }
-        List<Object> openItems = this.objList(summary.get("pending_items"));
+        List<Object> openItems = objList(objectMapper, summary.get("pending_items"));
         boolean bl = alreadyWaived = summary.get("waived_by") != null;
         if (!openItems.isEmpty() && !alreadyWaived) {
             String reason;
@@ -938,7 +502,7 @@ public class ProjectService {
         result.put("current_stage", next);
         result.put("advanced", true);
         result.put("from_stage", current);
-        result.put("label", ProjectService.stageLabel(next));
+        result.put("label", stageLabel(next));
         result.put("locked_stage", current);
         result.put("locked_iteration", iteration);
         result.put("plan_id", planId);
@@ -1011,23 +575,23 @@ public class ProjectService {
         Map stagePlan = this.repo.findCurrentStagePlan(wsId, stage, iteration).stream().findFirst().orElse(null);
         Object v0 = execRunId = stagePlan == null ? null : stagePlan.get("exec_run_id");
         if (execRunId != null) {
-            for (Map<String, Object> nr : this.mapList(this.runService.getRun(String.valueOf(execRunId)).get("nodes"))) {
+            for (Map<String, Object> nr : mapList(objectMapper, this.runService.getRun(String.valueOf(execRunId)).get("nodes"))) {
                 String nid = String.valueOf(nr.get("node_id"));
                 if (nid.equalsIgnoreCase("start") || nid.equalsIgnoreCase("end")) continue;
                 if ("SUCCESS".equals(String.valueOf(nr.get("status")))) {
                     ++done;
                     continue;
                 }
-                unfinished.add(this.strOr(nr.get("node_name"), nid) + "(" + String.valueOf(nr.get("status")) + ")");
+                unfinished.add(strOr(nr.get("node_name"), nid) + "(" + String.valueOf(nr.get("status")) + ")");
             }
         } else {
             for (Map<String, Object> n : nodes) {
-                if (!stage.equals(ProjectService.nodeStage(n)) || ProjectService.iterationOf(n) != iteration) continue;
+                if (!stage.equals(nodeStage(n)) || iterationOf(n) != iteration) continue;
                 if ("DONE".equals(String.valueOf(n.get("status")))) {
                     ++done;
                     continue;
                 }
-                unfinished.add(this.strOr(n.get("name"), String.valueOf(n.get("type"))) + "(" + String.valueOf(n.get("status")) + ")");
+                unfinished.add(strOr(n.get("name"), String.valueOf(n.get("type"))) + "(" + String.valueOf(n.get("status")) + ")");
             }
         }
         for (Map<String, Object> a : this.repo.findArtifactsByWorkspace(wsId)) {
@@ -1035,9 +599,9 @@ public class ProjectService {
             artifacts.add(String.valueOf(a.get("name")));
         }
         StringBuilder md = new StringBuilder();
-        md.append("## ").append(ProjectService.stageLabel(stage)).append("阶段收口（第 ").append(iteration).append(" 轮）\n\n").append("- 子任务完成：").append(done).append(" / ").append(done + unfinished.size()).append("\n").append("- 未完成子任务：").append(unfinished.isEmpty() ? "无" : String.join("、", unfinished)).append("\n").append("- 本阶段留档产物：").append(artifacts.isEmpty() ? "无" : String.join("、", artifacts)).append("\n").append("- 结论与交付：待 PM 补充（当前为系统按库内事实自动汇总）\n").append("- 风险与遗留：见下方未决项，需人确认是否可带入下一阶段\n");
+        md.append("## ").append(stageLabel(stage)).append("阶段收口（第 ").append(iteration).append(" 轮）\n\n").append("- 子任务完成：").append(done).append(" / ").append(done + unfinished.size()).append("\n").append("- 未完成子任务：").append(unfinished.isEmpty() ? "无" : String.join("、", unfinished)).append("\n").append("- 本阶段留档产物：").append(artifacts.isEmpty() ? "无" : String.join("、", artifacts)).append("\n").append("- 结论与交付：待 PM 补充（当前为系统按库内事实自动汇总）\n").append("- 风险与遗留：见下方未决项，需人确认是否可带入下一阶段\n");
         ArrayList pendingItems = new ArrayList(unfinished);
-        long id = this.repo.insertStageSummary(wsId, stage, iteration, md.toString(), this.toJson(pendingItems));
+        long id = this.repo.insertStageSummary(wsId, stage, iteration, md.toString(), toJson(objectMapper, pendingItems));
         LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("summary_id", id);
         out.put("stage", stage);
@@ -1080,17 +644,17 @@ public class ProjectService {
         List<Map<String, Object>> exist = this.repo.findNodesByWorkspace(wsId);
         String current = this.resolveCurrentStage(ws.get("current_stage"), exist);
         if (!STAGE_OPERATE.equals(current)) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "仅运维阶段可发起迭代，当前处于「" + ProjectService.stageLabel(current) + "」阶段");
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "仅运维阶段可发起迭代，当前处于「" + stageLabel(current) + "」阶段");
         }
         Object rawTemplate = ws.get("template_code");
         if (rawTemplate == null || String.valueOf(rawTemplate).isBlank()) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "该项目未关联模板，无法按模板生成迭代节点链");
         }
-        Map<String, Object> tpl = this.requireTemplate(String.valueOf(rawTemplate));
+        Map<String, Object> tpl = templateService.requireTemplate(String.valueOf(rawTemplate));
         long templateId = ((Number)tpl.get("id")).longValue();
         ArrayList<Map<String, Object>> pick = new ArrayList<Map<String, Object>>();
         for (Map<String, Object> tn : this.repo.findTemplateNodes(templateId)) {
-            String st = ProjectService.resolveStage(tn.get("stage"), tn.get("type"));
+            String st = resolveStage(tn.get("stage"), tn.get("type"));
             if (!STAGE_REQUIREMENT.equals(st) && !"DEVELOP".equals(st)) continue;
             pick.add(tn);
         }
@@ -1114,20 +678,20 @@ public class ProjectService {
             int oldSeq = ((Number)map.get("seq")).intValue();
             int newSeq = (Integer)seqMap.get(oldSeq);
             ArrayList<Integer> deps = new ArrayList<Integer>();
-            for (Integer dep : this.parseIntList(map.get("depends_on"))) {
+            for (Integer dep : parseIntList(objectMapper, map.get("depends_on"))) {
                 Integer mapped = (Integer)seqMap.get(dep);
                 if (mapped == null) continue;
                 deps.add(mapped);
             }
-            String scope = name.isEmpty() ? this.blankToNull(map.get("deliverable")) : name;
+            String scope = name.isEmpty() ? blankToNull(map.get("deliverable")) : name;
             Map<String, Object> workflowRef = this.snapshotWorkflowRef(map.get("workflow_def_id"), string, oldSeq);
-            this.repo.insertNode(this.depId(wsId, newSeq), wsId, (String)map.get("type"), newSeq, "NOT_STARTED", this.toJson(this.mapSeqToIds(wsId, deps)), this.toJson(this.parseStringList(map.get("preconditions"))), this.toJson(workflowRef), this.toJson(List.of()), this.toJson(List.of()), (String)map.get("owner_role"), scope, STAGE_OPERATE, iteration, user.username());
+            this.repo.insertNode(depId(wsId, newSeq), wsId, (String)map.get("type"), newSeq, "NOT_STARTED", toJson(objectMapper, mapSeqToIds(wsId, deps)), toJson(objectMapper, parseStringList(objectMapper, map.get("preconditions"))), toJson(objectMapper, workflowRef), toJson(objectMapper, List.of()), toJson(objectMapper, List.of()), (String)map.get("owner_role"), scope, STAGE_OPERATE, iteration, user.username());
             LinkedHashMap<String, Object> n2 = new LinkedHashMap<String, Object>();
-            n2.put("id", this.depId(wsId, newSeq));
+            n2.put("id", depId(wsId, newSeq));
             n2.put("type", map.get("type"));
             n2.put("seq", newSeq);
             n2.put("status", "NOT_STARTED");
-            n2.put("depends_on", this.mapSeqToIds(wsId, deps));
+            n2.put("depends_on", mapSeqToIds(wsId, deps));
             n2.put("owner_role", map.get("owner_role"));
             n2.put("stage", STAGE_OPERATE);
             n2.put("iteration", iteration);
@@ -1147,7 +711,7 @@ public class ProjectService {
     @Transactional
     public long draftStagePlan(LoginUser user, String wsId, String stage, int iteration) {
         Map<String, Object> plan = this.defaultPlanFor(stage);
-        long planId = this.repo.insertStagePlan(wsId, stage, iteration, this.toJson(plan), (String)plan.get("deviation"));
+        long planId = this.repo.insertStagePlan(wsId, stage, iteration, toJson(objectMapper, plan), (String)plan.get("deviation"));
         log.info("PM 阶段规划草稿已生成: project={} stage={} iteration={} plan_id={}", new Object[]{wsId, stage, iteration, planId});
         return planId;
     }
@@ -1175,10 +739,10 @@ public class ProjectService {
         LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("plan_id", ((Number)row.get("id")).longValue());
         out.put("stage", stage);
-        out.put("stage_label", ProjectService.stageLabel(stage));
+        out.put("stage_label", stageLabel(stage));
         out.put("iteration", iteration);
         out.put("status", row.get("status"));
-        out.put("plan", this.parseJsonMap(row.get("plan_json")));
+        out.put("plan", parseJsonMap(objectMapper, row.get("plan_json")));
         out.put("deviation", row.get("deviation"));
         out.put("decided_by", row.get("decided_by"));
         out.put("decided_at", row.get("decided_at"));
@@ -1211,7 +775,7 @@ public class ProjectService {
                 throw new ResponseStatusException((HttpStatusCode)HttpStatus.CONFLICT, "该规划已被处理，请刷新");
             }
             Map<String, Object> draft = this.defaultPlanFor(stage);
-            long fresh = this.repo.insertStagePlan(wsId, stage, iteration, this.toJson(draft), "已按驳回理由重发默认草稿（人工可改）：" + reason);
+            long fresh = this.repo.insertStagePlan(wsId, stage, iteration, toJson(objectMapper, draft), "已按驳回理由重发默认草稿（人工可改）：" + reason);
             LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
             out.put("rejected_plan_id", planId);
             out.put("plan_id", fresh);
@@ -1239,16 +803,16 @@ public class ProjectService {
         if (planRow == null) {
             LinkedHashMap<String, Object> draft = new LinkedHashMap<String, Object>(this.defaultPlanFor(stage));
             if (requirement != null && !requirement.isBlank()) {
-                draft.put("requirement", this.trimTo(requirement, 2000));
+                draft.put("requirement", trimTo(requirement, 2000));
             }
             int iteration = STAGE_OPERATE.equals(stage) ? Math.max(1, this.repo.maxIteration(wsId)) : 1;
-            planId = this.repo.insertStagePlan(wsId, stage, iteration, this.toJson(draft), "AI 自动生成（对话驱动）" + (requirement == null || requirement.isBlank() ? "" : "：用户需求已带入执行输入"));
+            planId = this.repo.insertStagePlan(wsId, stage, iteration, toJson(objectMapper, draft), "AI 自动生成（对话驱动）" + (requirement == null || requirement.isBlank() ? "" : "：用户需求已带入执行输入"));
         } else {
             planId = ((Number)planRow.get("id")).longValue();
-            if (!"APPROVED".equals(String.valueOf(planRow.get("status"))) && requirement != null && !requirement.isBlank() && this.parseJsonMap(planRow.get("plan_json")).get("requirement") == null) {
-                LinkedHashMap<String, Object> pj = new LinkedHashMap<String, Object>(this.parseJsonMap(planRow.get("plan_json")));
-                pj.put("requirement", this.trimTo(requirement, 2000));
-                this.repo.updatePlanJson(planId, this.toJson(pj));
+            if (!"APPROVED".equals(String.valueOf(planRow.get("status"))) && requirement != null && !requirement.isBlank() && parseJsonMap(objectMapper, planRow.get("plan_json")).get("requirement") == null) {
+                LinkedHashMap<String, Object> pj = new LinkedHashMap<String, Object>(parseJsonMap(objectMapper, planRow.get("plan_json")));
+                pj.put("requirement", trimTo(requirement, 2000));
+                this.repo.updatePlanJson(planId, toJson(objectMapper, pj));
             }
         }
         Map latest = (Map)this.repo.findStagePlan(planId).stream().findFirst().orElseThrow();
@@ -1296,7 +860,7 @@ public class ProjectService {
         }
         Map ws = (Map)this.workspaceRepo.findById(wsId).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "project not found"));
         int iteration = ((Number)planRow.get("iteration")).intValue();
-        Map<String, Object> plan = this.parseJsonMap(planRow.get("plan_json"));
+        Map<String, Object> plan = parseJsonMap(objectMapper, planRow.get("plan_json"));
         Map<String, Object> capability = this.capabilityOf(user, wsId, stage);
         // 先建新 run 再清旧：反过来 purge 成功 + 起跑失败会让 exec_run_id 指向已删 run，阶段卡死只能修库
         String newRunId = String.valueOf(this.runService.createRunAsync(defId, null, this.stageRunInput(ws, stage, iteration, plan, null, capability), STAGE_TRIGGER).get("runId"));
@@ -1321,8 +885,8 @@ public class ProjectService {
         String stage = String.valueOf(planRow.get("stage"));
         int iteration = ((Number)planRow.get("iteration")).intValue();
         Map ws = (Map)this.workspaceRepo.findById(wsId).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "project not found"));
-        String projectName = this.strOr(ws.get("name"), wsId);
-        Map<String, Object> plan = this.parseJsonMap(planRow.get("plan_json"));
+        String projectName = strOr(ws.get("name"), wsId);
+        Map<String, Object> plan = parseJsonMap(objectMapper, planRow.get("plan_json"));
         LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("plan_id", planId);
         out.put("status", "APPROVED");
@@ -1358,8 +922,8 @@ public class ProjectService {
             out.put("bound_workflow", true);
             return out;
         }
-        StagePlanCompiler.Compiled compiled = this.planCompiler.compile(projectName, stage, iteration, plan, this.parseJsonMap(capability.get("capability")));
-        String flowName = this.trimTo("[阶段] " + projectName + " · " + stage + " 第" + iteration + "轮", 128);
+        StagePlanCompiler.Compiled compiled = this.planCompiler.compile(projectName, stage, iteration, plan, parseJsonMap(objectMapper, capability.get("capability")));
+        String flowName = trimTo("[阶段] " + projectName + " · " + stage + " 第" + iteration + "轮", 128);
         long definitionId = this.definitionService.create(flowName, "PM 阶段规划编译生成（plan_id=" + planId + "）", compiled.canvasJson(), user);
         try {
             published = this.definitionService.publish(definitionId, user);
@@ -1403,8 +967,8 @@ public class ProjectService {
         input.put("project", proj);
         input.put("stage", stage);
         input.put("iteration", iteration);
-        input.put("quality_gates", this.objList(plan.get("quality_gates")));
-        input.put("requirement", this.strOr(plan.get("requirement"), ""));
+        input.put("quality_gates", objList(objectMapper, plan.get("quality_gates")));
+        input.put("requirement", strOr(plan.get("requirement"), ""));
         input.put("resources", this.stageResourceBrief(capability));
         input.put("prior_summaries", this.priorSummaries(String.valueOf(ws.get("id"))));
         input.put("tasks", tasks);
@@ -1421,16 +985,16 @@ public class ProjectService {
     }
 
     private List<Map<String, Object>> stageResourceBrief(Map<String, Object> capability) {
-        Map<String, Object> cap = this.parseJsonMap(capability.get("capability"));
+        Map<String, Object> cap = parseJsonMap(objectMapper, capability.get("capability"));
         ArrayList<String> refs = new ArrayList<String>();
         for (String key : List.of("tools", "connectors", "artifacts")) {
-            for (Object o : this.objList(cap.get(key))) {
+            for (Object o : objList(objectMapper, cap.get(key))) {
                 if (o == null || String.valueOf(o).isBlank()) continue;
                 refs.add(String.valueOf(o).trim());
             }
         }
         ArrayList<Map<String, Object>> brief = new ArrayList<Map<String, Object>>(this.repo.describeCapabilityRefs(refs));
-        for (Object o : this.objList(cap.get("urls"))) {
+        for (Object o : objList(objectMapper, cap.get("urls"))) {
             if (o == null || String.valueOf(o).isBlank()) continue;
             LinkedHashMap<String, Object> item = new LinkedHashMap<String, Object>();
             item.put("kind", "url");
@@ -1480,30 +1044,30 @@ public class ProjectService {
         if (!existing.isEmpty()) {
             return existing;
         }
-        Map<String, Object> plan = this.parseJsonMap(planRow.get("plan_json"));
-        List<Map<String, Object>> tasks = this.mapList(plan.get("tasks"));
+        Map<String, Object> plan = parseJsonMap(objectMapper, planRow.get("plan_json"));
+        List<Map<String, Object>> tasks = mapList(objectMapper, plan.get("tasks"));
         int cursor = this.repo.maxSeq(wsId);
         LinkedHashMap<Integer, Integer> keyToSeq = new LinkedHashMap<Integer, Integer>();
         for (Map<String, Object> t : tasks) {
-            keyToSeq.put(this.intOr(t.get("key"), keyToSeq.size() + 1), ++cursor);
+            keyToSeq.put(intOr(t.get("key"), keyToSeq.size() + 1), ++cursor);
         }
         LinkedHashMap keyToId = new LinkedHashMap();
-        keyToSeq.forEach((k, s) -> keyToId.put(k, this.depId(wsId, (int)s)));
+        keyToSeq.forEach((k, s) -> keyToId.put(k, depId(wsId, (int)s)));
         ArrayList<Map<String, Object>> created = new ArrayList<Map<String, Object>>();
         for (Map<String, Object> t : tasks) {
-            int seq = keyToSeq.getOrDefault(this.intOr(t.get("key"), 0), ++cursor);
+            int seq = keyToSeq.getOrDefault(intOr(t.get("key"), 0), ++cursor);
             ArrayList<String> deps = new ArrayList<String>();
-            for (Object d : this.objList(t.get("depends"))) {
-                String id = (String)keyToId.get(this.intOr(d, -1));
+            for (Object d : objList(objectMapper, t.get("depends"))) {
+                String id = (String)keyToId.get(intOr(d, -1));
                 if (id == null) continue;
                 deps.add(id);
             }
-            String type = this.strOr(t.get("type"), "DEVELOP").toUpperCase();
-            String name = this.strOr(t.get("name"), type);
-            List<String> agents = this.strList(t.get("agents"));
-            List<String> participants = this.strList(t.get("participants"));
-            String trigger = this.strOr(t.get("trigger_mode"), "AUTO").toUpperCase();
-            String approval = this.strOr(t.get("approval_mode"), "REVIEW").toUpperCase();
+            String type = strOr(t.get("type"), "DEVELOP").toUpperCase();
+            String name = strOr(t.get("name"), type);
+            List<String> agents = strList(objectMapper, t.get("agents"));
+            List<String> participants = strList(objectMapper, t.get("participants"));
+            String trigger = strOr(t.get("trigger_mode"), "AUTO").toUpperCase();
+            String approval = strOr(t.get("approval_mode"), "REVIEW").toUpperCase();
             if (FORCE_TYPES.contains(type)) {
                 approval = "FORCE";
                 trigger = "MANUAL_START";
@@ -1512,10 +1076,10 @@ public class ProjectService {
             ext.put("name", name);
             ext.put("trigger_mode", trigger);
             ext.put("approval_mode", approval);
-            ext.put("participants", this.toJson(participants));
+            ext.put("participants", toJson(objectMapper, participants));
             ext.put("plan_id", planId);
-            String nodeId = this.depId(wsId, seq);
-            this.repo.insertNode(nodeId, wsId, type, seq, "NOT_STARTED", this.toJson(deps), this.toJson(List.of()), null, this.toJson(List.of()), this.toJson(List.of()), agents.isEmpty() ? null : agents.get(0), this.strOr(t.get("scope"), null), stage, iteration, createdBy, ext);
+            String nodeId = depId(wsId, seq);
+            this.repo.insertNode(nodeId, wsId, type, seq, "NOT_STARTED", toJson(objectMapper, deps), toJson(objectMapper, List.of()), null, toJson(objectMapper, List.of()), toJson(objectMapper, List.of()), agents.isEmpty() ? null : agents.get(0), strOr(t.get("scope"), null), stage, iteration, createdBy, ext);
             LinkedHashMap<String, Object> n = new LinkedHashMap<String, Object>();
             n.put("id", nodeId);
             n.put("type", type);
@@ -1547,7 +1111,7 @@ public class ProjectService {
         List<StageStep> steps = this.stepRepo.findByStage(wsId, current, iteration);
         boolean orchestrationMode = !steps.isEmpty();
         out.put("stage", current);
-        out.put("stage_label", ProjectService.stageLabel(current));
+        out.put("stage_label", stageLabel(current));
         out.put("iteration", iteration);
         out.put("plan", plan == null ? null : this.briefPlan(plan));
         out.put("pending_clarification", clarify);
@@ -1568,7 +1132,7 @@ public class ProjectService {
         }
         String runId = String.valueOf(plan.get("exec_run_id"));
         Map<String, Object> run = this.runService.getRun(runId);
-        List<Map<String, Object>> nodeRuns = this.mapList(run.get("nodes"));
+        List<Map<String, Object>> nodeRuns = mapList(objectMapper, run.get("nodes"));
         String runStatus = String.valueOf(run.get("status"));
         String gateNodeId = run.get("gate_node_id") == null ? null : String.valueOf(run.get("gate_node_id"));
         ArrayList waiting = new ArrayList();
@@ -1625,7 +1189,7 @@ public class ProjectService {
         b.put("reject_reason", plan.get("reject_reason"));
         b.put("exec_definition_id", plan.get("exec_definition_id"));
         b.put("exec_run_id", plan.get("exec_run_id"));
-        b.put("tasks", this.mapList(this.parseJsonMap(plan.get("plan_json")).get("tasks")));
+        b.put("tasks", mapList(objectMapper, parseJsonMap(objectMapper, plan.get("plan_json")).get("tasks")));
         return b;
     }
 
@@ -1638,9 +1202,9 @@ public class ProjectService {
         Map<String, Object> ws = this.requireProject(user, wsId);
         List<Map<String, Object>> nodes = this.repo.findNodesByWorkspace(wsId);
         String current = this.resolveCurrentStage(ws.get("current_stage"), nodes);
-        Map plan = (Map)this.repo.findCurrentStagePlan(wsId, current, iteration = this.currentIteration(wsId, current)).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, ProjectService.stageLabel(current) + "阶段还没有规划，无门可审"));
+        Map plan = (Map)this.repo.findCurrentStagePlan(wsId, current, iteration = this.currentIteration(wsId, current)).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段还没有规划，无门可审"));
         if (plan.get("exec_run_id") == null) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, ProjectService.stageLabel(current) + "阶段尚未开始执行，无门可审");
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段尚未开始执行，无门可审");
         }
         String runId = String.valueOf(plan.get("exec_run_id"));
         String string = nodeId = body == null || body.get("node_id") == null ? "" : String.valueOf(body.get("node_id")).trim();
@@ -1673,7 +1237,7 @@ public class ProjectService {
         List<Map<String, Object>> rows = this.repo.findStageCapability(wsId, stage);
         LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("stage", stage);
-        out.put("capability", rows.isEmpty() ? new LinkedHashMap() : this.parseJsonMap(rows.get(0).get("capability_json")));
+        out.put("capability", rows.isEmpty() ? new LinkedHashMap() : parseJsonMap(objectMapper, rows.get(0).get("capability_json")));
         out.put("note", rows.isEmpty() ? null : rows.get(0).get("note"));
         return out;
     }
@@ -1689,10 +1253,10 @@ public class ProjectService {
                 cap.put(k, wf);
                 continue;
             }
-            cap.put(k, this.strList(body == null ? null : body.get(k)));
+            cap.put(k, strList(objectMapper, body == null ? null : body.get(k)));
         }
         String note = body == null || body.get("note") == null ? null : String.valueOf(body.get("note")).trim();
-        this.repo.upsertStageCapability(wsId, st, this.toJson(cap), note, user.username());
+        this.repo.upsertStageCapability(wsId, st, toJson(objectMapper, cap), note, user.username());
         return this.capabilityOf(user, wsId, st);
     }
 
@@ -1706,7 +1270,7 @@ public class ProjectService {
     }
 
     private Map<String, Object> snapshotWorkflowRef(Object rawDefId, String template, int seq) {
-        Long definitionId = this.optionalLong(rawDefId, "template " + template + " seq=" + seq + " workflow_def_id");
+        Long definitionId = optionalLong(rawDefId, "template " + template + " seq=" + seq + " workflow_def_id");
         if (definitionId == null) {
             return null;
         }
@@ -1715,64 +1279,6 @@ public class ProjectService {
             return null;
         }
         return Map.of("definitionId", definitionId);
-    }
-
-    private Map<String, Object> parseScopes(Object raw) {
-        if (!(raw instanceof Map)) {
-            return Map.of();
-        }
-        Map<?, ?> map = (Map<?, ?>)raw;
-        LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
-        for (Map.Entry<?, ?> e : map.entrySet()) {
-            result.put(String.valueOf(e.getKey()), e.getValue());
-        }
-        return result;
-    }
-
-    private String blankToNull(Object v) {
-        if (v == null) {
-            return null;
-        }
-        String s = v.toString().trim();
-        return s.isEmpty() ? null : s;
-    }
-
-    private List<String> mapSeqToIds(String wsId, List<Integer> seqs) {
-        ArrayList<String> ids = new ArrayList<String>();
-        for (Integer seq : seqs) {
-            ids.add(this.depId(wsId, seq));
-        }
-        return ids;
-    }
-
-    private List<Integer> parseIntList(Object json) {
-        if (json == null) {
-            return List.of();
-        }
-        try {
-            Object parsed = this.objectMapper.readValue(json.toString(), Object.class);
-            if (parsed instanceof List) {
-                List list = (List)parsed;
-                ArrayList<Integer> result = new ArrayList<Integer>();
-                for (Object o : list) {
-                    if (o instanceof Number) {
-                        Number num = (Number)o;
-                        result.add(num.intValue());
-                        continue;
-                    }
-                    if (o == null) continue;
-                    try {
-                        result.add(Integer.parseInt(o.toString().trim()));
-                    }
-                    catch (NumberFormatException numberFormatException) {}
-                }
-                return result;
-            }
-        }
-        catch (Exception exception) {
-            // empty catch block
-        }
-        return List.of();
     }
 
     private void createProjectDirectories(String rootPath) {
@@ -1786,10 +1292,6 @@ public class ProjectService {
         catch (IOException e) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.INTERNAL_SERVER_ERROR, "创建项目目录失败: " + e.getMessage());
         }
-    }
-
-    private String depId(String wsId, int seq) {
-        return wsId + "_n" + seq;
     }
 
     private void requireWorkspaceVisible(LoginUser user, String wsId) {
@@ -1830,140 +1332,4 @@ public class ProjectService {
         }
     }
 
-    private List<String> parseStringList(Object json) {
-        if (json == null) {
-            return List.of();
-        }
-        try {
-            Object parsed = this.objectMapper.readValue(json.toString(), Object.class);
-            if (parsed instanceof List) {
-                List list = (List)parsed;
-                ArrayList<String> result = new ArrayList<String>();
-                for (Object o : list) {
-                    result.add(o == null ? null : o.toString());
-                }
-                return result;
-            }
-        }
-        catch (Exception exception) {
-            // empty catch block
-        }
-        return List.of();
-    }
-
-    private String toJson(Object value) {
-        if (value == null) {
-            return null;
-        }
-        try {
-            return this.objectMapper.writeValueAsString(value);
-        }
-        catch (Exception e) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "JSON 序列化失败");
-        }
-    }
-
-    private Integer parseVersion(Object v) {
-        if (v instanceof Number) {
-            Number n = (Number)v;
-            return n.intValue();
-        }
-        if (v != null) {
-            try {
-                return Integer.parseInt(v.toString().trim());
-            }
-            catch (NumberFormatException numberFormatException) {
-                // empty catch block
-            }
-        }
-        return null;
-    }
-
-    private Map<String, Object> parseJsonMap(Object raw) {
-        if (raw == null) {
-            return new LinkedHashMap<String, Object>();
-        }
-        if (raw instanceof Map) {
-            Map map = (Map)raw;
-            return new LinkedHashMap<String, Object>(map);
-        }
-        String text = raw.toString().trim();
-        if (text.isEmpty() || "null".equals(text)) {
-            return new LinkedHashMap<String, Object>();
-        }
-        try {
-            Object parsed = this.objectMapper.readValue(text, Object.class);
-            if (parsed instanceof Map) {
-                Map m = (Map)parsed;
-                return new LinkedHashMap<String, Object>(m);
-            }
-        }
-        catch (Exception exception) {
-            // empty catch block
-        }
-        return new LinkedHashMap<String, Object>();
-    }
-
-    private List<Object> objList(Object raw) {
-        if (raw == null) {
-            return List.of();
-        }
-        if (raw instanceof List) {
-            List list = (List)raw;
-            return list;
-        }
-        try {
-            Object parsed = this.objectMapper.readValue(raw.toString(), Object.class);
-            if (parsed instanceof List) {
-                List list = (List)parsed;
-                return list;
-            }
-        }
-        catch (Exception exception) {
-            // empty catch block
-        }
-        return List.of();
-    }
-
-    private List<Map<String, Object>> mapList(Object raw) {
-        ArrayList<Map<String, Object>> result = new ArrayList<Map<String, Object>>();
-        for (Object o : this.objList(raw)) {
-            if (!(o instanceof Map)) continue;
-            Map m = (Map)o;
-            result.add(new LinkedHashMap(m));
-        }
-        return result;
-    }
-
-    private List<String> strList(Object raw) {
-        ArrayList<String> result = new ArrayList<String>();
-        for (Object o : this.objList(raw)) {
-            result.add(o == null ? null : o.toString());
-        }
-        return result;
-    }
-
-    private String strOr(Object v, String def) {
-        if (v == null) {
-            return def;
-        }
-        String s = v.toString().trim();
-        return s.isEmpty() ? def : s;
-    }
-
-    private int intOr(Object v, int def) {
-        if (v instanceof Number) {
-            Number n = (Number)v;
-            return n.intValue();
-        }
-        if (v != null) {
-            try {
-                return Integer.parseInt(v.toString().trim());
-            }
-            catch (NumberFormatException numberFormatException) {
-                // empty catch block
-            }
-        }
-        return def;
-    }
 }
