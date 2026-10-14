@@ -11,7 +11,7 @@ import {
   SyncOutlined,
   ForwardOutlined,
 } from '@ant-design/icons'
-import { Artifact, PlanTask, STAGE_ORDER, STEP_STATUS_COLOR, STEP_STATUS_LABEL, StageExecution, StageView, advanceCheck, nextStageOf, stageColor, stageLabel, stageStatusView } from './types'
+import { Artifact, PlanTask, STAGE_ORDER, STEP_STATUS_COLOR, STEP_STATUS_LABEL, StageExecution, StageView, advanceCheck, isOrchestrated, nextStageOf, stageColor, stageLabel, stageStatusView } from './types'
 
 export function StageGroups({ views, currentStage, exec, artifacts, onAdvance, advancing }: {
   views: StageView[]
@@ -60,7 +60,7 @@ export function StageGroups({ views, currentStage, exec, artifacts, onAdvance, a
           const isOperate = v.stage === 'OPERATE'
           const check = advanceCheck(v, exec)
           // 新内核（AI 编排）模式：主控 complete_stage 自动收口推进，右边栏不提供人驱动按钮
-          const orchestrated = (exec?.steps || []).length > 0
+          const orchestrated = isOrchestrated(exec)
           const tasks = isCurrent && exec?.plan?.tasks ? (exec.plan.tasks as PlanTask[]) : []
           const nodeRuns = exec?.node_runs || []
           return {

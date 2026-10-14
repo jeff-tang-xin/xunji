@@ -360,6 +360,9 @@ export interface StageView {
   iterations: string[]
 }
 
+/** 新内核（orchestrator 编排）模式判定：steps 台账非空即 AI 驱动，旧链路按钮/规划表只在 LEGACY 模式出现 */
+export const isOrchestrated = (exec?: StageExecution | null): boolean => (exec?.steps || []).length > 0
+
 /**
  * 推进按钮可用性 + 禁用原因。
  *

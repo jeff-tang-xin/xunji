@@ -17,7 +17,7 @@ import {
   SendOutlined,
 } from '@ant-design/icons'
 import { apiFetch, apiJson } from '../../api/client'
-import { StageExecution, PlanTask, STEP_STATUS_LABEL, STEP_STATUS_COLOR } from './types'
+import { PlanTask, STEP_STATUS_COLOR, STEP_STATUS_LABEL, StageExecution, isOrchestrated } from './types'
 import { MarkdownView } from './shared'
 
 /** 附件（对话消息可带图片/文本附件） */
@@ -123,7 +123,7 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
   }
 
   // 新内核（AI 编排）模式：子任务聚焦是旧链路概念（plan.tasks 草稿与新内核 steps 无关），隐藏
-  const orchestrated = (exec?.steps || []).length > 0
+  const orchestrated = isOrchestrated(exec)
   const tasks = orchestrated ? [] : ((exec?.plan?.tasks || []) as PlanTask[])
 
   // AI 过程可见化：步骤状态变化以系统消息进对话流（讨论完成/任务完成/失败/等待答复），

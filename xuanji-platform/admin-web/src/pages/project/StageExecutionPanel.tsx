@@ -23,7 +23,7 @@ import {
   LockOutlined,
 } from '@ant-design/icons'
 import { apiJson } from '../../api/client'
-import { StageExecution, NodeRunRow, WaitingDecision, StageStepRow, EXEC_STATE_LABEL, EXEC_STATE_COLOR, NODE_RUN_STATUS_LABEL, NODE_RUN_STATUS_COLOR, STEP_STATUS_LABEL, STEP_STATUS_COLOR, STEP_TYPE_LABEL } from './types'
+import { EXEC_STATE_COLOR, EXEC_STATE_LABEL, NODE_RUN_STATUS_COLOR, NODE_RUN_STATUS_LABEL, NodeRunRow, STEP_STATUS_COLOR, STEP_STATUS_LABEL, STEP_TYPE_LABEL, StageExecution, StageStepRow, WaitingDecision, isOrchestrated } from './types'
 import { OutputBlock, MarkdownView } from './shared'
 import { StageSettingsModal } from './StageSettingsModal'
 
@@ -166,7 +166,7 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
   const planId = exec.plan?.id
   // 新内核（AI 编排）模式：step 台账非空。右边栏只读化——进度/产出/决策仅展示，
   // 人驱动动作（重跑/门审批按钮）只在旧链路模式保留；决策答复走左侧对话。
-  const orchestrated = (exec.steps || []).length > 0
+  const orchestrated = isOrchestrated(exec)
   const steps = exec.steps || []
   const cols: ColumnsType<NodeRunRow> = [
     { title: '序号', dataIndex: 'seq', width: 52 },
