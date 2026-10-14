@@ -43,7 +43,10 @@ public class StageStepRepository {
             rs.getString("error"),
             toLocal(rs.getTimestamp("created_at")),
             toLocal(rs.getTimestamp("started_at")),
-            toLocal(rs.getTimestamp("finished_at")));
+            toLocal(rs.getTimestamp("finished_at")),
+            rs.getString("verified_by"),
+            rs.getString("acceptance_json"),
+            rs.getString("deviation_json"));
 
     private static LocalDateTime toLocal(Timestamp ts) {
         return ts == null ? null : ts.toLocalDateTime();
@@ -91,11 +94,13 @@ public class StageStepRepository {
     public long insert(StageStep s) {
         // RETURNING id 同连接同语句取主键——原先 INSERT 后另查 currval 是两次独立调用，
         // 无事务绑定时可能拿到不同连接（currval 是会话级），并发下报错或拿错 id
+        // JSONB 列传 String 须显式 CAST（否则 PG 报类型不匹配）；verified_by 空时落默认 self
         Long id = jdbc.queryForObject("""
                 INSERT INTO project_stage_step (workspace_id, stage, iteration, seq, name, step_type,
                     agent, participants, status, instruction, output_summary, output_full,
-                    artifact_id, skip_reason, error, started_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    artifact_id, skip_reason, error, started_at, finished_at,
+                    verified_by, acceptance_json, deviation_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb))
                 RETURNING id
                 """,
                 Long.class,
@@ -104,22 +109,44 @@ public class StageStepRepository {
                 s.status().name(), s.instruction(), s.outputSummary(), s.outputFull(),
                 s.artifactId(), s.skipReason(), s.error(),
                 s.startedAt() == null ? null : Timestamp.valueOf(s.startedAt()),
-                s.finishedAt() == null ? null : Timestamp.valueOf(s.finishedAt()));
+                s.finishedAt() == null ? null : Timestamp.valueOf(s.finishedAt()),
+                s.verifiedBy(), s.acceptanceJson(), s.deviationJson());
         return id == null ? 0L : id;
     }
 
-    /** 状态迁移落库（含产出/理由/错误等伴随字段）。 */
+    /** 状态迁移落库（含产出/理由/错误等伴随字段）；信任链三字段原值保持。 */
     public void updateStatus(StageStep s) {
         jdbc.update("""
                 UPDATE project_stage_step SET status = ?, output_summary = ?, output_full = ?,
-                    artifact_id = ?, skip_reason = ?, error = ?, started_at = ?, finished_at = ?
+                    artifact_id = ?, skip_reason = ?, error = ?, started_at = ?, finished_at = ?,
+                    verified_by = ?, acceptance_json = CAST(? AS jsonb), deviation_json = CAST(? AS jsonb)
                 WHERE id = ?
                 """,
                 s.status().name(), s.outputSummary(), s.outputFull(),
                 s.artifactId(), s.skipReason(), s.error(),
                 s.startedAt() == null ? null : Timestamp.valueOf(s.startedAt()),
                 s.finishedAt() == null ? null : Timestamp.valueOf(s.finishedAt()),
+                s.verifiedBy(), s.acceptanceJson(), s.deviationJson(),
                 s.id());
+    }
+
+    /** 意图锚落库（规划级，一次规划一份，重规划覆盖）：执行链只读，主控每轮 prompt 强制携带。 */
+    public void saveAnchor(String workspaceId, String stage, int iteration, String anchorText) {
+        jdbc.update("""
+                INSERT INTO project_stage_anchor (workspace_id, stage, iteration, anchor_text, updated_at)
+                VALUES (?, ?, ?, ?, now())
+                ON CONFLICT (workspace_id, stage, iteration)
+                DO UPDATE SET anchor_text = EXCLUDED.anchor_text, updated_at = now()
+                """, workspaceId, stage, iteration, anchorText);
+    }
+
+    /** 意图锚读取：无则返回 null（旧规划无锚，guidance 降级为不展示）。 */
+    public String findAnchorText(String workspaceId, String stage, int iteration) {
+        List<String> rows = jdbc.query("""
+                SELECT anchor_text FROM project_stage_anchor
+                WHERE workspace_id = ? AND stage = ? AND iteration = ?
+                """, (rs, i) -> rs.getString("anchor_text"), workspaceId, stage, iteration);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     /** 启动自愈：遗留 EXECUTING 标 FAILED（服务重启中断），返回处理行数。 */

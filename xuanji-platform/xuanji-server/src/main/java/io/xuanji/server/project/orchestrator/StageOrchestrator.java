@@ -100,7 +100,7 @@ public class StageOrchestrator {
 
         OrchestrationTools tools = new OrchestrationTools(user, wsId, stage, iteration,
                 projectGoal, stageGoal, stepRepo, taskRunner, discussionEngine,
-                projectRepo, advancer, agentNodes);
+                projectRepo, advancer, agentNodes, objectMapper);
 
         AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance);
         AgentSpec spec = withTools(base, tools.toolDefs());
@@ -150,22 +150,28 @@ public class StageOrchestrator {
         };
     }
 
-    /** 主控 system prompt 的编排指导：角色基座 + 阶段目标 + 工具用法 + 黑板快照。 */
+    /** 主控 system prompt 的编排指导：角色基座 + 意图锚 + 阶段目标 + 工具用法 + 黑板快照。 */
     private String guidance(String stageGoal, String wsId, String stage, int iteration) {
         StringBuilder sb = new StringBuilder();
         sb.append("\n\n## 阶段编排指导（AI 驱动内核）\n");
         sb.append("你是本阶段的主控。用户只负责说话，流程由你决定：做什么、顺序、谁能跳。\n");
+        String anchor = stepRepo.findAnchorText(wsId, stage, iteration);
+        if (anchor != null && !anchor.isBlank()) {
+            sb.append("【意图锚（规划时锁定，不可偏离）】").append(anchor).append("\n");
+            sb.append("每一步的产出都必须对照意图锚自查：还在为同一个目标服务吗？发现偏离立即纠偏或申报。\n");
+        }
         sb.append("【阶段目标】").append(stageGoal).append("\n");
         sb.append("【工作方式】\n");
-        sb.append("1. 阶段开始或需求变化时，先用 plan_steps 规划小流程（TASK=产出型，DISCUSS=讨论型）；\n");
+        sb.append("1. 阶段开始或需求变化时，先用 plan_steps 规划小流程（TASK=产出型，DISCUSS=讨论型）；规划必须携带 intent_anchor（全局意图与总体验收口径），并为每个 TASK 步给出可判定的 acceptance 断言（test/artifact/api 三类，禁止「质量良好」这类不可判定描述）；\n");
         sb.append("2. 澄清/共识类的事直接在对话里完成（秒级），不要做成任务；\n");
         sb.append("3. 需要多角色视角时用 discuss 发起讨论；rounds 默认 1（并行独立观点）即可，互见轮仅在确需收敛分歧时用（每轮发言需数分钟，轮次越多越慢）；\n");
-        sb.append("4. 有明确产出的工作用 execute_step 派给对应 agent（后台执行，3 分钟超时，任务必须小）；\n");
+        sb.append("4. 有明确产出的工作用 execute_step 派给对应 agent（后台执行，8 分钟超时，任务必须小）；instruction 必须包含该步的 acceptance 验收口径，让执行者知道「什么算做完」；\n");
         sb.append("5. 判断某个小流程不值得做时用 skip_step 跳过，必须写明理由；\n");
-        sb.append("6. 需要用户拍板时用 request_decision；用户在对话里答复后用 record_answer 落档；\n");
-        sb.append("7. 阶段职责完成（无执行中/等待中的小流程）时用 complete_stage 收口推进。\n");
-        sb.append("8. 所有 agent 参数（agent/participants/summarizer）一律用英文名（agent_config.name，如 project_manager、product_analyst），禁止用中文显示名；\n");
-        sb.append("9. plan_steps 只规划不执行——规划里登记的 DISCUSS/TASK 步骤由你后续逐个用 discuss/execute_step 发起，不要规划后又立刻重复发起同一件事。\n");
+        sb.append("6. 执行中发现某步无法按计划完成（技术障碍/依赖缺失/成本超限），必须先用 declare_deviation 申报偏差（原因+替代方案），禁止静默换路、静默降级或悄悄缩小范围；降级影响交付口径时继续用 request_decision 征询用户；\n");
+        sb.append("7. 需要用户拍板时用 request_decision；用户在对话里答复后用 record_answer 落档；\n");
+        sb.append("8. 阶段职责完成（无执行中/等待中的小流程）时用 complete_stage 收口推进；收口总结必须如实列出未达成/降级/跳过的项，禁止把未验证的说成已完成；\n");
+        sb.append("9. 所有 agent 参数（agent/participants/summarizer）一律用英文名（agent_config.name，如 project_manager、product_analyst），禁止用中文显示名；\n");
+        sb.append("10. plan_steps 只规划不执行——规划里登记的 DISCUSS/TASK 步骤由你后续逐个用 discuss/execute_step 发起，不要规划后又立刻重复发起同一件事。\n");
         sb.append("【当前黑板】\n").append(stepDigest(wsId, stage, iteration));
         return sb.toString();
     }

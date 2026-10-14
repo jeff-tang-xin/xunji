@@ -33,17 +33,23 @@ public record StageStep(
         String error,
         LocalDateTime createdAt,
         LocalDateTime startedAt,
-        LocalDateTime finishedAt) {
+        LocalDateTime finishedAt,
+        String verifiedBy,
+        String acceptanceJson,
+        String deviationJson) {
 
     public StageStep {
         participants = participants == null ? List.of() : List.copyOf(participants);
+        // 信任链：验证来源默认 self（AI 自述）——tool/human 只能由平台判定器与人工确认路径写入
+        verifiedBy = verifiedBy == null || verifiedBy.isBlank() ? "self" : verifiedBy;
     }
 
     /** 换 id（insert 后回填），其余不变。 */
     public StageStep withId(long newId) {
         return new StageStep(newId, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, status, instruction, outputSummary, outputFull, artifactId,
-                skipReason, error, createdAt, startedAt, finishedAt);
+                skipReason, error, createdAt, startedAt, finishedAt,
+                verifiedBy, acceptanceJson, deviationJson);
     }
 
     /** 是否活跃（执行中或等待用户）——收口校验：存在活跃步骤则不可收口。 */
@@ -65,35 +71,51 @@ public record StageStep(
                 createdAt,
                 status == StepStatus.PLANNED && next == StepStatus.EXECUTING ? now : startedAt,
                 next == StepStatus.DONE || next == StepStatus.SKIPPED
-                        || next == StepStatus.FAILED ? now : finishedAt);
+                        || next == StepStatus.FAILED ? now : finishedAt,
+                verifiedBy, acceptanceJson, deviationJson);
     }
 
     /** 任务/讨论完成：状态 DONE + 产出摘要与全文 + 关联产物。 */
     public StageStep withOutput(String summary, String full, Long artifactId) {
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.DONE, instruction, summary, full, artifactId,
-                skipReason, error, createdAt, startedAt, LocalDateTime.now());
+                skipReason, error, createdAt, startedAt, LocalDateTime.now(),
+                verifiedBy, acceptanceJson, deviationJson);
     }
 
     /** 执行失败：状态 FAILED + 错误信息（主控下轮对话可见，自主决定重试或换路）。 */
     public StageStep withError(String message) {
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.FAILED, instruction, outputSummary, outputFull,
-                artifactId, skipReason, message, createdAt, startedAt, LocalDateTime.now());
+                artifactId, skipReason, message, createdAt, startedAt, LocalDateTime.now(),
+                verifiedBy, acceptanceJson, deviationJson);
     }
 
     /** 主控跳过：状态 SKIPPED + 理由留档（能跳就跳，但必须说清为什么）。 */
     public StageStep withSkip(String reason) {
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.SKIPPED, instruction, outputSummary, outputFull,
-                artifactId, reason, error, createdAt, startedAt, LocalDateTime.now());
+                artifactId, reason, error, createdAt, startedAt, LocalDateTime.now(),
+                verifiedBy, acceptanceJson, deviationJson);
     }
 
     /** 用户答复决策：状态 DONE + 答复留档。 */
     public StageStep withAnswer(String answer) {
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.DONE, instruction, answer, outputFull,
-                artifactId, skipReason, error, createdAt, startedAt, LocalDateTime.now());
+                artifactId, skipReason, error, createdAt, startedAt, LocalDateTime.now(),
+                verifiedBy, acceptanceJson, deviationJson);
+    }
+
+    /**
+     * 偏差申报落档（不改状态）：主控发现无法按计划完成时经 declare_deviation 申报，
+     * {reason, fallback, declaredAt} JSON。静默降级（无申报的实质偏差）由第二批判定器比对抓取。
+     */
+    public StageStep withDeviation(String deviationJson) {
+        return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
+                participants, status, instruction, outputSummary, outputFull,
+                artifactId, skipReason, error, createdAt, startedAt, finishedAt,
+                verifiedBy, acceptanceJson, deviationJson);
     }
 
     /** participants 列的存储形态（逗号分隔），解析与序列化收敛在此。 */

@@ -43,12 +43,14 @@ public class OrchestrationTools {
     private final ProjectRepository projectRepo;
     private final StageAdvancer advancer;
     private final io.xuanji.server.engine.AgentNodeExecutor agentNodes;
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
     public OrchestrationTools(LoginUser user, String wsId, String stage, int iteration,
                               String projectGoal, String stageGoal,
                               StageStepRepository stepRepo, TaskRunner taskRunner,
                               DiscussionEngine discussionEngine, ProjectRepository projectRepo,
-                              StageAdvancer advancer, io.xuanji.server.engine.AgentNodeExecutor agentNodes) {
+                              StageAdvancer advancer, io.xuanji.server.engine.AgentNodeExecutor agentNodes,
+                              com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
         this.user = user;
         this.wsId = wsId;
         this.stage = stage;
@@ -61,19 +63,22 @@ public class OrchestrationTools {
         this.projectRepo = projectRepo;
         this.advancer = advancer;
         this.agentNodes = agentNodes;
+        this.objectMapper = objectMapper;
     }
 
     /** 主控可见的全部编排工具（BEAN 形态 ToolDef）。 */
     public List<ToolDef> toolDefs() {
         List<ToolDef> defs = new ArrayList<>();
-        defs.add(def("plan_steps", "规划本阶段的小流程清单（做什么、顺序、谁来做）。阶段开始或需求变化时调用；会替换尚未开始执行的既有规划。",
+        defs.add(def("plan_steps", "规划本阶段的小流程清单（做什么、顺序、谁来做）。阶段开始或需求变化时调用；会替换尚未开始执行的既有规划。必须携带 intent_anchor（全局意图锚）并为每个 TASK 步给出可判定的 acceptance 验收断言。",
                 planStepsSchema(), List.of("steps")));
         defs.add(def("discuss", "发起一场多方讨论（结构化群聊）：参与者逐个发言（第一轮并行独立观点、后续轮互见讨论），最后汇总共识。异步进行，完成后结果进黑板。",
                 discussSchema(), List.of("name", "topic", "participants")));
-        defs.add(def("execute_step", "派发一个任务型小流程给指定 agent 后台执行（产出登记为交付物，3 分钟超时）。异步进行，完成后结果进黑板。",
+        defs.add(def("execute_step", "派发一个任务型小流程给指定 agent 后台执行（产出登记为交付物，8 分钟超时）。异步进行，完成后结果进黑板。instruction 必须包含该步的 acceptance 验收口径。",
                 executeStepSchema(), List.of("name", "agent", "instruction")));
         defs.add(def("skip_step", "跳过某个未执行的小流程，必须写明理由（留档，用户可见）。",
                 skipStepSchema(), List.of("seq", "reason")));
+        defs.add(def("declare_deviation", "申报偏差：某步无法按计划完成、需要换路或降级时必须先申报（原因 + 替代方案），禁止静默换路。申报后继续用 request_decision 征询用户是否接受降级方案。",
+                declareDeviationSchema(), List.of("seq", "reason", "fallback")));
         defs.add(def("request_decision", "向用户提出决策请求（问题会显示在右侧决策区，用户答复后你在对话里收到）。",
                 requestDecisionSchema(), List.of("question")));
         defs.add(def("record_answer", "把用户在对话里给出的答复落到对应决策上（决策闭环）。",
@@ -90,6 +95,12 @@ public class OrchestrationTools {
             Object stepsObj = req.input().get("steps");
             if (!(stepsObj instanceof List<?> steps) || steps.isEmpty()) {
                 return ToolResult.of(Map.of("ok", false, "message", "steps 不能为空"));
+            }
+            // 意图锚：规划级全局意图与验收口径，落库后每轮 prompt 强制携带（防长链漂移）
+            String anchor = str(req.input().get("intent_anchor"));
+            if (anchor.isBlank()) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "intent_anchor 不能为空：用一段话锁定本阶段的全局意图与总体验收口径，后续每步执行都会对照它防走偏"));
             }
             List<StageStep> rows = new ArrayList<>();
             int seq = 1;
@@ -112,13 +123,40 @@ public class OrchestrationTools {
                 @SuppressWarnings("unchecked")
                 List<String> participants = m.get("participants") instanceof List<?> pl
                         ? pl.stream().map(String::valueOf).toList() : List.of();
+                // acceptance 断言：可判定的验收标准（test/artifact/api），规划时锁定，执行链不可改
+                String acceptanceJson = toJson(m.get("acceptance"));
                 rows.add(new StageStep(null, wsId, stage, iteration, seq++, name, type,
                         str(m.get("agent")), participants, StepStatus.PLANNED,
-                        str(m.get("instruction")), null, null, null, null, null, null, null, null));
+                        str(m.get("instruction")), null, null, null, null, null, null, null, null,
+                        null, acceptanceJson, null));
             }
             stepRepo.replacePlanned(wsId, stage, iteration, rows);
+            stepRepo.saveAnchor(wsId, stage, iteration, anchor);
             return ToolResult.of(Map.of("ok", true, "planned", rows.size(),
-                    "message", "规划已登记，共 " + rows.size() + " 个小流程"));
+                    "message", "规划已登记，共 " + rows.size() + " 个小流程；意图锚已锁定"));
+        });
+    }
+
+    /** 偏差申报：降级/换路的唯一合法通道，落 deviation_json 留档（静默降级由判定器比对抓取）。 */
+    private Tool declareDeviation() {
+        return tool("declare_deviation", req -> {
+            long seq = parseLong(req.input().get("seq"), -1);
+            String reason = str(req.input().get("reason"));
+            String fallback = str(req.input().get("fallback"));
+            Optional<StageStep> found = stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .filter(s -> s.seq() == seq).findFirst();
+            if (found.isEmpty()) {
+                return ToolResult.of(Map.of("ok", false, "message", "序号不存在: " + seq));
+            }
+            if (reason.isBlank() || fallback.isBlank()) {
+                return ToolResult.of(Map.of("ok", false, "message", "reason/fallback 必填：说清为什么做不到、打算改成什么"));
+            }
+            String deviationJson = toJson(Map.of(
+                    "reason", reason, "fallback", fallback,
+                    "declaredAt", java.time.LocalDateTime.now().toString()));
+            stepRepo.updateStatus(found.get().withDeviation(deviationJson));
+            return ToolResult.of(Map.of("ok", true, "message",
+                    "偏差已申报留档（seq=" + seq + "）。若降级影响交付口径，继续用 request_decision 征询用户"));
         });
     }
 
@@ -242,9 +280,14 @@ public class OrchestrationTools {
         return TopicBrief.of(projectGoal, stageGoal, topic, boardDigest());
     }
 
-    /** 黑板摘要：本阶段各步骤状态与产出（goal 传达的上下文来源）。 */
+    /** 黑板摘要：意图锚 + 本阶段各步骤状态与产出（goal 传达的上下文来源，执行 agent 与讨论参与者同见）。 */
     public String boardDigest() {
         StringBuilder sb = new StringBuilder();
+        String anchor = stepRepo.findAnchorText(wsId, stage, iteration);
+        if (anchor != null && !anchor.isBlank()) {
+            sb.append("【意图锚——本阶段一切工作的最高准绳，产出偏离它即走偏】\n")
+              .append(truncate(anchor, 400)).append("\n");
+        }
         for (StageStep s : stepRepo.findByStage(wsId, stage, iteration)) {
             sb.append("- [").append(s.seq()).append("] ").append(s.name())
                     .append("（").append(s.status()).append("）");
@@ -254,6 +297,17 @@ public class OrchestrationTools {
             sb.append("\n");
         }
         return sb.length() == 0 ? "（本阶段尚无记录）" : sb.toString();
+    }
+
+    private String toJson(Object value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** agent 名前置校验：LLM 偶尔传中文显示名（实测「项目经理」400），提前拦截并给出正确名单。 */
@@ -270,7 +324,8 @@ public class OrchestrationTools {
         int seq = stepRepo.findByStage(wsId, stage, iteration).stream()
                 .mapToInt(StageStep::seq).max().orElse(0) + 1;
         return new StageStep(null, wsId, stage, iteration, seq, name, type, agent,
-                participants, StepStatus.PLANNED, instruction, null, null, null, null, null, null, null, null);
+                participants, StepStatus.PLANNED, instruction, null, null, null, null, null, null, null, null,
+                null, null, null);
     }
 
     private Tool tool(String id, java.util.function.Function<ToolRequest, ToolResult> body) {
@@ -303,6 +358,7 @@ public class OrchestrationTools {
             case "discuss" -> discuss();
             case "execute_step" -> executeStep();
             case "skip_step" -> skipStep();
+            case "declare_deviation" -> declareDeviation();
             case "request_decision" -> requestDecision();
             case "record_answer" -> recordAnswer();
             case "complete_stage" -> completeStage();
@@ -310,17 +366,23 @@ public class OrchestrationTools {
         };
     }
 
-    /** plan_steps 入参 schema：steps 数组，元素为 name/type/agent/participants/instruction。 */
+    /** plan_steps 入参 schema：intent_anchor + steps 数组（name/type/agent/participants/instruction/acceptance）。 */
     private Map<String, Object> planStepsSchema() {
+        Map<String, Object> acceptanceProps = new LinkedHashMap<>();
+        acceptanceProps.put("type", str("断言类型：test=测试通过 / artifact=产物存在且合规 / api=接口响应符合预期"));
+        acceptanceProps.put("target", str("判定对象：测试类名/产物路径/接口端点"));
+        acceptanceProps.put("expect", str("可判定的预期：如 pass、含某章节、返回 200 且含某字段——禁止写「质量良好」这类不可判定描述"));
         Map<String, Object> stepProps = new LinkedHashMap<>();
         stepProps.put("name", str("小流程名"));
         stepProps.put("type", str("TASK=产出型 / DISCUSS=讨论型"));
         stepProps.put("agent", str("TASK 的执行 agent 英文名（agent_config.name，如 product_analyst；禁用中文显示名）；DISCUSS 可省"));
         stepProps.put("participants", arr(str("DISCUSS 参与者 agent 英文名名单（如 [\"product_analyst\",\"architect\"]；禁用中文显示名）")));
         stepProps.put("instruction", str("任务说明/讨论议题"));
+        stepProps.put("acceptance", arr(obj(acceptanceProps)));
         Map<String, Object> props = new LinkedHashMap<>();
+        props.put("intent_anchor", str("意图锚：一段话锁定本阶段全局意图与总体验收口径（用户要什么、成功长什么样）。规划后锁定，后续每步执行都对照它防走偏；重规划时才可更新"));
         props.put("steps", arr(obj(stepProps)));
-        return schema(props, List.of("steps"));
+        return schema(props, List.of("intent_anchor", "steps"));
     }
 
     private Map<String, Object> discussSchema() {
@@ -346,6 +408,14 @@ public class OrchestrationTools {
         props.put("seq", str("要跳过的小流程序号"));
         props.put("reason", str("跳过理由"));
         return schema(props, List.of("seq", "reason"));
+    }
+
+    private Map<String, Object> declareDeviationSchema() {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("seq", str("偏差发生的小流程序号"));
+        props.put("reason", str("为什么无法按计划完成（技术障碍/依赖缺失/成本超限）"));
+        props.put("fallback", str("替代方案或降级方案的具体内容"));
+        return schema(props, List.of("seq", "reason", "fallback"));
     }
 
     private Map<String, Object> requestDecisionSchema() {
