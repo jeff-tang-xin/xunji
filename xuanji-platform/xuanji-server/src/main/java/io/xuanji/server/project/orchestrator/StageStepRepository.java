@@ -46,7 +46,8 @@ public class StageStepRepository {
             toLocal(rs.getTimestamp("finished_at")),
             rs.getString("verified_by"),
             rs.getString("acceptance_json"),
-            rs.getString("deviation_json"));
+            rs.getString("deviation_json"),
+            StageStep.parseParticipants(rs.getString("requirement_codes")));
 
     private static LocalDateTime toLocal(Timestamp ts) {
         return ts == null ? null : ts.toLocalDateTime();
@@ -99,8 +100,8 @@ public class StageStepRepository {
                 INSERT INTO project_stage_step (workspace_id, stage, iteration, seq, name, step_type,
                     agent, participants, status, instruction, output_summary, output_full,
                     artifact_id, skip_reason, error, started_at, finished_at,
-                    verified_by, acceptance_json, deviation_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb))
+                    verified_by, acceptance_json, deviation_json, requirement_codes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb), CAST(? AS jsonb))
                 RETURNING id
                 """,
                 Long.class,
@@ -110,7 +111,8 @@ public class StageStepRepository {
                 s.artifactId(), s.skipReason(), s.error(),
                 s.startedAt() == null ? null : Timestamp.valueOf(s.startedAt()),
                 s.finishedAt() == null ? null : Timestamp.valueOf(s.finishedAt()),
-                s.verifiedBy(), s.acceptanceJson(), s.deviationJson());
+                s.verifiedBy(), s.acceptanceJson(), s.deviationJson(),
+                s.requirementCodes().isEmpty() ? null : StageStep.joinParticipants(s.requirementCodes()));
         return id == null ? 0L : id;
     }
 

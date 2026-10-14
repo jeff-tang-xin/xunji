@@ -148,6 +148,15 @@ public class ProjectController {
     }
 
     /**
+     * 需求清单（V34 需求先行）：需求项 + 依赖拓扑深度（前端分层画拓扑图）。
+     * depth = 依赖链长度（无依赖 0，依赖 depth 最大值 +1）；循环依赖理论上有 declare 防环兜底，此处防御性封顶。
+     */
+    @GetMapping("/{id}/requirements")
+    public Object requirements(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {
+        return projects.requirements(user, id);
+    }
+
+    /**
      * 审批阶段流程里的决策门：{@code {"node_id":"t2","decision":"APPROVE","comment":"..."}}。
      *
      * <p>直接交给引擎的 resume（驳回带批注会触发该节点按意见重生成）。项目侧不另写一套审批状态——

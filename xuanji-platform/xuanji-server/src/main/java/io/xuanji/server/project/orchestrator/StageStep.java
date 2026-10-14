@@ -36,10 +36,13 @@ public record StageStep(
         LocalDateTime finishedAt,
         String verifiedBy,
         String acceptanceJson,
-        String deviationJson) {
+        String deviationJson,
+        List<String> requirementCodes) {
 
     public StageStep {
         participants = participants == null ? List.of() : List.copyOf(participants);
+        // 需求先行：步骤声明「为了哪个需求」（code 列表，规划时锁定）
+        requirementCodes = requirementCodes == null ? List.of() : List.copyOf(requirementCodes);
         // 信任链：验证来源默认 self（AI 自述）——tool/human 只能由平台判定器与人工确认路径写入
         verifiedBy = verifiedBy == null || verifiedBy.isBlank() ? "self" : verifiedBy;
     }
@@ -49,7 +52,7 @@ public record StageStep(
         return new StageStep(newId, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, status, instruction, outputSummary, outputFull, artifactId,
                 skipReason, error, createdAt, startedAt, finishedAt,
-                verifiedBy, acceptanceJson, deviationJson);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
     }
 
     /** 是否活跃（执行中或等待用户）——收口校验：存在活跃步骤则不可收口。 */
@@ -72,7 +75,7 @@ public record StageStep(
                 status == StepStatus.PLANNED && next == StepStatus.EXECUTING ? now : startedAt,
                 next == StepStatus.DONE || next == StepStatus.SKIPPED
                         || next == StepStatus.FAILED ? now : finishedAt,
-                verifiedBy, acceptanceJson, deviationJson);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
     }
 
     /** 任务/讨论完成：状态 DONE + 产出摘要与全文 + 关联产物。 */
@@ -80,7 +83,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.DONE, instruction, summary, full, artifactId,
                 skipReason, error, createdAt, startedAt, LocalDateTime.now(),
-                verifiedBy, acceptanceJson, deviationJson);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
     }
 
     /** 执行失败：状态 FAILED + 错误信息（主控下轮对话可见，自主决定重试或换路）。 */
@@ -88,7 +91,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.FAILED, instruction, outputSummary, outputFull,
                 artifactId, skipReason, message, createdAt, startedAt, LocalDateTime.now(),
-                verifiedBy, acceptanceJson, deviationJson);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
     }
 
     /** 主控跳过：状态 SKIPPED + 理由留档（能跳就跳，但必须说清为什么）。 */
@@ -96,7 +99,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.SKIPPED, instruction, outputSummary, outputFull,
                 artifactId, reason, error, createdAt, startedAt, LocalDateTime.now(),
-                verifiedBy, acceptanceJson, deviationJson);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
     }
 
     /** 用户答复决策：状态 DONE + 答复留档。 */
@@ -104,7 +107,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.DONE, instruction, answer, outputFull,
                 artifactId, skipReason, error, createdAt, startedAt, LocalDateTime.now(),
-                verifiedBy, acceptanceJson, deviationJson);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
     }
 
     /**
@@ -115,7 +118,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, status, instruction, outputSummary, outputFull,
                 artifactId, skipReason, error, createdAt, startedAt, finishedAt,
-                verifiedBy, acceptanceJson, deviationJson);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
     }
 
     /** participants 列的存储形态（逗号分隔），解析与序列化收敛在此。 */

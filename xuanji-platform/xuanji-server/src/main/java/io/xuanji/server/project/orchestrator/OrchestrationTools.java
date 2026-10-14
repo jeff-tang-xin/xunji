@@ -44,13 +44,15 @@ public class OrchestrationTools {
     private final StageAdvancer advancer;
     private final io.xuanji.server.engine.AgentNodeExecutor agentNodes;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    private final RequirementRepository requirementRepo;
 
     public OrchestrationTools(LoginUser user, String wsId, String stage, int iteration,
                               String projectGoal, String stageGoal,
                               StageStepRepository stepRepo, TaskRunner taskRunner,
                               DiscussionEngine discussionEngine, ProjectRepository projectRepo,
                               StageAdvancer advancer, io.xuanji.server.engine.AgentNodeExecutor agentNodes,
-                              com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
+                              com.fasterxml.jackson.databind.ObjectMapper objectMapper,
+                              RequirementRepository requirementRepo) {
         this.user = user;
         this.wsId = wsId;
         this.stage = stage;
@@ -64,6 +66,7 @@ public class OrchestrationTools {
         this.advancer = advancer;
         this.agentNodes = agentNodes;
         this.objectMapper = objectMapper;
+        this.requirementRepo = requirementRepo;
     }
 
     /** 主控可见的全部编排工具（BEAN 形态 ToolDef）。 */
@@ -71,14 +74,16 @@ public class OrchestrationTools {
         List<ToolDef> defs = new ArrayList<>();
         defs.add(def("plan_steps", "规划本阶段的小流程清单（做什么、顺序、谁来做）。阶段开始或需求变化时调用；会替换尚未开始执行的既有规划。必须携带 intent_anchor（全局意图锚）并为每个 TASK 步给出可判定的 acceptance 验收断言。",
                 planStepsSchema(), List.of("steps")));
-        defs.add(def("discuss", "发起一场多方讨论（结构化群聊）：参与者逐个发言（第一轮并行独立观点、后续轮互见讨论），最后汇总共识。异步进行，完成后结果进黑板。",
+        defs.add(def("discuss", "发起一场多方讨论（结构化群聊）：参与者逐个发言（第一轮并行独立观点、后续轮互见讨论），最后由你汇总共识。讨论最少三方——你必须主持，participants 填目的方等参与方（至少 2 个角色，按问题域拉能解答的人）。异步进行，完成后结果进黑板。",
                 discussSchema(), List.of("name", "topic", "participants")));
-        defs.add(def("execute_step", "派发一个任务型小流程给指定 agent 后台执行（产出登记为交付物，8 分钟超时）。异步进行，完成后结果进黑板。instruction 必须包含该步的 acceptance 验收口径。",
+        defs.add(def("execute_step", "派发一个任务型小流程给指定 agent 后台执行（产出登记为交付物，8 分钟超时）。异步进行，完成后结果进黑板。instruction 必须包含该步的 acceptance 验收口径；执行 agent 遇到需求/架构疑问会通过 ask_peer 向对应角色求助，问答留档你可见。",
                 executeStepSchema(), List.of("name", "agent", "instruction")));
         defs.add(def("skip_step", "跳过某个未执行的小流程，必须写明理由（留档，用户可见）。",
                 skipStepSchema(), List.of("seq", "reason")));
         defs.add(def("declare_deviation", "申报偏差：某步无法按计划完成、需要换路或降级时必须先申报（原因 + 替代方案），禁止静默换路。申报后继续用 request_decision 征询用户是否接受降级方案。",
                 declareDeviationSchema(), List.of("seq", "reason", "fallback")));
+        defs.add(def("declare_requirements", "需求先行：把讨论沉淀的需求项落库（PROPOSED），或在用户明确同意后置为 CONFIRMED。需求项是所有实施工作的锚定物——规划步骤前必须先有确认的需求；运行中新增需求也走这里（先 propose 再请用户确认）。confirm 动作必须先有用户明确同意（用 request_decision 征询并留档），禁止未经用户确认直接置 CONFIRMED。",
+                declareRequirementsSchema(), List.of("action", "requirements")));
         defs.add(def("request_decision", "向用户提出决策请求（问题会显示在右侧决策区，用户答复后你在对话里收到）。",
                 requestDecisionSchema(), List.of("question")));
         defs.add(def("record_answer", "把用户在对话里给出的答复落到对应决策上（决策闭环）。",
@@ -125,10 +130,14 @@ public class OrchestrationTools {
                         ? pl.stream().map(String::valueOf).toList() : List.of();
                 // acceptance 断言：可判定的验收标准（test/artifact/api），规划时锁定，执行链不可改
                 String acceptanceJson = toJson(m.get("acceptance"));
+                // 需求先行：步骤声明服务哪些需求项（code 列表，可空）
+                @SuppressWarnings("unchecked")
+                List<String> reqCodes = m.get("requirement_codes") instanceof List<?> rl
+                        ? rl.stream().map(String::valueOf).toList() : List.of();
                 rows.add(new StageStep(null, wsId, stage, iteration, seq++, name, type,
                         str(m.get("agent")), participants, StepStatus.PLANNED,
                         str(m.get("instruction")), null, null, null, null, null, null, null, null,
-                        null, acceptanceJson, null));
+                        null, acceptanceJson, null, reqCodes));
             }
             stepRepo.replacePlanned(wsId, stage, iteration, rows);
             stepRepo.saveAnchor(wsId, stage, iteration, anchor);
@@ -160,6 +169,153 @@ public class OrchestrationTools {
         });
     }
 
+    /**
+     * 需求先行（V34）：需求项是所有实施工作的锚定物。
+     * propose=落 PROPOSED（可自动生成 code）；confirm=置 CONFIRMED（纪律：必须先有用户明确同意并留档）；
+     * update=改 PROPOSED 草稿；drop=废弃（被 active 需求依赖时拒绝）。
+     * depends_on 引用必须存在且不得成环（DFS 检测）。
+     */
+    private Tool declareRequirements() {
+        return tool("declare_requirements", req -> {
+            String action = str(req.input().get("action"));
+            if (!(req.input().get("requirements") instanceof List<?> items) || items.isEmpty()) {
+                return ToolResult.of(Map.of("ok", false, "message", "requirements 不能为空"));
+            }
+            List<String> results = new ArrayList<>();
+            for (Object o : items) {
+                if (!(o instanceof Map<?, ?> m)) {
+                    continue;
+                }
+                String title = str(m.get("title"));
+                if (title.isBlank()) {
+                    return ToolResult.of(Map.of("ok", false, "message", "每条需求必须有 title"));
+                }
+                String code = str(m.get("code"));
+                String depsJson = m.get("depends_on") instanceof List<?> dl && !dl.isEmpty()
+                        ? toJson(dl.stream().map(String::valueOf).toList()) : null;
+                switch (action) {
+                    case "propose" -> {
+                        if (code.isBlank()) {
+                            code = nextRequirementCode();
+                        }
+                        if (requirementRepo.findByCode(wsId, code).isPresent()) {
+                            return ToolResult.of(Map.of("ok", false, "message",
+                                    "需求编号已存在: " + code + "（更新已有需求请用 update 动作）"));
+                        }
+                        String cycle = checkDependencyCycle(code, depsJson);
+                        if (cycle != null) {
+                            return ToolResult.of(Map.of("ok", false, "message", cycle));
+                        }
+                        requirementRepo.insert(new RequirementRepository.Requirement(
+                                null, wsId, code, title, str(m.get("description")),
+                                m.get("acceptance") == null ? null : toJson(m.get("acceptance")),
+                                "PROPOSED", depsJson, "INCUBATION", user.username(), null, null));
+                        results.add(code + " PROPOSED「" + title + "」");
+                    }
+                    case "confirm" -> {
+                        if (code.isBlank()) {
+                            return ToolResult.of(Map.of("ok", false, "message", "confirm 必须带 code"));
+                        }
+                        if (requirementRepo.findByCode(wsId, code).isEmpty()) {
+                            return ToolResult.of(Map.of("ok", false, "message", "需求不存在: " + code));
+                        }
+                        // 纪律（工具描述与 guidance 双重声明）：confirm 前必须已用 request_decision
+                        // 征得用户同意并 record_answer 留档——PM 不得代替用户确认
+                        requirementRepo.updateStatus(wsId, code, "CONFIRMED");
+                        results.add(code + " CONFIRMED");
+                    }
+                    case "update" -> {
+                        if (code.isBlank()) {
+                            return ToolResult.of(Map.of("ok", false, "message", "update 必须带 code"));
+                        }
+                        RequirementRepository.Requirement existing = requirementRepo
+                                .findByCode(wsId, code).orElse(null);
+                        if (existing == null) {
+                            return ToolResult.of(Map.of("ok", false, "message", "需求不存在: " + code));
+                        }
+                        if (!"PROPOSED".equals(existing.status())) {
+                            return ToolResult.of(Map.of("ok", false, "message",
+                                    code + " 已确认锁定（" + existing.status() + "）：改动请落一条新的 PROPOSED 需求并说明取代关系"));
+                        }
+                        String cycle = checkDependencyCycle(code, depsJson);
+                        if (cycle != null) {
+                            return ToolResult.of(Map.of("ok", false, "message", cycle));
+                        }
+                        requirementRepo.updateDraft(new RequirementRepository.Requirement(
+                                existing.id(), wsId, code,
+                                title.isBlank() ? existing.title() : title,
+                                str(m.get("description")).isBlank() ? existing.description() : str(m.get("description")),
+                                m.get("acceptance") == null ? existing.acceptanceJson() : toJson(m.get("acceptance")),
+                                existing.status(),
+                                depsJson == null ? existing.dependsOn() : depsJson,
+                                existing.source(), existing.createdBy(), existing.createdAt(), existing.updatedAt()));
+                        results.add(code + " UPDATED");
+                    }
+                    case "drop" -> {
+                        if (code.isBlank()) {
+                            return ToolResult.of(Map.of("ok", false, "message", "drop 必须带 code"));
+                        }
+                        if (requirementRepo.countDependents(wsId, code) > 0) {
+                            return ToolResult.of(Map.of("ok", false, "message",
+                                    code + " 被其他需求依赖，先处理依赖方再废弃"));
+                        }
+                        requirementRepo.updateStatus(wsId, code, "DROPPED");
+                        results.add(code + " DROPPED");
+                    }
+                    default -> {
+                        return ToolResult.of(Map.of("ok", false,
+                                "message", "action 必须是 propose/confirm/update/drop"));
+                    }
+                }
+            }
+            return ToolResult.of(Map.of("ok", true, "message",
+                    "需求已落档: " + String.join("；", results)
+                            + ("propose".equals(action) ? "。请用 request_decision 请用户确认后再规划实施" : "")));
+        });
+    }
+
+    /** 自动生成下一个需求编号：REQ-001 起，取现有最大序号 +1。 */
+    private String nextRequirementCode() {
+        int max = requirementRepo.findByWorkspace(wsId).stream()
+                .map(RequirementRepository.Requirement::code)
+                .filter(c -> c.matches("REQ-\\d+"))
+                .mapToInt(c -> Integer.parseInt(c.substring(4)))
+                .max().orElse(0);
+        return String.format("REQ-%03d", max + 1);
+    }
+
+    /** 依赖防环：从新需求出发沿 depends_on 深搜，回到自身即成环。返回 null 表示无环。 */
+    private String checkDependencyCycle(String code, String depsJson) {
+        if (depsJson == null) {
+            return null;
+        }
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        java.util.Deque<String> stack = new java.util.ArrayDeque<>();
+        stack.push(code);
+        while (!stack.isEmpty()) {
+            String cur = stack.pop();
+            if (!visited.add(cur)) {
+                continue;
+            }
+            Optional<RequirementRepository.Requirement> found = requirementRepo.findByCode(wsId, cur);
+            if (found.isEmpty() || found.get().dependsOn() == null) {
+                continue;
+            }
+            try {
+                for (Object d : objectMapper.readValue(found.get().dependsOn(), List.class)) {
+                    String dep = String.valueOf(d);
+                    if (code.equals(dep)) {
+                        return "依赖成环：" + code + " 的依赖链绕回了自身，请调整 depends_on";
+                    }
+                    stack.push(dep);
+                }
+            } catch (Exception ignore) {
+                // 依赖 JSON 损坏按无依赖处理
+            }
+        }
+        return null;
+    }
+
     private Tool discuss() {
         return tool("discuss", req -> {
             String name = str(req.input().get("name"));
@@ -169,7 +325,18 @@ public class OrchestrationTools {
             if (name.isBlank() || topic.isBlank() || participants.isEmpty()) {
                 return ToolResult.of(Map.of("ok", false, "message", "name/topic/participants 必填"));
             }
-            String badAgents = checkAgents(participants);
+            // 三方编制：讨论最少三人——PM（你）必须主持，其余覆盖发起方与目的方。
+            // participants 由主控填目的方等参与方（≥2），PM 自动加入发言与汇总
+            List<String> roster = new ArrayList<>(participants);
+            if (!roster.contains("project_manager")) {
+                roster.add("project_manager");
+            }
+            if (roster.size() < 3) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "讨论最少三方（PM 主持 + 发起方 + 目的方）：participants 至少 2 个角色，"
+                                + "按问题域拉能解答的人（需求→product_analyst，架构→architect，实现→developer）"));
+            }
+            String badAgents = checkAgents(roster);
             if (badAgents == null) {
                 badAgents = checkAgents(List.of(orDefault(str(req.input().get("summarizer")), "project_manager")));
             }
@@ -178,11 +345,11 @@ public class OrchestrationTools {
             }
             int rounds = parseInt(req.input().get("rounds"), 0);
             String summarizer = orDefault(str(req.input().get("summarizer")), "project_manager");
-            StageStep step = nextStep(name, StepType.DISCUSS, summarizer, participants, topic);
+            StageStep step = nextStep(name, StepType.DISCUSS, summarizer, roster, topic);
             long id = stepRepo.insert(step);
             discussionEngine.submit(step.withId(id), brief(topic), rounds, summarizer);
             return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
-                    "message", "讨论已发起（" + participants.size() + " 人，后台进行中），完成后结果进黑板"));
+                    "message", "讨论已发起（" + roster.size() + " 人含 PM 主持，后台进行中），完成后结果进黑板"));
         });
     }
 
@@ -280,7 +447,7 @@ public class OrchestrationTools {
         return TopicBrief.of(projectGoal, stageGoal, topic, boardDigest());
     }
 
-    /** 黑板摘要：意图锚 + 本阶段各步骤状态与产出（goal 传达的上下文来源，执行 agent 与讨论参与者同见）。 */
+    /** 黑板摘要：意图锚 + 需求全景 + 本阶段各步骤状态与产出（goal 传达的上下文来源，执行 agent 与讨论参与者同见）。 */
     public String boardDigest() {
         StringBuilder sb = new StringBuilder();
         String anchor = stepRepo.findAnchorText(wsId, stage, iteration);
@@ -288,15 +455,40 @@ public class OrchestrationTools {
             sb.append("【意图锚——本阶段一切工作的最高准绳，产出偏离它即走偏】\n")
               .append(truncate(anchor, 400)).append("\n");
         }
+        String reqDigest = requirementDigest();
+        if (!reqDigest.isEmpty()) {
+            sb.append("【需求全景——项目级共识，所有工作围绕它】\n").append(reqDigest);
+        }
         for (StageStep s : stepRepo.findByStage(wsId, stage, iteration)) {
             sb.append("- [").append(s.seq()).append("] ").append(s.name())
                     .append("（").append(s.status()).append("）");
+            if (!s.requirementCodes().isEmpty()) {
+                sb.append("→").append(s.requirementCodes());
+            }
             if (s.outputSummary() != null && !s.outputSummary().isBlank()) {
                 sb.append("：").append(truncate(s.outputSummary(), 120));
             }
             sb.append("\n");
         }
         return sb.length() == 0 ? "（本阶段尚无记录）" : sb.toString();
+    }
+
+    /** 需求全景段：编号/状态/标题/依赖——PM 规划与执行 agent 的共同依据。 */
+    private String requirementDigest() {
+        List<RequirementRepository.Requirement> reqs = requirementRepo.findByWorkspace(wsId);
+        if (reqs.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (RequirementRepository.Requirement r : reqs) {
+            sb.append("- ").append(r.code()).append(" [").append(r.status()).append("] ")
+                    .append(truncate(r.title(), 60));
+            if (r.dependsOn() != null && !r.dependsOn().isBlank() && !"[]".equals(r.dependsOn())) {
+                sb.append("（依赖 ").append(r.dependsOn()).append("）");
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
     }
 
     private String toJson(Object value) {
@@ -325,7 +517,7 @@ public class OrchestrationTools {
                 .mapToInt(StageStep::seq).max().orElse(0) + 1;
         return new StageStep(null, wsId, stage, iteration, seq, name, type, agent,
                 participants, StepStatus.PLANNED, instruction, null, null, null, null, null, null, null, null,
-                null, null, null);
+                null, null, null, null);
     }
 
     private Tool tool(String id, java.util.function.Function<ToolRequest, ToolResult> body) {
@@ -359,6 +551,7 @@ public class OrchestrationTools {
             case "execute_step" -> executeStep();
             case "skip_step" -> skipStep();
             case "declare_deviation" -> declareDeviation();
+            case "declare_requirements" -> declareRequirements();
             case "request_decision" -> requestDecision();
             case "record_answer" -> recordAnswer();
             case "complete_stage" -> completeStage();
@@ -366,12 +559,9 @@ public class OrchestrationTools {
         };
     }
 
-    /** plan_steps 入参 schema：intent_anchor + steps 数组（name/type/agent/participants/instruction/acceptance）。 */
+    /** plan_steps 入参 schema：intent_anchor + steps 数组（name/type/agent/participants/instruction/acceptance/requirement_codes）。 */
     private Map<String, Object> planStepsSchema() {
-        Map<String, Object> acceptanceProps = new LinkedHashMap<>();
-        acceptanceProps.put("type", str("断言类型：test=测试通过 / artifact=产物存在且合规 / api=接口响应符合预期"));
-        acceptanceProps.put("target", str("判定对象：测试类名/产物路径/接口端点"));
-        acceptanceProps.put("expect", str("可判定的预期：如 pass、含某章节、返回 200 且含某字段——禁止写「质量良好」这类不可判定描述"));
+        Map<String, Object> acceptanceProps = acceptanceProps();
         Map<String, Object> stepProps = new LinkedHashMap<>();
         stepProps.put("name", str("小流程名"));
         stepProps.put("type", str("TASK=产出型 / DISCUSS=讨论型"));
@@ -379,19 +569,43 @@ public class OrchestrationTools {
         stepProps.put("participants", arr(str("DISCUSS 参与者 agent 英文名名单（如 [\"product_analyst\",\"architect\"]；禁用中文显示名）")));
         stepProps.put("instruction", str("任务说明/讨论议题"));
         stepProps.put("acceptance", arr(obj(acceptanceProps)));
+        stepProps.put("requirement_codes", arr(str("本步服务的需求项编号列表（如 [\"REQ-001\"]）——需求先行的锚定：实施步骤应声明为了哪个需求")));
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("intent_anchor", str("意图锚：一段话锁定本阶段全局意图与总体验收口径（用户要什么、成功长什么样）。规划后锁定，后续每步执行都对照它防走偏；重规划时才可更新"));
         props.put("steps", arr(obj(stepProps)));
         return schema(props, List.of("intent_anchor", "steps"));
     }
 
+    /** declare_requirements 入参 schema：action + 需求数组（code/title/description/acceptance/depends_on）。 */
+    private Map<String, Object> declareRequirementsSchema() {
+        Map<String, Object> reqProps = new LinkedHashMap<>();
+        reqProps.put("code", str("需求编号（REQ-001；propose 可省略自动生成，confirm/update/drop 必填）"));
+        reqProps.put("title", str("需求标题（一句话说清要什么）"));
+        reqProps.put("description", str("需求描述：背景、边界、约束"));
+        reqProps.put("acceptance", obj(acceptanceProps()));
+        reqProps.put("depends_on", arr(str("依赖的需求编号列表（如 [\"REQ-001\"]）：被依赖需求完成前，本需求不得排实施步骤")));
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("action", str("propose=落新需求（PROPOSED）/ confirm=用户已同意后置 CONFIRMED / update=改 PROPOSED 草稿 / drop=废弃"));
+        props.put("requirements", arr(obj(reqProps)));
+        return schema(props, List.of("action", "requirements"));
+    }
+
+    /** 验收断言字段（plan_steps 与 declare_requirements 共用同一套口径）。 */
+    private Map<String, Object> acceptanceProps() {
+        Map<String, Object> acceptanceProps = new LinkedHashMap<>();
+        acceptanceProps.put("type", str("验收方式：test=测试通过 / artifact=产物存在且合规 / api=接口响应符合预期"));
+        acceptanceProps.put("target", str("判定对象：测试类名/产物路径/接口端点"));
+        acceptanceProps.put("expect", str("可判定的预期：如 pass、含某章节、返回 200 且含某字段——禁止写「质量良好」这类不可判定描述"));
+        return acceptanceProps;
+    }
+
     private Map<String, Object> discussSchema() {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("name", str("讨论名"));
         props.put("topic", str("讨论议题"));
-        props.put("participants", arr(str("参与者 agent 英文名名单（如 [\"product_analyst\",\"architect\"]；禁用中文显示名）")));
+        props.put("participants", arr(str("参与方 agent 英文名名单（至少 2 个：按问题域拉能解答的目的方，如需求会诊 [\"product_analyst\",\"architect\"]；PM 会自动加入主持与汇总，不用写；禁用中文显示名）")));
         props.put("rounds", str("互见讨论轮数，默认 0（只收集一轮独立观点）"));
-        props.put("summarizer", str("汇总人 agent 英文名，默认 project_manager"));
+        props.put("summarizer", str("汇总人 agent 英文名，默认 project_manager（你主持并汇总）"));
         return schema(props, List.of("name", "topic", "participants"));
     }
 

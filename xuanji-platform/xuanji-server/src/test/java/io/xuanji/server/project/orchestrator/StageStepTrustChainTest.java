@@ -17,7 +17,7 @@ class StageStepTrustChainTest {
         return new StageStep(null, "ws1", "REQUIREMENT", 1, 1, "写PRD", StepType.TASK,
                 "product_analyst", java.util.List.of(), StepStatus.PLANNED,
                 "产出需求规格", null, null, null, null, null, null, null, null,
-                null, "{\"acceptance\":true}", null);
+                null, "{\"acceptance\":true}", null, null);
     }
 
     @Test
@@ -48,7 +48,7 @@ class StageStepTrustChainTest {
     void blankVerifiedByFallsBackToSelf() {
         StageStep s = new StageStep(null, "ws1", "REQUIREMENT", 1, 1, "x", StepType.TASK,
                 "a", null, StepStatus.PLANNED, "i", null, null, null, null, null, null, null, null,
-                "  ", null, null);
+                "  ", null, null, null);
         assertEquals("self", s.verifiedBy());
         assertNull(s.acceptanceJson());
     }

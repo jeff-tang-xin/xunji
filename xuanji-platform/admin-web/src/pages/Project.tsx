@@ -41,6 +41,7 @@ import { StageExecutionPanel } from './project/StageExecutionPanel'
 import { StageGroups } from './project/StageGroups'
 import { StageSessionsPanel } from './project/StageSessionsPanel'
 import { TemplateEditor } from './project/TemplateEditor'
+import { RequirementBoard } from './project/RequirementBoard'
 
 function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [detail, setDetail] = useState<ProjectDetailData | null>(null)
@@ -199,6 +200,11 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
             defaultActiveKey="exec"
             size="small"
             items={[
+              {
+                key: 'requirements',
+                label: '需求',
+                children: <RequirementBoard projectId={id} />,
+              },
               {
                 key: 'exec',
                 label: '阶段执行',

@@ -67,6 +67,8 @@ public class ProjectService {
     private StagePlanCompiler planCompiler;
     @Autowired
     private ProjectTemplateService templateService;
+    @Autowired
+    private io.xuanji.server.project.orchestrator.RequirementRepository requirementRepo;
     @Value(value="${xuanji.workspace.root:./workspaces}")
     private String workspaceRoot;
     private final ExecutorService autoFlowExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -1098,6 +1100,76 @@ public class ProjectService {
         }
         log.info("规划落子任务: project={} plan_id={} stage={} iteration={} nodes={}", new Object[]{wsId, planId, stage, iteration, created.size()});
         return created;
+    }
+
+    /**
+     * 需求清单（V34 需求先行）：需求项 + 依赖拓扑深度。
+     * depth = 依赖链长度（无依赖 0，取依赖方 depth 最大值 +1），前端按 depth 分层画拓扑图；
+     * 防环由 declare_requirements 落库时兜底，此处防御性封顶（超过需求总数视为环，截断）。
+     */
+    public Map<String, Object> requirements(LoginUser user, String wsId) {
+        this.requireProject(user, wsId);
+        List<io.xuanji.server.project.orchestrator.RequirementRepository.Requirement> rows =
+                requirementRepo.findByWorkspace(wsId);
+        Map<String, Integer> depth = new java.util.HashMap<>();
+        for (io.xuanji.server.project.orchestrator.RequirementRepository.Requirement r : rows) {
+            depth.put(r.code(), depthOf(r.code(), rows, depth, rows.size()));
+        }
+        java.util.LinkedHashMap<String, Object> out = new java.util.LinkedHashMap<>();
+        java.util.ArrayList<Map<String, Object>> items = new java.util.ArrayList<>();
+        for (io.xuanji.server.project.orchestrator.RequirementRepository.Requirement r : rows) {
+            java.util.LinkedHashMap<String, Object> item = new java.util.LinkedHashMap<>();
+            item.put("code", r.code());
+            item.put("title", r.title());
+            item.put("description", r.description());
+            item.put("status", r.status());
+            item.put("depends_on", jsonStringList(r.dependsOn()));
+            item.put("acceptance", r.acceptanceJson());
+            item.put("depth", depth.getOrDefault(r.code(), 0));
+            item.put("created_by", r.createdBy());
+            item.put("updated_at", r.updatedAt() == null ? null : r.updatedAt().toString());
+            items.add(item);
+        }
+        out.put("requirements", items);
+        return out;
+    }
+
+    /** 依赖深度递归（记忆化）；环防御：递归深度超过需求总数按 0 处理。 */
+    private int depthOf(String code, List<io.xuanji.server.project.orchestrator.RequirementRepository.Requirement> rows,
+                        Map<String, Integer> memo, int total) {
+        Integer cached = memo.get(code);
+        if (cached != null) {
+            return cached;
+        }
+        memo.put(code, 0);
+        io.xuanji.server.project.orchestrator.RequirementRepository.Requirement self = rows.stream()
+                .filter(r -> r.code().equals(code)).findFirst().orElse(null);
+        int d = 0;
+        if (self != null && self.dependsOn() != null) {
+            try {
+                List<String> deps = jsonStringList(self.dependsOn());
+                for (String dep : deps) {
+                    d = Math.max(d, depthOf(dep, rows, memo, total) + 1);
+                }
+            } catch (Exception ignore) {
+                // 依赖 JSON 损坏按无依赖处理
+            }
+        }
+        memo.put(code, d);
+        return d;
+    }
+
+    /** JSONB 数组文本 → List<String>（损坏按空表处理）。命名避开 ProjectSupport 静态导入的 parseStringList（同名会遮蔽两参重载）。 */
+    private List<String> jsonStringList(String json) {
+        if (json == null || json.isBlank() || "[]".equals(json.trim())) {
+            return List.of();
+        }
+        try {
+            List<Object> raw = objectMapper.readValue(json, List.class);
+            return raw.stream().map(String::valueOf).toList();
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     public Map<String, Object> stageExecution(LoginUser user, String wsId) {
