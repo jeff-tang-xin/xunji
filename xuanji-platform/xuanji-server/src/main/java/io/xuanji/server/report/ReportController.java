@@ -29,20 +29,20 @@ public class ReportController {
     private ReportService reports;
 
     @GetMapping
-    public Object list(@RequestAttribute(LoginUser.ATTR) LoginUser user) {
+    public List<Map<String, Object>> list(@RequestAttribute(LoginUser.ATTR) LoginUser user) {
         return reports.list(user);
     }
 
     @PostMapping
-    public Object create(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                         @RequestBody Map<String, Object> body) {
+    public Map<String, Object> create(@RequestAttribute(LoginUser.ATTR) LoginUser user,
+                                      @RequestBody Map<String, Object> body) {
         return reports.create(user, body);
     }
 
     @PutMapping("/{id}")
-    public Object update(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                         @PathVariable String id,
-                         @RequestBody Map<String, Object> body) {
+    public Map<String, Object> update(@RequestAttribute(LoginUser.ATTR) LoginUser user,
+                                      @PathVariable String id,
+                                      @RequestBody Map<String, Object> body) {
         return reports.update(user, id, body);
     }
 
@@ -53,13 +53,13 @@ public class ReportController {
     }
 
     @PostMapping("/{id}/run")
-    public Object runNow(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                         @PathVariable String id) {
+    public Map<String, Object> runNow(@RequestAttribute(LoginUser.ATTR) LoginUser user,
+                                      @PathVariable String id) {
         return reports.runNow(user, id);
     }
 
     @DeleteMapping("/{id}")
-    public Object delete(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {
+    public Map<String, Object> delete(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {
         reports.delete(user, id);
         return Map.of("deleted", id);
     }

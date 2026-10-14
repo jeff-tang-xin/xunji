@@ -45,6 +45,9 @@ public class NodeDispatchComponent extends NodeComponent {
     /** AGENT 节点执行器（AgentRuntime 适配层；ObjectProvider 防装配顺序耦合） */
     private final ObjectProvider<AgentNodeExecutor> agentExecutorProvider;
 
+    /** 子工作流执行器（RunService；ObjectProvider 打破 RunService→FlowExecutor→本组件 循环依赖） */
+    private final ObjectProvider<RunService> runServiceProvider;
+
     private final RunRepository repo;
 
     private final ObjectMapper objectMapper;
@@ -53,6 +56,7 @@ public class NodeDispatchComponent extends NodeComponent {
                                  ObjectProvider<Connector> connectorProvider,
                                  ObjectProvider<Tool> toolProvider,
                                  ObjectProvider<AgentNodeExecutor> agentExecutorProvider,
+                                 ObjectProvider<RunService> runServiceProvider,
                                  RunRepository repo,
                                  ObjectMapper objectMapper) {
         Map<String, WorkflowNode> map = new java.util.concurrent.ConcurrentHashMap<>();
@@ -66,6 +70,7 @@ public class NodeDispatchComponent extends NodeComponent {
         });
         this.instances = Map.copyOf(map);
         this.agentExecutorProvider = agentExecutorProvider;
+        this.runServiceProvider = runServiceProvider;
         this.repo = repo;
         this.objectMapper = objectMapper;
     }
@@ -122,6 +127,11 @@ public class NodeDispatchComponent extends NodeComponent {
                 // AGENT 节点：委托 AgentRuntime（refId = agent:{id}@{version}）
                 Map<String, Object> agentOut = agentExecutorProvider.getObject().execute(def, input);
                 out = NodeOutput.of(agentOut);
+            } else if (def.kind() == io.xuanji.core.api.NodeKind.WORKFLOW) {
+                // 子工作流节点：引用另一条已发布工作流（refId = workflow:{id}@{version}），
+                // 递归触发子 run，子 run 的 END 输出作为本节点输出（run 树嵌套）
+                Map<String, Object> sub = runSubWorkflow(def.refId(), input);
+                out = NodeOutput.of(sub);
             } else {
                 WorkflowNode node = instances.get(def.refId());
                 if (node == null) {
@@ -179,6 +189,41 @@ public class NodeDispatchComponent extends NodeComponent {
 
     private void insertNodeRun(String nodeRunId, String runId, NodeDef def, int seq, Map<String, Object> input) {
         repo.insertNodeRun(nodeRunId, runId, def.instanceId(), def.name(), seq, toJson(input), Timestamp.from(Instant.now()));
+    }
+
+    /**
+     * 执行子工作流：refId = {@code workflow:{definitionId}@{version}}。
+     * 委托 RunService.createRun 同步执行子 run（run 树嵌套），返回子 run 的 END 输出。
+     * 子 run 失败（非 SUCCESS）时抛异常，使本节点按失败处理。
+     */
+    private Map<String, Object> runSubWorkflow(String refId, Map<String, Object> input) {
+        if (refId == null || !refId.startsWith("workflow:")) {
+            throw new IllegalStateException("WORKFLOW 节点 refId 须为 workflow:{definitionId}@{version}: " + refId);
+        }
+        String rest = refId.substring("workflow:".length());
+        int at = rest.lastIndexOf('@');
+        if (at <= 0) {
+            throw new IllegalStateException("WORKFLOW 节点 refId 须为 workflow:{definitionId}@{version}: " + refId);
+        }
+        long definitionId;
+        int version;
+        try {
+            definitionId = Long.parseLong(rest.substring(0, at));
+            version = Integer.parseInt(rest.substring(at + 1));
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("WORKFLOW 节点 refId 版本号非法: " + refId, e);
+        }
+        Map<String, Object> sub = runServiceProvider.getObject()
+                .createRun(definitionId, version, input, "SUB_WORKFLOW");
+        String status = (String) sub.get("status");
+        if (!"SUCCESS".equals(status)) {
+            throw new IllegalStateException("子工作流执行未成功: definition=" + definitionId
+                    + " v" + version + " status=" + status
+                    + (sub.get("error") != null ? " error=" + sub.get("error") : ""));
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> output = (Map<String, Object>) sub.get("output");
+        return output == null ? Map.of() : output;
     }
 
     private void finishNodeRun(String nodeRunId, String status, Map<String, Object> output, String error, Instant started) {

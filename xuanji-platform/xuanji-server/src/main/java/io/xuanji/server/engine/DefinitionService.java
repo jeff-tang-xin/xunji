@@ -94,7 +94,8 @@ public class DefinitionService {
     }
 
     /** 发布：解析 → 编译校验 → 版本固化 + 指针更新（同事务语义，P0 顺序执行） */
-    public Map<String, Object> publish(long definitionId) {
+    public Map<String, Object> publish(long definitionId, LoginUser user) {
+        requireOwner(definitionId, user);
         Map<String, Object> def = repo.findForPublish(definitionId);
         String canvasJson = (String) def.get("canvas_json");
 
@@ -130,6 +131,8 @@ public class DefinitionService {
             }
             if (node.kind() == NodeKind.AGENT) {
                 agentExecutorProvider.getObject().validateRef(node.refId());
+            } else if (node.kind() == NodeKind.WORKFLOW) {
+                validateWorkflowRef(node.refId());
             } else if (!nodeDispatch.hasInstance(node.refId())) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "节点「" + node.name() + "」(" + node.instanceId() + ") 引用的组件不存在或未注册: " + node.refId());
@@ -137,11 +140,62 @@ public class DefinitionService {
         }
     }
 
-    /** 定义详情（含版本历史） */
-    public Map<String, Object> get(long definitionId) {
+    /** WORKFLOW 节点引用校验：refId = workflow:{definitionId}@{version}，目标工作流须存在且 PUBLISHED。 */
+    private void validateWorkflowRef(String refId) {
+        if (refId == null || !refId.startsWith("workflow:")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "WORKFLOW 节点 refId 须为 workflow:{definitionId}@{version}: " + refId);
+        }
+        String rest = refId.substring("workflow:".length());
+        int at = rest.lastIndexOf('@');
+        if (at <= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "WORKFLOW 节点 refId 须为 workflow:{definitionId}@{version}: " + refId);
+        }
+        long definitionId;
+        int version;
+        try {
+            definitionId = Long.parseLong(rest.substring(0, at));
+            version = Integer.parseInt(rest.substring(at + 1));
+        } catch (NumberFormatException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "WORKFLOW 节点 refId 版本号非法: " + refId);
+        }
+        Integer cnt = repo.countPublishedVersion(definitionId, version);
+        if (cnt == null || cnt == 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "WORKFLOW 节点引用的工作流不存在或未发布: " + refId);
+        }
+    }
+
+    /** 定义详情（含版本历史）；数据权限可见性校验（管理员/创建者本人/数据权限范围内） */
+    public Map<String, Object> get(long definitionId, LoginUser user) {
+        requireVisible(definitionId, user);
         Map<String, Object> def = repo.findDetail(definitionId);
         def.put("versions", repo.findVersions(definitionId));
         return def;
+    }
+
+    /** 读操作可见性：管理员/ALL 全量；否则创建者本人或数据权限范围内（ORG/UNDER_ORG） */
+    private void requireVisible(long id, LoginUser user) {
+        List<Map<String, Object>> rows = repo.findCreatedBys(id);
+        if (rows.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "wf_definition #" + id + " 不存在");
+        }
+        if (user.isPlatformAdmin() || "ALL".equals(user.dataScope())) {
+            return;
+        }
+        Map<String, Object> row = rows.get(0);
+        Object createdBy = row.get("created_by");
+        if (createdBy != null && createdBy.equals(user.username())) {
+            return;
+        }
+        String scope = user.dataScope() == null ? "ONLY_CREATE" : user.dataScope();
+        boolean orgVisible = ("ORG".equals(scope) || "UNDER_ORG".equals(scope))
+                && user.orgId() != null && user.orgId().equals(row.get("org_id"));
+        if (!orgVisible) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "无权访问该定义");
+        }
     }
 
     public List<Map<String, Object>> list(LoginUser user) {

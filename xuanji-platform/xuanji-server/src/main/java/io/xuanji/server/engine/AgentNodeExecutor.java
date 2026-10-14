@@ -164,6 +164,85 @@ public class AgentNodeExecutor {
                 skills);
     }
 
+    /**
+     * 按 agent name 构建 AgentSpec（项目节点对话等内部交互用）：查 agent_config 最新版本，
+     * <b>不要求 PUBLISHED</b>（DRAFT 也可，因为项目节点对话是内部交互，非对外发布）。
+     * 复用 loadModelConfig/parseToolRefs/resolveTools/parseSkillRefs/resolveSkills 装配逻辑。
+     *
+     * @param agentName agent_config.name（如 project_manager）
+     * @param sessionId 会话标识（多轮记忆；按节点维度）
+     */
+    public AgentSpec buildSpecByAgentName(String agentName, String sessionId) {
+        return buildSpecByAgentName(agentName, sessionId, null);
+    }
+
+    /**
+     * 带「阶段通用知识」注入的重载：stageGuidance 追加到 agent 的 system prompt 末尾。
+     *
+     * <p>用于项目节点对话——把模板定义的该阶段规范/要求/方法论/交付物形态（跨项目复用的
+     * 通用层），连同本项目该节点的任务边界 scope（实例层）一起交给 AI，使其按阶段规范工作
+     * 而非自由发挥。stageGuidance 为空时行为与两参版完全一致。</p>
+     *
+     * @param stageGuidance 已组装好的阶段指导文本，null/空白则不注入
+     */
+    public AgentSpec buildSpecByAgentName(String agentName, String sessionId, String stageGuidance) {
+        Map<String, Object> agentRow = loadAgentConfigByName(agentName);
+        ModelConfig model = loadModelConfig(agentRow);
+        Map<String, Object> params = jsonMap(agentRow.get("params_json"));
+        List<ToolRef> toolRefs = parseToolRefs(agentRow.get("tools_json"));
+        List<ToolDef> resolved = resolveTools(toolRefs);
+        List<AssetRef> agentSkills = parseSkillRefs(agentRow.get("skills_json"));
+        List<SkillDef> skills = resolveSkills(agentSkills);
+        String systemPrompt = composeStagePrompt((String) agentRow.get("system_prompt"), stageGuidance);
+        return new AgentSpec(
+                agentRow.get("id") + "@" + agentRow.get("version"),
+                (String) agentRow.getOrDefault("name", agentName),
+                systemPrompt,
+                model,
+                toolRefs,
+                null,
+                params,
+                sessionId,
+                resolved,
+                skills);
+    }
+
+    /** 拼接角色基座 prompt 与阶段指导；无阶段指导时原样返回。 */
+    private String composeStagePrompt(String basePrompt, String stageGuidance) {
+        if (stageGuidance == null || stageGuidance.isBlank()) {
+            return basePrompt;
+        }
+        return basePrompt == null || basePrompt.isBlank()
+                ? stageGuidance
+                : basePrompt + "\n\n" + stageGuidance;
+    }
+
+    /** 按 name 查 agent_config 最新版本（不带 status 过滤，DRAFT 也可）。 */
+    private Map<String, Object> loadAgentConfigByName(String agentName) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id, name, system_prompt, model_provider_id, tools_json::text AS tools_json, "
+                        + "params_json::text AS params_json, skills_json::text AS skills_json, version "
+                        + "FROM agent_config WHERE name = ? ORDER BY version DESC LIMIT 1",
+                agentName);
+        if (rows.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "agent_config 不存在（name=" + agentName + "）");
+        }
+        return rows.get(0);
+    }
+
+    /** agent_config 是否存在该名字——编排工具前置校验用（LLM 偶尔传中文显示名，提前拦截）。 */
+    public boolean agentExists(String name) {
+        Boolean has = jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM agent_config WHERE name = ?)", Boolean.class, name);
+        return Boolean.TRUE.equals(has);
+    }
+
+    /** 全部可用 agent 名（编排工具报错时提示正确名单用）。 */
+    public java.util.List<String> agentNames() {
+        return jdbc.queryForList("SELECT name FROM agent_config ORDER BY id", String.class);
+    }
+
     /** tools_json → ToolRef 列表（JSONB 数组：[{type, ref, override?}]） */
     @SuppressWarnings("unchecked")
     private List<ToolRef> parseToolRefs(Object toolsJson) {

@@ -65,6 +65,7 @@ public class WorkspaceService {
         if (name == null || name.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name is required");
         }
+        validateName(name);
         String type = str(body, "binding_type");
         if (!"WORKFLOW".equals(type) && !"AGENT".equals(type)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "binding_type must be WORKFLOW or AGENT");
@@ -96,6 +97,7 @@ public class WorkspaceService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name is required");
         }
         name = name.trim();
+        validateName(name);
         String type = str(body, "binding_type");
         long assetId;
         Integer pinned;
@@ -184,6 +186,23 @@ public class WorkspaceService {
                 && user.orgId() != null && user.orgId().equals(row.get("org_id"));
         if (!orgVisible && !user.username().equals(createdBy)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "无权访问该工作区");
+        }
+    }
+
+    /**
+     * 工作区名路径安全校验：root_path = 配置根目录/name 动态生成，name 含路径分隔符或
+     * 相对路径片段（../、./、空、.、..）会逃逸出配置根目录（路径穿越）。仅允许
+     * 字母数字、中文、下划线、连字符、空格与点（不含路径分隔符）。
+     */
+    private void validateName(String name) {
+        if (name.equals(".") || name.equals("..")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "工作区名不能为 . 或 ..");
+        }
+        if (name.contains("/") || name.contains("\\")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "工作区名不能包含路径分隔符");
+        }
+        if (!name.matches("[\\p{L}\\p{N}_\\- .]+")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "工作区名含非法字符（仅允许字母/数字/中文/下划线/连字符/空格/点）");
         }
     }
 

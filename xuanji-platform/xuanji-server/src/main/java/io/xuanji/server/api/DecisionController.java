@@ -44,9 +44,11 @@ public class DecisionController {
         return runService.pendingDecisions(user);
     }
 
-    /** 决策历史：?runId= */
+    /** 决策历史：?runId=；数据权限经 run 归属校验 */
     @GetMapping
-    public List<Map<String, Object>> history(@RequestParam String runId) {
+    public List<Map<String, Object>> history(@RequestParam String runId,
+                                             @RequestAttribute(LoginUser.ATTR) LoginUser user) {
+        runService.requireRunVisible(runId, user);
         return runService.decisionHistory(runId);
     }
 }

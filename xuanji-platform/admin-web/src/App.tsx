@@ -9,6 +9,7 @@ import AppAdmin from './pages/AppAdmin'
 import Assets from './pages/Assets'
 import Permissions from './pages/Permissions'
 import Workspace from './pages/Workspace'
+import Project from './pages/Project'
 import RunMonitor from './pages/RunMonitor'
 import PublishCenter from './pages/PublishCenter'
 import ApprovalCenter from './pages/ApprovalCenter'
@@ -36,6 +37,8 @@ export default function App() {
             <Route path="/" element={<MainLayout />}>
               <Route index element={<Navigate to="/workspace" replace />} />
               <Route path="/workspace" element={<Workspace />} />
+              <Route path="/project" element={<Project />} />
+              <Route path="/project/:id" element={<Project />} />
               <Route path="/canvas" element={<CanvasEditor />} />
               <Route path="/run" element={<RunMonitor />} />
               <Route path="/approval" element={<ApprovalCenter />} />

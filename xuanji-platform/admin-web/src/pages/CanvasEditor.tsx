@@ -6,7 +6,7 @@ import {
 import {
   PlayCircleFilled, StopFilled, PlusCircleOutlined, RobotOutlined, ApiOutlined,
   ToolOutlined, ZoomInOutlined, ZoomOutOutlined, OneToOneOutlined, CompressOutlined,
-  SaveOutlined, SendOutlined, PlusOutlined,
+  SaveOutlined, SendOutlined, PlusOutlined, ApartmentOutlined,
 } from '@ant-design/icons'
 import LogicFlow from '@logicflow/core'
 import '@logicflow/core/lib/style/index.css'
@@ -58,6 +58,8 @@ interface NodeDetail {
   retryMaxAttempts?: number
   retryIntervalMs?: number
   timeoutMs?: number
+  /** AGENT 节点职责描述（画布第二行展示用，随画布 JSON 持久化） */
+  desc?: string
   /** AGENT 节点能力绑定（capabilityBinding，"skill:{id}@{v}" / "mcp:{id}@{v}"） */
   skills?: string[]
   mcps?: string[]
@@ -88,6 +90,11 @@ const PANEL: Array<{
     key: 'agent',
     header: 'Agent 节点',
     items: [{ name: 'Agent 节点', icon: <RobotOutlined style={{ color: '#1677ff', fontSize: 14 }} /> }],
+  },
+  {
+    key: 'workflow',
+    header: '子工作流',
+    items: [{ name: '子工作流节点', icon: <ApartmentOutlined style={{ color: '#13c2c2', fontSize: 14 }} /> }],
   },
   {
     key: 'conn',
@@ -139,13 +146,18 @@ function nodeVisual(kind: string) {
 
 function canvasToGraph(canvas: CanvasJson) {
   return {
-    nodes: canvas.nodes.map((n, i) => ({
-      id: n.id, type: 'rect',
-      // 已存坐标用原值；旧数据（无坐标）按序瀑布布局
-      x: Number((n as CanvasNode & { x?: number }).x) || 260,
-      y: Number((n as CanvasNode & { y?: number }).y) || 80 + i * 120,
-      text: n.name, kind: n.kind, ...nodeVisual(n.kind),
-    })),
+    nodes: canvas.nodes.map((n, i) => {
+      const raw = n as CanvasNode & { desc?: string }
+      // 职责摘要画到节点第二行（展示用，不进 name；随画布 JSON 持久化）
+      const duty = raw.desc ? '\n职责: ' + (raw.desc.length > 26 ? raw.desc.slice(0, 26) + '…' : raw.desc) : ''
+      return {
+        id: n.id, type: 'rect',
+        // 已存坐标用原值；旧数据（无坐标）按序瀑布布局
+        x: Number((n as CanvasNode & { x?: number }).x) || 260,
+        y: Number((n as CanvasNode & { y?: number }).y) || 80 + i * 120,
+        text: n.name + duty, kind: n.kind, ...nodeVisual(n.kind),
+      }
+    }),
     edges: canvas.edges.map((e, i) => ({
       id: 'e' + i, sourceNodeId: e.from, targetNodeId: e.to, type: 'polyline',
     })),
@@ -162,6 +174,7 @@ function canvasToDetails(canvas: CanvasJson): Record<string, NodeDetail> {
     }
     dt[n.id] = {
       name: n.name, kind: n.kind, refId: n.refId, params: n.params || {},
+      desc: (n as CanvasNode & { desc?: string }).desc,
       inputSchema: n.inputSchema || {}, outputSchema: n.outputSchema || {},
       gate: raw.decisionGate?.enabled === true,
       decisionGate: raw.decisionGate
@@ -195,13 +208,15 @@ function graphToCanvas(
     nodes: g.nodes.map((n) => {
       const d = details[n.id] || ({} as NodeDetail)
       const label = typeof n.text === 'object' && n.text ? n.text.value : n.text
+      // 画布节点第二行是职责摘要（展示用），不进 name
+      const cleanLabel = String(label || '').split('\n')[0]
       const node: CanvasNode & {
         x?: number; y?: number
         decisionGate?: GateConfig & { enabled: boolean }
         capabilityBinding?: { skills: string[]; mcps: string[] }
       } = {
         id: n.id, kind: (d.kind || 'ATOMIC') as CanvasNode['kind'],
-        name: label || d.name || n.id, refId: '',
+        name: cleanLabel || d.name || n.id, refId: '',
         x: Math.round(n.x || 0), y: Math.round(n.y || 0),
       }
       if (node.kind === 'START') node.inputSchema = d.inputSchema || {}
@@ -223,6 +238,9 @@ function graphToCanvas(
         const mcps = (d.mcps || []).filter(Boolean)
         if (node.kind === 'AGENT' && (skills.length > 0 || mcps.length > 0)) {
           node.capabilityBinding = { skills, mcps }
+        }
+        if (node.kind === 'AGENT' && d.desc) {
+          ;(node as CanvasNode & { desc?: string }).desc = d.desc
         }
       }
       return node
@@ -306,7 +324,7 @@ function SchemaBlock({ title, tag, tagColor, schema, note }: {
   )
 }
 
-interface AgentOption { value: string; label: string }
+interface AgentOption { value: string; label: string; desc?: string }
 type RefOption = AgentOption
 
 /** 参数技术名 → 中文标签（已知字段友好化；未知字段回退技术名） */
@@ -321,10 +339,11 @@ const PARAM_LABELS: Record<string, string> = {
  * 支持 string / number / boolean / string[]；对象与对象数组标注「由上游提供」。
  */
 function ParamFields({
-  schema, params,
+  schema, params, datasources,
 }: {
   schema?: ParamSchema | null
   params: Record<string, unknown>
+  datasources?: RefOption[]
 }) {
   const props = schema?.properties
   if (!props || Object.keys(props).length === 0) {
@@ -342,6 +361,8 @@ function ParamFields({
         const label = PARAM_LABELS[key] || key
         const itemType = field.items?.type
         const fromUpstream = field.type === 'object' || (field.type === 'array' && itemType === 'object')
+        // 数据源选择：datasource_id 字段渲染为下拉框（选项来自 /api/datasources）
+        const isDatasource = key === 'datasource_id' && datasources && datasources.length > 0
         return (
           <Form.Item
             key={key}
@@ -350,7 +371,7 @@ function ParamFields({
             initialValue={initial}
             rules={
               required.has(key)
-                ? [{ required: true, message: `请填写${label}` }]
+                ? [{ required: true, message: `请选择${label}` }]
                 : undefined
             }
             extra={
@@ -361,6 +382,13 @@ function ParamFields({
           >
             {fromUpstream ? (
               <Input disabled placeholder="由上游节点提供" />
+            ) : isDatasource ? (
+              <Select
+                placeholder="选择数据源"
+                options={datasources}
+                showSearch
+                optionFilterProp="label"
+              />
             ) : field.type === 'number' || field.type === 'integer' ? (
               <InputNumber style={{ width: '100%' }} placeholder={`请输入${label}`} />
             ) : field.type === 'boolean' ? (
@@ -454,7 +482,7 @@ function GateSection() {
 }
 
 /** 属性抽屉 */
-function PropDrawer({ open, nodeId, onClose, detail, onSaveDetail, onDeleteNode, components, agents, skills, mcps }: {
+function PropDrawer({ open, nodeId, onClose, detail, onSaveDetail, onDeleteNode, components, agents, skills, mcps, datasources, defs }: {
   open: boolean
   nodeId: string | null
   onClose: () => void
@@ -465,6 +493,8 @@ function PropDrawer({ open, nodeId, onClose, detail, onSaveDetail, onDeleteNode,
   agents: RefOption[]
   skills: RefOption[]
   mcps: RefOption[]
+  datasources: RefOption[]
+  defs: DefinitionSummary[]
 }) {
   const d: NodeDetail = detail || {
     name: '新节点', kind: 'AGENT', refId: '', params: {}, retryMaxAttempts: 0, timeoutMs: 60000,
@@ -474,6 +504,7 @@ function PropDrawer({ open, nodeId, onClose, detail, onSaveDetail, onDeleteNode,
   const isEnd = d.kind === 'END'
   const isBuiltin = isStart || isEnd
   const isAgent = d.kind === 'AGENT'
+  const isWorkflow = d.kind === 'WORKFLOW'
   const [form] = Form.useForm()
 
   const saveDetail = () => {
@@ -582,20 +613,24 @@ function PropDrawer({ open, nodeId, onClose, detail, onSaveDetail, onDeleteNode,
             <Input placeholder="如：技术调研" />
           </Form.Item>
           <Form.Item
-            label={isAgent ? '引用 Agent' : '引用组件'}
+            label={isAgent ? '引用 Agent' : isWorkflow ? '引用工作流' : '引用组件'}
             name="refId"
             required
-            extra={isAgent ? '运行时由所选 Agent 调用模型执行' : '发布时会校验组件存在且已启用'}
+            extra={isAgent ? '运行时由所选 Agent 调用模型执行' : isWorkflow ? '发布时会校验目标工作流已发布' : '发布时会校验组件存在且已启用'}
           >
             <Select
               allowClear
               showSearch
               optionFilterProp="label"
-              placeholder={isAgent ? '选择已发布的 Agent' : '选择已注册的组件'}
+              placeholder={isAgent ? '选择已发布的 Agent' : isWorkflow ? '选择已发布的工作流' : '选择已注册的组件'}
               options={
                 isAgent
                   ? agents
-                  : components.map((c) => ({ value: c.nodeId, label: c.name }))
+                  : isWorkflow
+                    ? (defs || [])
+                        .filter((d) => d.status === 'PUBLISHED')
+                        .map((d) => ({ value: `workflow:${d.id}@${d.version ?? 1}`, label: `${d.name} (#${d.id}@v${d.version ?? 1})` }))
+                    : components.map((c) => ({ value: c.nodeId, label: c.name }))
               }
             />
           </Form.Item>
@@ -605,6 +640,13 @@ function PropDrawer({ open, nodeId, onClose, detail, onSaveDetail, onDeleteNode,
               showIcon
               style={{ marginBottom: 4 }}
               message="Agent 的模型与参数在「Agent 管理」中配置，此处无需设置。"
+            />
+          ) : isWorkflow ? (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 4 }}
+              message="子工作流节点：运行时递归执行所选工作流，其输出作为本节点输出（run 树嵌套）。"
             />
           ) : (
             <>
@@ -619,6 +661,7 @@ function PropDrawer({ open, nodeId, onClose, detail, onSaveDetail, onDeleteNode,
                         key={refId || 'none'}
                         schema={comp?.paramSchema}
                         params={typeof d.params === 'object' && d.params !== null ? d.params : {}}
+                        datasources={datasources}
                       />
                     )
                   }}
@@ -697,6 +740,7 @@ export default function CanvasEditor() {
   const [agents, setAgents] = useState<RefOption[]>([])
   const [skills, setSkills] = useState<RefOption[]>([])
   const [mcps, setMcps] = useState<RefOption[]>([])
+  const [datasources, setDatasources] = useState<RefOption[]>([])
   const [pubOpen, setPubOpen] = useState(false)
   const [pubResult, setPubResult] = useState<{ version: number; ruleContent: string } | null>(null)
   const [saving, setSaving] = useState(false)
@@ -720,7 +764,11 @@ export default function CanvasEditor() {
         setAgents(
           (list || [])
             .filter((a) => a.status === 'PUBLISHED')
-            .map((a) => ({ value: `agent:${a.id}@${a.version ?? 1}`, label: `${a.name} (#${a.id}@v${a.version ?? 1})` })),
+            .map((a) => ({
+              value: `agent:${a.id}@${a.version ?? 1}`,
+              label: `${a.name} (#${a.id}@v${a.version ?? 1})`,
+              desc: a.description || '',
+            })),
         ),
       )
       .catch(() => undefined)
@@ -740,6 +788,14 @@ export default function CanvasEditor() {
           (list || [])
             .filter((a) => a.status === 'PUBLISHED')
             .map((a) => ({ value: `mcp:${a.id}@${a.version ?? 1}`, label: `${a.name} (#${a.id}@v${a.version ?? 1})` })),
+        ),
+      )
+      .catch(() => undefined)
+    // 数据源列表（jdbc.query 节点 datasource_id 下拉框选项）
+    apiJson<Array<{ id: number; name: string }>>('/api/datasources')
+      .then((list) =>
+        setDatasources(
+          (list || []).map((d) => ({ value: String(d.id), label: `${d.name} (#${d.id})` })),
         ),
       )
       .catch(() => undefined)
@@ -832,10 +888,22 @@ export default function CanvasEditor() {
       .catch((e: Error) => message.error(e.message))
   }
 
-  const saveDetail = (nodeId: string, nd: NodeDetail) =>
+  const saveDetail = (nodeId: string, nd: NodeDetail) => {
     setDetails((prev) => ({ ...prev, [nodeId]: nd }))
+    // AGENT 节点把职责摘要画到节点第二行：画布上一眼看出每个 agent 节点负责什么
+    if (nd.kind === 'AGENT' && lfRef.current) {
+      const ref = agents.find((a) => a.value === nd.refId)
+      nd.desc = ref?.desc || undefined
+      const duty = ref?.desc ? '\n职责: ' + (ref.desc.length > 26 ? ref.desc.slice(0, 26) + '…' : ref.desc) : ''
+      try {
+        lfRef.current.updateText(nodeId, (nd.name || nodeId) + duty)
+      } catch {
+        // 节点可能已被删除，忽略
+      }
+    }
+  }
 
-  const addNode = (name: string, kind: 'AGENT' | 'ATOMIC', refId?: string) => {
+  const addNode = (name: string, kind: 'AGENT' | 'ATOMIC' | 'WORKFLOW', refId?: string) => {
     if (!lfRef.current) return
     const id = 'n' + (Date.now() % 100000)
     // 新节点放在现有节点包围盒右侧，避免随机位置互相遮挡
@@ -952,7 +1020,7 @@ export default function CanvasEditor() {
                   onClick={() =>
                     g.builtin
                       ? message.info('「' + it.name + '」为平台内置节点，画布固定存在，无需手动添加')
-                      : addNode(it.name, g.key === 'agent' ? 'AGENT' : 'ATOMIC', (it as { refId?: string }).refId)
+                      : addNode(it.name, g.key === 'agent' ? 'AGENT' : g.key === 'workflow' ? 'WORKFLOW' : 'ATOMIC', (it as { refId?: string }).refId)
                   }
                 >
                   {it.icon || <PlusCircleOutlined style={{ color: 'rgba(0,0,0,0.45)', fontSize: 13 }} />}
@@ -999,6 +1067,8 @@ export default function CanvasEditor() {
         agents={agents}
         skills={skills}
         mcps={mcps}
+        datasources={datasources}
+        defs={defs}
         onSaveDetail={saveDetail}
         onDeleteNode={deleteNode}
         onClose={() => setDrawer({ open: false, nodeId: null })}

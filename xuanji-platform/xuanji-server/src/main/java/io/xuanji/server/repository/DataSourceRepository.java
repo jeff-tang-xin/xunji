@@ -20,19 +20,21 @@ public class DataSourceRepository {
         this.jdbc = jdbc;
     }
 
-    public Long insert(String platform, String name, String endpoint, String credentialBase64, String extraJson) {
+    public Long insert(String platform, String name, String endpoint, String credentialBase64, String extraJson,
+                       String createdBy) {
         return jdbc.queryForObject(
-                "INSERT INTO connector_config (platform, name, endpoint, credential_cipher, extra_json) "
-                        + "VALUES (?, ?, ?, decode(?, 'base64'), ?::jsonb) RETURNING id",
+                "INSERT INTO connector_config (platform, name, endpoint, credential_cipher, extra_json, created_by) "
+                        + "VALUES (?, ?, ?, decode(?, 'base64'), ?::jsonb, ?) RETURNING id",
                 Long.class, platform, name, endpoint,
                 credentialBase64 == null ? "" : credentialBase64,
-                extraJson == null ? "{}" : extraJson);
+                extraJson == null ? "{}" : extraJson,
+                createdBy);
     }
 
     /** 含密文（供解密连库）；credential_cipher 返回 byte[] */
     public Map<String, Object> findFull(long id) {
         return jdbc.queryForList(
-                "SELECT id, platform, name, endpoint, credential_cipher, extra_json::text AS extra_json, status "
+                "SELECT id, platform, name, endpoint, credential_cipher, extra_json::text AS extra_json, status, created_by "
                         + "FROM connector_config WHERE id = ?", id)
                 .stream().findFirst().orElse(null);
     }
@@ -40,7 +42,7 @@ public class DataSourceRepository {
     /** 脱敏列表（不含密文） */
     public List<Map<String, Object>> listByPlatform(String platform) {
         return jdbc.queryForList(
-                "SELECT id, platform, name, endpoint, extra_json::text AS extra_json, status "
+                "SELECT id, platform, name, endpoint, extra_json::text AS extra_json, status, created_by "
                         + "FROM connector_config WHERE platform = ? ORDER BY id", platform);
     }
 

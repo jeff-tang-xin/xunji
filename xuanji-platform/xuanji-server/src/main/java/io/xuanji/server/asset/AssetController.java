@@ -191,6 +191,7 @@ public class AssetController {
     @PostMapping("/mcp/{id}/discover")
     public Map<String, Object> discoverMcp(@PathVariable long id,
                                            @RequestAttribute(LoginUser.ATTR) LoginUser user) {
+        assetService.requireOwner("mcp", id, user);
         return assetService.discoverMcp(id);
     }
 
@@ -236,6 +237,7 @@ public class AssetController {
     @PostMapping("/model-providers/{id}/test")
     public Map<String, Object> testModelProvider(@PathVariable long id,
                                                  @RequestAttribute(LoginUser.ATTR) LoginUser user) {
+        assetService.requireOwner("model-providers", id, user);
         return assetService.testModelProvider(id);
     }
 }

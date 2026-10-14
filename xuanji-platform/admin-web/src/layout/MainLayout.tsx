@@ -4,6 +4,7 @@ import {
   FolderOpenOutlined, ApartmentOutlined, MonitorOutlined, AuditOutlined,
   RocketOutlined, RobotOutlined, AppstoreOutlined, BarChartOutlined,
   SafetyOutlined, DatabaseOutlined, CloudServerOutlined, LogoutOutlined, UserOutlined,
+  ProjectOutlined,
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { me, logout, clearToken, type MeInfo } from '../api/client'
@@ -11,6 +12,7 @@ import { me, logout, clearToken, type MeInfo } from '../api/client'
 /** 菜单 code → hash 路由（后端 menu.path 仍存旧 HTML 路径，前端按 code 映射） */
 const CODE_ROUTE: Record<string, string> = {
   workspace: '/workspace',
+  project: '/project',
   canvas: '/canvas',
   run: '/run',
   approval: '/approval',
@@ -25,6 +27,7 @@ const CODE_ROUTE: Record<string, string> = {
 
 const PAGE_TITLE: Record<string, string> = {
   workspace: '工作区',
+  project: '项目看板',
   canvas: '画布编辑器',
   run: '运行监控',
   approval: '审批中心',
@@ -40,6 +43,7 @@ const PAGE_TITLE: Record<string, string> = {
 /** Header 副标题：页面一句话说明（产品语言，不暴露实现术语） */
 const PAGE_SUB: Record<string, string> = {
   workspace: '创建工作区并绑定 Agent 或工作流，输入内容即可触发执行',
+  project: '以项目为容器管理软件全生命周期：阶段链推进、留档沉淀、跨阶段衔接',
   canvas: '拖拽节点编排流程，配置每个节点的引用与执行策略',
   run: '查看每次执行的节点序列与输入输出',
   approval: '处理等待人工确认的流程',
@@ -55,6 +59,7 @@ const PAGE_SUB: Record<string, string> = {
 /** 菜单 code → 图标（标准中后台视觉锚点） */
 const CODE_ICON: Record<string, React.ReactNode> = {
   workspace: <FolderOpenOutlined />,
+  project: <ProjectOutlined />,
   canvas: <ApartmentOutlined />,
   run: <MonitorOutlined />,
   approval: <AuditOutlined />,
@@ -65,6 +70,13 @@ const CODE_ICON: Record<string, React.ReactNode> = {
   perm: <SafetyOutlined />,
   assets: <DatabaseOutlined />,
   datasource: <CloudServerOutlined />,
+  // DIR 分组图标
+  grp_project: <ProjectOutlined />,
+  grp_flow: <ApartmentOutlined />,
+  grp_agent: <RobotOutlined />,
+  grp_asset: <DatabaseOutlined />,
+  grp_integration: <AppstoreOutlined />,
+  grp_system: <SafetyOutlined />,
 }
 
 export default function MainLayout() {
@@ -99,11 +111,23 @@ export default function MainLayout() {
     )
   }
 
-  const menuItems = user.menus.map((m) => ({
-    key: m.code,
-    label: m.name,
-    icon: CODE_ICON[m.code],
-  }))
+  const menuItems = user.menus.map((m) => {
+    const children = (m as { children?: Array<{ code: string; name: string }> }).children
+    if (children && children.length > 0) {
+      // DIR 分组：子菜单
+      return {
+        key: m.code,
+        label: m.name,
+        icon: CODE_ICON[m.code],
+        children: children.map((c) => ({
+          key: c.code,
+          label: c.name,
+          icon: CODE_ICON[c.code],
+        })),
+      }
+    }
+    return { key: m.code, label: m.name, icon: CODE_ICON[m.code] }
+  })
 
   const currentCode =
     Object.keys(CODE_ROUTE).find((c) => CODE_ROUTE[c] === location.pathname) || ''

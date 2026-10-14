@@ -21,7 +21,8 @@ public class WorkspaceRepository {
 
     private static final String SELECT_COLS =
             "id, name, root_path, binding_type, bound_asset_id, bound_asset_version, "
-                    + "authorization_json, org_id, created_by, created_at, updated_at";
+                    + "authorization_json, org_id, created_by, created_at, updated_at, status, "
+                    + "template_code, current_stage, project_mode";
 
     private final JdbcTemplate jdbc;
 
@@ -31,11 +32,29 @@ public class WorkspaceRepository {
 
     public List<Map<String, Object>> findByScope(String whereClause, Object[] args) {
         return jdbc.queryForList(
-                "SELECT " + SELECT_COLS + " FROM workspace WHERE " + whereClause + " ORDER BY created_at DESC", args);
+                "SELECT " + SELECT_COLS + " FROM workspace WHERE " + whereClause
+                        + " AND binding_type != 'PROJECT' ORDER BY created_at DESC", args);
+    }
+
+    /** 项目列表：仅 PROJECT 类型（workspace 即项目）。 */
+    public List<Map<String, Object>> findProjectsByScope(String whereClause, Object[] args) {
+        return jdbc.queryForList(
+                "SELECT " + SELECT_COLS + " FROM workspace WHERE " + whereClause
+                        + " AND binding_type = 'PROJECT' ORDER BY created_at DESC", args);
     }
 
     public List<Map<String, Object>> findById(String id) {
         return jdbc.queryForList("SELECT " + SELECT_COLS + " FROM workspace WHERE id = ?", id);
+    }
+
+    /**
+     * 查项目来源模板 code（节点对话回查阶段通用知识用）。
+     * 独立方法而非扩 SELECT_COLS：避免影响 workspace 既有返回结构与前端消费方。
+     */
+    public String findTemplateCode(String id) {
+        List<String> rows = jdbc.queryForList(
+                "SELECT template_code FROM workspace WHERE id = ?", String.class, id);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     public void insert(String id, String name, String rootPath, String type, long assetId, Integer pinned,
@@ -43,6 +62,26 @@ public class WorkspaceRepository {
         jdbc.update("INSERT INTO workspace (" + String.join(", ", WS_COLS) + ") "
                 + "VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?)",
                 id, name, rootPath, type, assetId, pinned, authJson, orgId, createdBy);
+    }
+
+    /**
+     * 项目容器创建：绑定字段置空（不绑定单一资产），status=ACTIVE；
+     * template_code 记录来源模板（活引用），current_stage 记录所处大阶段
+     * （新项目 INITIATIVE / 老项目维护直接 OPERATE）。
+     */
+    public void insertProject(String id, String name, String rootPath, Long orgId, String createdBy,
+                              String templateCode, String currentStage, String projectMode) {
+        jdbc.update("INSERT INTO workspace (id, name, root_path, binding_type, bound_asset_id, "
+                        + "bound_asset_version, authorization_json, org_id, created_by, status, template_code, "
+                        + "current_stage, project_mode) "
+                        + "VALUES (?, ?, ?, 'PROJECT', NULL, NULL, NULL, ?, ?, 'ACTIVE', ?, "
+                        + "COALESCE(?, 'REQUIREMENT'), COALESCE(?, 'NEW'))",
+                id, name, rootPath, orgId, createdBy, templateCode, currentStage, projectMode);
+    }
+
+    /** 推进项目大阶段（单向，调用方负责校验合法性）。 */
+    public void updateCurrentStage(String id, String stage) {
+        jdbc.update("UPDATE workspace SET current_stage = ?, updated_at = now() WHERE id = ?", stage, id);
     }
 
     public void update(String id, String name, String rootPath, String type, long assetId, Integer pinned) {

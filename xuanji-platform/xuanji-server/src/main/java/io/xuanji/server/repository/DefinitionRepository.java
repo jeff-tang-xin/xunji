@@ -46,9 +46,9 @@ public class DefinitionRepository {
         jdbc.update("DELETE FROM wf_definition WHERE id = ?", id);
     }
 
-    /** 存在则返回含 created_by 的行，不存在返回空列表（供归属校验）。 */
+    /** 存在则返回含 created_by/org_id 的行，不存在返回空列表（供归属/可见性校验）。 */
     public List<Map<String, Object>> findCreatedBys(long id) {
-        return jdbc.queryForList("SELECT created_by FROM wf_definition WHERE id = ?", id);
+        return jdbc.queryForList("SELECT created_by, org_id FROM wf_definition WHERE id = ?", id);
     }
 
     /** 发布所需：name + canvas_json（::text 规避 PGobject）+ current_version。 */
@@ -80,6 +80,14 @@ public class DefinitionRepository {
         return jdbc.queryForList(
                 "SELECT version, status, published_at FROM wf_definition_version "
                         + "WHERE definition_id = ? ORDER BY version", definitionId);
+    }
+
+    /** 校验某定义某版本已发布（WORKFLOW 子工作流节点引用校验用）。 */
+    public Integer countPublishedVersion(long definitionId, int version) {
+        return jdbc.queryForObject(
+                "SELECT COUNT(*) FROM wf_definition_version "
+                        + "WHERE definition_id = ? AND version = ? AND status = 'PUBLISHED'",
+                Integer.class, definitionId, version);
     }
 
     /** 数据权限过滤后的列表（whereClause/args 由 Service 经 DataScopeFilter 生成）。 */

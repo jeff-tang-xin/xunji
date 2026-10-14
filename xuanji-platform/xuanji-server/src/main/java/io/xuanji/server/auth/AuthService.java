@@ -76,14 +76,11 @@ public class AuthService {
         repo.updatePassword(userId, encoder.encode(newPassword), Timestamp.from(Instant.now()));
     }
 
-    /** 当前用户视图（含按角色聚合的菜单）。 */
+    /** 当前用户视图（含按角色聚合的菜单，DIR 分组 + PAGE 子菜单树形结构）。 */
     public Map<String, Object> userView(LoginUser user) {
-        List<Map<String, Object>> menus = new ArrayList<>();
         List<Map<String, Object>> rows = user.isPlatformAdmin()
                 ? repo.findMenusForAdmin() : repo.findMenusForUser(user.userId());
-        for (Map<String, Object> r : rows) {
-            menus.add(Map.of("code", r.get("code"), "name", r.get("name"), "path", r.get("path")));
-        }
+        List<Map<String, Object>> menus = buildMenuTree(rows);
         Map<String, Object> view = new LinkedHashMap<>();
         view.put("userId", user.userId());
         view.put("username", user.username());
@@ -93,6 +90,43 @@ public class AuthService {
         view.put("dataScope", user.dataScope());
         view.put("menus", menus);
         return view;
+    }
+
+    /** 扁平菜单行 → 树形：DIR 分组为父节点，PAGE 挂到 parent_code 对应分组下。 */
+    private List<Map<String, Object>> buildMenuTree(List<Map<String, Object>> rows) {
+        List<Map<String, Object>> dirs = new ArrayList<>();
+        Map<String, List<Map<String, Object>>> childrenByGroup = new LinkedHashMap<>();
+        for (Map<String, Object> r : rows) {
+            String type = (String) r.get("menu_type");
+            Map<String, Object> view = new LinkedHashMap<>();
+            view.put("code", r.get("code"));
+            view.put("name", r.get("name"));
+            view.put("path", r.get("path"));
+            if ("DIR".equals(type)) {
+                view.put("children", new ArrayList<Map<String, Object>>());
+                dirs.add(view);
+            } else {
+                String parentCode = (String) r.get("parent_code");
+                childrenByGroup.computeIfAbsent(parentCode, k -> new ArrayList<>()).add(view);
+            }
+        }
+        // 把 PAGE 挂到对应 DIR 分组下
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> dir : dirs) {
+            List<Map<String, Object>> kids = childrenByGroup.get(dir.get("code"));
+            if (kids != null) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> children = (List<Map<String, Object>>) dir.get("children");
+                children.addAll(kids);
+            }
+            result.add(dir);
+        }
+        // 无父分组的 PAGE（历史数据兜底）作为顶级项追加
+        List<Map<String, Object>> orphans = childrenByGroup.get(null);
+        if (orphans != null) {
+            result.addAll(orphans);
+        }
+        return result;
     }
 
     // ---------- 内部 ----------

@@ -240,6 +240,12 @@ public class RunContext {
     /** to 表达式回写：$.input[.field] | $.vars.{key}；$.input 整体映射 = 上游输出合并进输入 */
     @SuppressWarnings("unchecked")
     private void applyTo(String expr, Object value, Map<String, Object> input) {
+        // mapping 引用不存在的路径时求值为 null：不能写进 input——NodeOutput.of 内部 Map.copyOf
+        // 拒绝 null value，抛出的 NPE 连 message 都是 null，把整条 run 打成 FAILED 且日志查不到线索
+        // （实测 END 节点引用 $.start.output.tasks.end 就踩中）。跳过即可，下游按「字段缺省」语义处理。
+        if (value == null) {
+            return;
+        }
         String[] parts = expr.replaceFirst("^\\$\\.", "").split("\\.");
         if (parts.length >= 2 && "vars".equals(parts[0])) {
             vars.put(parts[1], value);

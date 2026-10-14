@@ -61,14 +61,26 @@ public class UserRepository {
 
     public List<Map<String, Object>> findMenusForAdmin() {
         return jdbc.queryForList(
-                "SELECT code, name, path FROM sys_menu WHERE status = 'ACTIVE' ORDER BY sort_no");
+                "SELECT m.code, m.name, m.path, p.code AS parent_code, m.menu_type, m.sort_no "
+                        + "FROM sys_menu m LEFT JOIN sys_menu p ON p.id = m.parent_id "
+                        + "WHERE m.status = 'ACTIVE' ORDER BY m.sort_no");
     }
 
     public List<Map<String, Object>> findMenusForUser(long userId) {
+        // 用户绑定的 PAGE 菜单 + 这些 PAGE 所属的 DIR 分组（树形渲染需要父节点）
         return jdbc.queryForList(
-                "SELECT DISTINCT m.code, m.name, m.path, m.sort_no FROM sys_menu m "
+                "SELECT m.code, m.name, m.path, p.code AS parent_code, m.menu_type, m.sort_no FROM sys_menu m "
                         + "JOIN sys_role_menu rm ON rm.menu_id = m.id "
                         + "JOIN sys_user_role ur ON ur.role_id = rm.role_id "
-                        + "WHERE ur.user_id = ? AND m.status = 'ACTIVE' ORDER BY m.sort_no", userId);
+                        + "LEFT JOIN sys_menu p ON p.id = m.parent_id "
+                        + "WHERE ur.user_id = ? AND m.status = 'ACTIVE' AND m.menu_type = 'PAGE' "
+                        + "UNION "
+                        + "SELECT d.code, d.name, d.path, NULL AS parent_code, d.menu_type, d.sort_no FROM sys_menu d "
+                        + "WHERE d.menu_type = 'DIR' AND d.status = 'ACTIVE' "
+                        + "AND EXISTS (SELECT 1 FROM sys_menu m "
+                        + "  JOIN sys_role_menu rm ON rm.menu_id = m.id "
+                        + "  JOIN sys_user_role ur ON ur.role_id = rm.role_id "
+                        + "  WHERE ur.user_id = ? AND m.status = 'ACTIVE' AND m.parent_id = d.id) "
+                        + "ORDER BY sort_no", userId, userId);
     }
 }

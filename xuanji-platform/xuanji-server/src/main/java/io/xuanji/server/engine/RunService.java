@@ -57,6 +57,10 @@ public class RunService {
     @Autowired
     private RunEventBus eventBus;
 
+    /** run 终态 Spring 事件发布（阶段自动流转的触发源，ProjectService 监听） */
+    @Autowired
+    private org.springframework.context.ApplicationEventPublisher eventPublisher;
+
     private final LiteFlowRuleCompiler compiler = new LiteFlowRuleCompiler("node_dispatch");
 
     /** 触发 run：绑定已发布版本，同步执行到终态 */
@@ -78,12 +82,14 @@ public class RunService {
      * 前端经 GET /api/runs/{id}/events（RunEventBus SSE）订阅 suspended/finished 实时渲染。
      */
     public Map<String, Object> createRunAsync(long definitionId, Integer versionNo, Map<String, Object> input, String triggerType) {
-        WorkflowDefinition definition = loadDefinition(definitionId, versionNo);
+        // versionNo 缺省取最新已发布版本（对齐 createRun 语义；loadDefinition 需 int，null 会拆箱 NPE）
+        final int resolvedVersion = versionNo != null ? versionNo : repo.findCurrentVersion(definitionId);
+        WorkflowDefinition definition = loadDefinition(definitionId, resolvedVersion);
         String runId = "r_" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
-        repo.insertRun(runId, definitionId, versionNo, triggerType, toJson(input), Timestamp.from(Instant.now()));
+        repo.insertRun(runId, definitionId, resolvedVersion, triggerType, toJson(input), Timestamp.from(Instant.now()));
         Thread.startVirtualThread(() -> {
             try {
-                executeRun(runId, definitionId, versionNo, definition, input);
+                executeRun(runId, definitionId, resolvedVersion, definition, input);
             } catch (Exception e) {
                 log.error("async run failed: {} ({})", runId, e.toString());
                 repo.updateFailed(runId, truncate(e.getMessage()), Timestamp.from(Instant.now()));
@@ -106,7 +112,18 @@ public class RunService {
 
         // 传入已有 ctx 实例（Object... 重载）；Class... 重载语义是反射新建空上下文，不适用
         LiteflowResponse resp = flowExecutor.execute2RespWithEL(el, null, runId, ctx);
+        return suspendOrFinish(runId, definitionId, definition, ctx, resp);
+    }
 
+    /**
+     * 执行段统一收尾：先识别决策门挂起（快照落库 + run 转 SUSPENDED），否则落终态。
+     *
+     * <p>首次执行与审批放行后的续跑必须共用这段——否则放行后遇到的下一个门会被
+     * {@link #finishRun} 当成异常失败：阶段流程一条链上有多个评审门，实测第二次挂起
+     * 直接落成 FAILED(error="decision gate suspended at node: t2")。</p>
+     */
+    private Map<String, Object> suspendOrFinish(String runId, long definitionId, WorkflowDefinition definition,
+                                                RunContext ctx, LiteflowResponse resp) {
         // 决策门挂起：快照落库（vars+节点输出+位置），run 等待决策（docs/detail/03 §5）
         if (ctx.suspendedGate() != null) {
             Map<String, Object> snap = ctx.snapshot();
@@ -120,7 +137,7 @@ public class RunService {
             result.put("gateNodeId", gateNodeId);
             return result;
         }
-        return finishRun(runId, definition, ctx, resp);
+        return finishRun(runId, definitionId, definition, ctx, resp);
     }
 
     /**
@@ -139,12 +156,13 @@ public class RunService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "run is not SUSPENDED: " + runId + " (status=" + run.get("status") + ")");
         }
-        if (!"APPROVE".equals(decision) && !"REJECT".equals(decision)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "decision must be APPROVE or REJECT");
+        if (!"APPROVE".equals(decision) && !"REJECT".equals(decision) && !"SKIP".equals(decision)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "decision must be APPROVE, REJECT or SKIP");
         }
 
         // 先加载定义读 gate 的拒绝策略（REDO/TERMINATE/ROLLBACK），REJECT 按此分流
-        WorkflowDefinition preDef = loadDefinition(((Number) run.get("definition_id")).longValue(),
+        long definitionId = ((Number) run.get("definition_id")).longValue();
+        WorkflowDefinition preDef = loadDefinition(definitionId,
                 ((Number) run.get("version")).intValue());
         NodeDef gateNode;
         try {
@@ -157,6 +175,32 @@ public class RunService {
                 : io.xuanji.core.definition.DecisionGateDef.RejectPolicy.REDO;
 
         repo.insertDecision(runId, nodeId, decision, decidedBy, truncate(comment));
+
+        if ("SKIP".equals(decision)) {
+            // 主控跳过：gate 节点不执行（node_run 标 SKIPPED），从其后继续——
+            // 小功能走不完标准流程时，主控可在对话里决定跳过某些环节，用户在门上确认
+            int skipped = repo.skipNodeRun(runId, nodeId);
+            if (skipped == 0) {
+                // 评审门（AGENT+REDO）：产物节点已执行完（node_run=SUCCESS），没有挂起记录可标——
+                // SKIP 语义 = 不审这份产物、直接放行继续；前置门 skipped=1（node_run 标 SKIPPED）
+                log.info("SKIP on review gate (no suspended node_run to mark): run={} node={}", runId, nodeId);
+            }
+            Map<String, Object> snap0;
+            try {
+                snap0 = objectMapper.readValue((String) run.get("snap"), new TypeReference<Map<String, Object>>() { });
+            } catch (JsonProcessingException e) {
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "corrupt context snapshot: " + runId);
+            }
+            WorkflowDefinition def0 = preDef;
+            RunContext ctx0 = RunContext.restore(runId, def0, snap0);
+            ctx0.approveGate(nodeId);
+            repo.updateRunning(runId);
+            eventBus.publish(runId, "run.resumed", Map.of("gateNodeId", nodeId, "decision", "SKIP"));
+            String el0 = compiler.compileAfter(def0, nodeId);
+            log.info("run resumed with SKIP: {} after node={} el=[{}]", runId, nodeId, el0);
+            LiteflowResponse resp0 = flowExecutor.execute2RespWithEL(el0, null, runId, ctx0);
+            return suspendOrFinish(runId, definitionId, def0, ctx0, resp0);
+        }
 
         if ("REJECT".equals(decision)) {
             return switch (rejectPolicy) {
@@ -186,7 +230,67 @@ public class RunService {
                 : compiler.compileFrom(definition, nodeId);
         log.info("run resumed: {} from node={} reviewGate={} el=[{}]", runId, nodeId, reviewGate, el);
         LiteflowResponse resp = flowExecutor.execute2RespWithEL(el, null, runId, ctx);
-        return finishRun(runId, definition, ctx, resp);
+        // 放行后跑的是「后续节点」，途中还会遇到下一个评审门——必须与首次执行同样先识别挂起，
+        // 否则第二次挂起会被 finishRun 按异常落成 FAILED
+        return suspendOrFinish(runId, definitionId, definition, ctx, resp);
+    }
+
+    /**
+     * 正在放行中的 run（内存锁）。与 {@link RunEventBus} 同为单实例假设：总线是内存的，
+     * 多实例部署本来就需要先换分布式实现，这里不引入超出现状的复杂度。
+     */
+    private final java.util.Set<String> resumingRuns = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * 决策门放行的异步形态：校验同步做（点错了、已被他人处理要立刻有反馈），
+     * 执行段丢虚拟线程——因为 {@link #resume} 尾部会同步 execute2RespWithEL 跑完剩余节点，
+     * 阶段流程里每个 AGENT 节点实测 165s+，同步等待会让审批请求挂几分钟、前端按钮假死。
+     *
+     * <p>与 {@link #createRunAsync} 对称。同步 resume 保持原样，超时调度器与其他审批方不受影响。</p>
+     */
+    public Map<String, Object> resumeAsync(String runId, String nodeId, String decision,
+                                           String comment, String decidedBy) {
+        Map<String, Object> run;
+        try {
+            run = repo.findRunForResume(runId);
+        } catch (EmptyResultDataAccessException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "run not found: " + runId);
+        }
+        if (!"SUSPENDED".equals(run.get("status"))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "run is not SUSPENDED: " + runId + " (status=" + run.get("status") + ")");
+        }
+        if (!"APPROVE".equals(decision) && !"REJECT".equals(decision)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "decision must be APPROVE or REJECT");
+        }
+        try {
+            loadDefinition(((Number) run.get("definition_id")).longValue(),
+                    ((Number) run.get("version")).intValue()).node(nodeId);
+        } catch (Exception e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "gate 节点不存在: " + nodeId);
+        }
+        if (!resumingRuns.add(runId)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "该流程正在被放行，请勿重复提交: " + runId);
+        }
+        Thread.startVirtualThread(() -> {
+            try {
+                resume(runId, nodeId, decision, comment, decidedBy);
+            } catch (Exception e) {
+                log.error("async resume failed: run={} node={} ({})", runId, nodeId, e.toString());
+                eventBus.publish(runId, "run.resume_failed",
+                        Map.of("nodeId", nodeId, "error", String.valueOf(e.getMessage())));
+            } finally {
+                resumingRuns.remove(runId);
+            }
+        });
+        log.info("run resume accepted (async): {} node={} decision={} by={}",
+                runId, nodeId, decision, decidedBy);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("runId", runId);
+        result.put("status", "RUNNING");
+        result.put("accepted", true);
+        return result;
     }
 
     /**
@@ -409,7 +513,7 @@ public class RunService {
     }
 
     /** 终态落库 + 返回结果（createRun/resume 共用尾段） */
-    private Map<String, Object> finishRun(String runId, WorkflowDefinition definition, RunContext ctx, LiteflowResponse resp) {
+    private Map<String, Object> finishRun(String runId, long definitionId, WorkflowDefinition definition, RunContext ctx, LiteflowResponse resp) {
         String endNodeId = definition.endNodes().get(0).instanceId();
         Map<String, Object> output = ctx.runOutput(endNodeId);
         String error = null;
@@ -424,6 +528,9 @@ public class RunService {
 
         eventBus.publish(runId, "run.finished", Map.of("status", resp.isSuccess() ? "SUCCESS" : "FAILED"));
         eventBus.complete(runId);
+        // 终态事件：阶段自动流转的触发源（ProjectService 监听，仅 SUCCESS 推进；FAILED/SUSPENDED 等人工）
+        eventPublisher.publishEvent(new RunFinishedEvent(runId, definitionId,
+                resp.isSuccess() ? "SUCCESS" : "FAILED"));
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("runId", runId);
@@ -442,9 +549,64 @@ public class RunService {
         return run;
     }
 
-    /** run 列表（运行监控数据源）：按 started_at 倒序（id 为 varchar 不可排序依赖） */
-    public List<Map<String, Object>> listRuns(Long definitionId, String status, int limit) {
-        return repo.listRuns(definitionId, status, Math.min(Math.max(limit, 1), 200));
+    /**
+     * 清空一条 run 的全部落库数据（决策/节点/run 本体）。阶段重跑时回收脏执行用：
+     * 孤儿 RUNNING（进程中断遗留）或 FAILED 的 run 整体废弃后按既有定义重新起跑。
+     * SUCCESS/SUSPENDED 不允许清——前者是阶段完成的推进门依据，后者应走决策门审批。
+     */
+    public void purgeRun(String runId) {
+        Map<String, Object> run = repo.findRunDetail(runId);
+        if (run == null || run.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "run 不存在: " + runId);
+        }
+        String status = String.valueOf(run.get("status"));
+        if ("SUCCESS".equals(status) || "SUSPENDED".equals(status)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "run 状态为 " + status + "，不允许清理（SUCCESS 是阶段完成依据，SUSPENDED 应走审批）");
+        }
+        repo.purgeRunData(runId);
+        log.info("run purged: id={} status={}", runId, status);
+    }
+
+
+    /** run 列表（运行监控数据源）：按 started_at 倒序（id 为 varchar 不可排序依赖）；数据权限经 definition 归属过滤 */
+    public List<Map<String, Object>> listRuns(Long definitionId, String status, int limit, LoginUser user) {
+        var c = DataScopeFilter.of(user, "d.org_id", "d.created_by");
+        return repo.listRuns(definitionId, status, Math.min(Math.max(limit, 1), 200), c.sql(), c.args().toArray());
+    }
+
+    /** 数据权限可见性校验（definition 维度）：管理员/ALL 全量；否则创建者本人或数据权限范围内。 */
+    public void requireDefinitionVisible(long definitionId, LoginUser user) {
+        Map<String, Object> scope;
+        try {
+            scope = repo.findDefinitionScope(definitionId);
+        } catch (EmptyResultDataAccessException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "wf_definition #" + definitionId + " 不存在");
+        }
+        if (user.isPlatformAdmin() || "ALL".equals(user.dataScope())) {
+            return;
+        }
+        Object createdBy = scope.get("created_by");
+        if (createdBy != null && createdBy.equals(user.username())) {
+            return;
+        }
+        String ds = user.dataScope() == null ? "ONLY_CREATE" : user.dataScope();
+        boolean orgVisible = ("ORG".equals(ds) || "UNDER_ORG".equals(ds))
+                && user.orgId() != null && user.orgId().equals(scope.get("org_id"));
+        if (!orgVisible) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "无权访问该定义");
+        }
+    }
+
+    /** run 可见性校验：经 run 的 definition 归属间接判断（wf_run 无归属列）。 */
+    public void requireRunVisible(String runId, LoginUser user) {
+        Long definitionId;
+        try {
+            definitionId = repo.findRunDefinitionId(runId);
+        } catch (EmptyResultDataAccessException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "run not found: " + runId);
+        }
+        requireDefinitionVisible(definitionId, user);
     }
 
     private String toJson(Object value) {

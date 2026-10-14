@@ -103,24 +103,43 @@ public class RunRepository {
     }
 
     public List<Map<String, Object>> listRuns(Long definitionId, String status, int limit) {
+        return listRuns(definitionId, status, limit, "TRUE", new Object[0]);
+    }
+
+    /** run 列表（数据权限过滤）：join wf_definition 按 org_id/created_by 过滤（wf_run 无归属列）。 */
+    public List<Map<String, Object>> listRuns(Long definitionId, String status, int limit,
+                                              String whereClause, Object[] scopeArgs) {
         List<String> conds = new ArrayList<>();
         List<Object> args = new ArrayList<>();
         if (definitionId != null) {
-            conds.add("definition_id = ?");
+            conds.add("r.definition_id = ?");
             args.add(definitionId);
         }
         if (status != null && !status.isBlank()) {
-            conds.add("status = ?");
+            conds.add("r.status = ?");
             args.add(status);
         }
+        conds.add(whereClause);
+        args.addAll(List.of(scopeArgs));
         StringBuilder sql = new StringBuilder(
-                "SELECT id, definition_id, version, trigger_type, status, app_id, started_at, finished_at, error FROM wf_run");
+                "SELECT r.id, r.definition_id, r.version, r.trigger_type, r.status, r.app_id, r.started_at, r.finished_at, r.error "
+                        + "FROM wf_run r JOIN wf_definition d ON d.id = r.definition_id");
         if (!conds.isEmpty()) {
             sql.append(" WHERE ").append(String.join(" AND ", conds));
         }
-        sql.append(" ORDER BY started_at DESC LIMIT ?");
+        sql.append(" ORDER BY r.started_at DESC LIMIT ?");
         args.add(limit);
         return jdbc.queryForList(sql.toString(), args.toArray());
+    }
+
+    /** 查 run 的 definition_id（供归属校验）；无记录抛 EmptyResultDataAccessException。 */
+    public Long findRunDefinitionId(String runId) {
+        return jdbc.queryForObject("SELECT definition_id FROM wf_run WHERE id = ?", Long.class, runId);
+    }
+
+    /** 查 definition 的 org_id/created_by（供数据权限可见性校验）。 */
+    public Map<String, Object> findDefinitionScope(long definitionId) {
+        return jdbc.queryForMap("SELECT org_id, created_by FROM wf_definition WHERE id = ?", definitionId);
     }
 
     /* ---------- wf_node_run ---------- */
@@ -148,12 +167,48 @@ public class RunRepository {
         jdbc.update("UPDATE wf_node_run SET status = 'SUSPENDED' WHERE id = ?", nodeRunId);
     }
 
+    /**
+     * SKIP（主控跳过）：把该节点挂起中的 node_run 标记为 SKIPPED——节点不执行、无输出，
+     * 下游 mapping 引用其输出按「字段缺省」语义处理（RunContext.applyTo 跳过 null）。
+     *
+     * @return 影响行数（0 = 该节点没有挂起中的 node_run，调用方应视为非法跳过）
+     */
+    public int skipNodeRun(String runId, String nodeId) {
+        return jdbc.update("UPDATE wf_node_run SET status = 'SKIPPED', finished_at = ? "
+                + "WHERE run_id = ? AND node_id = ? AND status = 'SUSPENDED'",
+                Timestamp.from(java.time.Instant.now()), runId, nodeId);
+    }
+
     /* ---------- wf_decision ---------- */
 
     public void insertDecision(String runId, String nodeId, String decision, String decidedBy, String remark) {
         jdbc.update("INSERT INTO wf_decision (run_id, node_id, decision_type, decision, decided_by, remark) "
                         + "VALUES (?, ?, 'NODE_GATE', ?, ?, ?)",
                 runId, nodeId, decision, decidedBy, remark);
+    }
+
+    /**
+     * 清空一条 run 的全部落库数据（决策 → 节点 → run 本体，子表先删）。
+     * 供阶段重跑回收脏执行：孤儿 RUNNING / FAILED 的 run 在重跑时整体废弃，
+     * 留着只会让 wf_run 表里堆「永远执行中」的僵尸。
+     */
+    public void purgeRunData(String runId) {
+        jdbc.update("DELETE FROM wf_decision WHERE run_id = ?", runId);
+        jdbc.update("DELETE FROM wf_node_run WHERE run_id = ?", runId);
+        jdbc.update("DELETE FROM wf_run WHERE id = ?", runId);
+    }
+
+    /**
+     * 启动自愈：进程中断（kill/崩溃/部署重启）时正在执行的 run 与节点被直接杀死，
+     * 状态永远停在 RUNNING——界面显示「执行中」却不会再推进。启动时统一标 FAILED
+     * （error 注明原因），用户即可在阶段执行面板一键重跑恢复。
+     *
+     * @return int[]{run 行数, node_run 行数}
+     */
+    public int[] failOrphanRuns() {
+        int nodes = jdbc.update("UPDATE wf_node_run SET status = 'FAILED', error = '服务重启中断' WHERE status = 'RUNNING'");
+        int runs = jdbc.update("UPDATE wf_run SET status = 'FAILED', error = '服务重启中断', finished_at = now() WHERE status = 'RUNNING'");
+        return new int[]{runs, nodes};
     }
 
     public List<Map<String, Object>> findDecisionHistory(String runId) {

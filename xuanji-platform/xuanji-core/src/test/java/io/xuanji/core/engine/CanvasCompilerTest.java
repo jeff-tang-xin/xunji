@@ -96,8 +96,13 @@ class CanvasCompilerTest {
         assertTrue(ex.getMessage().contains("P1"));
     }
 
+    /**
+     * 多出线不再拒绝：编译器已有意支持 DAG（类注释——拓扑序保证每个节点执行时其所有上游已完成，
+     * 输入装配按入边回溯取数即可正确）。P0 的「每节点至多一条 SEQ 出边」限制已放开，
+     * 这里改为验证分支图能编译出包含全部节点的链。
+     */
     @Test
-    void rejectMultipleOutgoing() {
+    void acceptDagMultipleOutgoing() {
         String branch = """
                 {"definitionVersion":1, "meta":{"name":"x"},
                  "nodes":[{"id":"start","kind":"START"},{"id":"a","refId":"basic.validate"},
@@ -105,8 +110,11 @@ class CanvasCompilerTest {
                  "edges":[{"from":"start","to":"a","type":"SEQ"},{"from":"a","to":"b","type":"SEQ"},
                           {"from":"a","to":"end","type":"SEQ"},{"from":"b","to":"end","type":"SEQ"}]}
                 """;
-        assertThrows(IllegalArgumentException.class, () -> new LiteFlowRuleCompiler("c").compile(
-                CanvasJsonParser.parse(branch)));
+        String el = new LiteFlowRuleCompiler("c").compile(CanvasJsonParser.parse(branch));
+        // 分支上的 b 与汇聚点 end 都要入链，且 end 排在 start 之后（入度归零才出队）
+        assertTrue(el.contains("tag(\"a\")") && el.contains("tag(\"b\")") && el.contains("tag(\"end\")"));
+        assertTrue(el.indexOf("tag(\"start\")") < el.indexOf("tag(\"end\")"));
+        assertEquals(4, el.split("tag\\(").length - 1);
     }
 
     @Test

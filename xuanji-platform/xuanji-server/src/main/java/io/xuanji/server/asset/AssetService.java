@@ -228,6 +228,11 @@ public class AssetService {
         }
     }
 
+    /** 公开归属校验（供 discoverMcp/testModelProvider 等操作端点复用）：资产不存在或非本人/管理员抛异常。 */
+    public void requireOwner(String asset, long id, LoginUser user) {
+        requireOwner(fetchRow(spec(asset), id), user);
+    }
+
     // ---------- body 列装配 ----------
 
     private void appendBodyCols(AssetSpec s, Map<String, Object> body,

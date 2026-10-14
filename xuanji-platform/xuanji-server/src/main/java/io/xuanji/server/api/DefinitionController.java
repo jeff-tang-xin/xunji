@@ -51,13 +51,15 @@ public class DefinitionController {
     }
 
     @PostMapping("/{id}/publish")
-    public Map<String, Object> publish(@PathVariable long id) {
-        return definitionService.publish(id);
+    public Map<String, Object> publish(@PathVariable long id,
+                                       @RequestAttribute(LoginUser.ATTR) LoginUser user) {
+        return definitionService.publish(id, user);
     }
 
     @GetMapping("/{id}")
-    public Map<String, Object> get(@PathVariable long id) {
-        return definitionService.get(id);
+    public Map<String, Object> get(@PathVariable long id,
+                                   @RequestAttribute(LoginUser.ATTR) LoginUser user) {
+        return definitionService.get(id, user);
     }
 
     @GetMapping

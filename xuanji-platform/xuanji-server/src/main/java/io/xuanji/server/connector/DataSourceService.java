@@ -2,6 +2,7 @@ package io.xuanji.server.connector;
 
 import io.xuanji.core.api.Credential;
 import io.xuanji.server.asset.CryptoUtil;
+import io.xuanji.server.auth.LoginUser;
 import io.xuanji.server.repository.DataSourceRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -15,6 +16,9 @@ import java.util.Map;
  * 数据源配置管理（connector_config，platform=jdbc）。
  * 凭证 AES-GCM 加密落库（Base64→decode(base64) 存 BYTEA），明文仅试连时临时使用、绝不回显；
  * 创建前先试连，连不通不入库（避免脏配置）。SQL 归 {@link DataSourceRepository}（C4 分层）。
+ *
+ * <p>数据源为平台级共享资源（画布节点/Agent 工具执行时无 LoginUser 上下文），
+ * list/get 对所有登录用户可见；create 记录创建者，delete 校验创建者本人或平台管理员。</p>
  */
 @Service
 public class DataSourceService {
@@ -45,10 +49,10 @@ public class DataSourceService {
     }
 
     @Transactional
-    public Map<String, Object> create(Map<String, Object> body) {
+    public Map<String, Object> create(Map<String, Object> body, LoginUser user) {
         String name = str(body, "name");
         String url = str(body, "url");
-        String user = str(body, "user");
+        String dbUser = str(body, "user");
         String password = str(body, "password");
         if (name == null || name.isBlank() || url == null || url.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name 与 url 必填");
@@ -58,9 +62,9 @@ public class DataSourceService {
         }
         // 先试连，连不通直接 400，不入库
         validateOrThrow(new Credential("basic", Map.of(
-                "url", url, "user", user == null ? "" : user, "password", password == null ? "" : password)));
+                "url", url, "user", dbUser == null ? "" : dbUser, "password", password == null ? "" : password)));
         String cipher = password == null ? null : crypto.encrypt(password);
-        Long id = repo.insert(PLATFORM, name, url, cipher, extraJson(user));
+        Long id = repo.insert(PLATFORM, name, url, cipher, extraJson(dbUser), user.username());
         return Map.of("id", id, "name", name);
     }
 
@@ -84,10 +88,18 @@ public class DataSourceService {
     }
 
     @Transactional
-    public void delete(long id) {
-        if (repo.delete(id) == 0) {
+    public void delete(long id, LoginUser user) {
+        Map<String, Object> row = repo.findFull(id);
+        if (row == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "数据源不存在: " + id);
         }
+        if (!user.isPlatformAdmin()) {
+            Object createdBy = row.get("created_by");
+            if (createdBy == null || !createdBy.equals(user.username())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅数据源创建者或平台管理员可删除");
+            }
+        }
+        repo.delete(id);
     }
 
     private static String str(Map<String, Object> m, String k) {

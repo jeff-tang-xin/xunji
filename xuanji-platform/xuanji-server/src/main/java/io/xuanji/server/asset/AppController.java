@@ -127,15 +127,15 @@ public class AppController {
         return result;
     }
 
-    /** 查询 run：仅允许查询本 App 绑定 workflow 产生的 run */
+    /** 查询 run：仅允许查询本 App 产生的 run（wf_run.app_id 审计链路比对，比 definition_id 更严格） */
     @GetMapping("/api/v1/apps/{appId}/runs/{runId}")
     public Object getRun(@PathVariable String appId, @PathVariable String runId,
                          @RequestHeader(value = "Authorization", required = false) String auth) {
-        var ctx = apps.authorize(bearer(auth), appId, "runs");
-        long definitionId = ((Number) ctx.get("bound_asset_id")).longValue();
+        apps.authorize(bearer(auth), appId, "runs");
         Map<String, Object> run = runs.getRun(runId);
-        if (((Number) run.get("definition_id")).longValue() != definitionId) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "run 不属于该 App 绑定的 workflow");
+        Object runAppId = run.get("app_id");
+        if (runAppId == null || !appId.equals(runAppId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "run 不属于该 App");
         }
         run.remove("context_snapshot");
         return run;

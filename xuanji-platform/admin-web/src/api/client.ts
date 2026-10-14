@@ -6,6 +6,7 @@ export interface MenuInfo {
   code: string
   name: string
   path: string
+  children?: MenuInfo[]
 }
 
 export interface MeInfo {
@@ -46,12 +47,17 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
   return r
 }
 
-/** JSON 请求快捷方法；非 2xx 时抛出后端 error 信息 */
+/** JSON 请求快捷方法；非 2xx 时抛出后端原因 */
 export async function apiJson<T = unknown>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const r = await apiFetch(path, { method, body: body === undefined ? undefined : JSON.stringify(body) })
   const data = await r.json().catch(() => ({}))
   if (!r.ok) {
-    const msg = (data as { error?: string }).error || (data as { message?: string }).message || `请求失败 (${r.status})`
+    // message 必须优先于 error：Spring 默认错误体里 error 恒为 "Bad Request" / "Conflict" 这类 HTTP 短语，
+    // 而 message 才是后端写的可执行原因（如「当前阶段执行未完成（run=RUNNING），不能推进」）。
+    // 原先取 error 优先，用户永远只看到四个字，等于把后端透出的原因白扔了。
+    const msg = (data as { message?: string }).message
+      || (data as { error?: string }).error
+      || `请求失败 (${r.status})`
     throw new Error(msg)
   }
   return data as T

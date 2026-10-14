@@ -36,6 +36,9 @@ public final class LiteFlowRuleCompiler {
      * @throws IllegalArgumentException 图结构不满足 P0 线性链约束
      */
     public String compile(WorkflowDefinition definition) {
+        // 先跑结构校验再取起点：definition.startNode() 在缺 START 时抛 IllegalStateException，
+        // 会绕过 topologicalChain 里的 IllegalArgumentException，与本方法 @throws 契约不符
+        topologicalChain(definition);
         return compileFrom(definition, definition.startNode().instanceId());
     }
 
@@ -145,6 +148,13 @@ public final class LiteFlowRuleCompiler {
             }
             chain.add(byId.get(id));
             for (EdgeDef e : definition.outgoingEdges(id)) {
+                // 出边指回已入链的节点 = 回边（环）。不拦的话这条边会把该节点入度减到 0，
+                // 随后又被 seen 静默跳过，于是带环的图能编译成功、运行时按拓扑序跑一遍，行为未定义。
+                // 菱形汇聚不会误报：汇聚节点要等所有上游把入度减到 0 才出队，此前它不在 seen 里。
+                if (seen.contains(e.to())) {
+                    throw new IllegalArgumentException("definition graph has a cycle: "
+                            + e.from() + " -> " + e.to() + " (" + definition.name() + ")");
+                }
                 int left = indegree.merge(e.to(), -1, Integer::sum);
                 if (left == 0) {
                     ready.add(e.to());
