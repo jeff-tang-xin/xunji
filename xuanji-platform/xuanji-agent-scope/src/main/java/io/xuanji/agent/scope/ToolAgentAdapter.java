@@ -27,9 +27,21 @@ class ToolAgentAdapter implements AgentTool {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final Tool tool;
+    /**
+     * 入参 schema 覆盖（可空）。会话级编排工具（StageOrchestrator/OrchestrationTools）的
+     * 详细 JSON Schema 放在 ToolDef.parameters 里，而 Tool.metadata() 只有 anyObject()——
+     * 不覆盖的话 LLM 看到的函数签名没有任何参数定义，传参全靠猜，工具必失败。
+     */
+    private final Map<String, Object> parametersOverride;
 
     ToolAgentAdapter(Tool tool) {
+        this(tool, null);
+    }
+
+    ToolAgentAdapter(Tool tool, Map<String, Object> parametersOverride) {
         this.tool = tool;
+        this.parametersOverride = parametersOverride == null || parametersOverride.isEmpty()
+                ? null : parametersOverride;
     }
 
     @Override
@@ -45,6 +57,9 @@ class ToolAgentAdapter implements AgentTool {
     @Override
     @SuppressWarnings("unchecked")
     public Map<String, Object> getParameters() {
+        if (parametersOverride != null) {
+            return parametersOverride;
+        }
         // core 侧 JsonSchema（JsonNode）→ AgentScope 期望的 Map 形态（隔离边界转换）
         return MAPPER.convertValue(tool.metadata().parameters().document(), Map.class);
     }

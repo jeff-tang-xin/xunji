@@ -1,11 +1,14 @@
 package io.xuanji.agent.scope;
 
 import io.agentscope.core.ReActAgent;
+import io.agentscope.core.message.Base64Source;
+import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.state.AgentStateStore;
-import io.agentscope.core.state.InMemoryAgentStateStore;
 import io.agentscope.extensions.model.openai.OpenAIChatModel;
 import io.xuanji.core.api.Tool;
 import io.xuanji.core.runtime.AgentHandle;
@@ -18,6 +21,7 @@ import io.xuanji.core.runtime.ToolDef;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -51,17 +55,18 @@ public class AgentScopeRuntime implements AgentRuntime {
     /**
      * 会话状态存储（多轮记忆，docs/detail/04 §1）：所有 Agent 实例共享——
      * 实例按 spec.sessionId() 挂接，执行后 AgentState（含对话上下文）持久化于此，
-     * 新实例以同 sessionId 构建时恢复历史。P0 用内存实现（与 TokenService 同级简化，
-     * 重启丢会话记忆）；跨重启/多副本可换 JsonFileAgentStateStore 或
-     * agentscope-extensions-postgresql 的 PostgresAgentStateStore。
+     * 新实例以同 sessionId 构建时恢复历史。P0 用 PostgreSQL 实现（V21__agent_state.sql），
+     * 跨重启/多副本记忆不丢；userId 匿名（AgentScopeRuntime 不传 userId）时归一到
+     * "__anon__" 命名空间。
      */
-    private final AgentStateStore stateStore = new InMemoryAgentStateStore();
+    private final AgentStateStore stateStore;
 
     /** 代码工具（Tool SPI bean）提供者——全局注册为 Agent 可调用能力（平台级，P0 简化） */
     private final ObjectProvider<Tool> toolProvider;
 
-    public AgentScopeRuntime(ObjectProvider<Tool> toolProvider) {
+    public AgentScopeRuntime(ObjectProvider<Tool> toolProvider, JdbcTemplate jdbcTemplate) {
         this.toolProvider = toolProvider;
+        this.stateStore = new PostgresAgentStateStore(jdbcTemplate);
     }
 
     @Override
@@ -126,12 +131,36 @@ public class AgentScopeRuntime implements AgentRuntime {
         return sb.toString();
     }
 
+    /**
+     * AgentMessage → AgentScope UserMessage：无附件走纯文本（原路径不变）；
+     * 图片附件转 ImageBlock(Base64Source) 多模态块，文本文件内容拼进提示文本。
+     * 模型侧需支持视觉（如 qwen-vl 系列），不支持时由模型端点报错透出。
+     */
+    private UserMessage toUserMessage(AgentMessage msg) {
+        List<AgentMessage.Attachment> atts = msg.attachments() == null ? List.of() : msg.attachments();
+        if (atts.isEmpty()) {
+            return new UserMessage(msg.text());
+        }
+        StringBuilder text = new StringBuilder(msg.text());
+        List<ContentBlock> blocks = new java.util.ArrayList<>();
+        for (AgentMessage.Attachment a : atts) {
+            if (a.isImage()) {
+                blocks.add(new ImageBlock(new Base64Source(a.mediaType(), a.dataBase64())));
+                text.append("\n\n[用户附带图片: ").append(a.name() == null ? "image" : a.name()).append(']');
+            } else if (a.isTextFile()) {
+                text.append("\n\n[附件: ").append(a.name()).append("]\n").append(a.content());
+            }
+        }
+        blocks.add(0, TextBlock.builder().text(text.toString()).build());
+        return new UserMessage(blocks);
+    }
+
     @Override
     public AgentResult call(AgentHandle handle, AgentMessage msg) {
         if (!(handle instanceof AgentScopeHandle h)) {
             throw new IllegalArgumentException("unknown handle type: " + handle.getClass());
         }
-        Msg reply = h.agent().call(List.of(new UserMessage(msg.text()))).block();
+        Msg reply = h.agent().call(List.of(toUserMessage(msg))).block();
         if (reply == null) {
             throw new IllegalStateException("agent returned no reply: " + h.spec().agentConfigId());
         }
@@ -163,7 +192,7 @@ public class AgentScopeRuntime implements AgentRuntime {
             throw new IllegalArgumentException("unknown handle type: " + handle.getClass());
         }
         try {
-            h.agent().streamEvents(List.of(new UserMessage(msg.text())))
+            h.agent().streamEvents(List.of(toUserMessage(msg)))
                     .doOnNext(evt -> {
                         try {
                             if (evt instanceof io.agentscope.core.event.AgentStartEvent e) {
@@ -247,6 +276,16 @@ public class AgentScopeRuntime implements AgentRuntime {
                 case "OPENAPI" -> tools.add(new HttpAgentTool(tool));
                 case "MCP" -> tools.add(new McpAgentTool(tool));
                 case "AGENT" -> tools.add(new AgentInvokeTool(tool, this));
+                case "BEAN" -> {
+                    // 会话级编排工具（StageOrchestrator）：payload 携带 Tool 实例，只挂给主控。
+                    // schema 用 ToolDef.parameters（详细 JSON Schema）——Tool.metadata() 只有 anyObject()，
+                    // 不覆盖 LLM 就看不到参数定义（实测 plan_steps 连续返回「steps 不能为空」）。
+                    if (tool.payload() instanceof io.xuanji.core.api.Tool t) {
+                        tools.add(new ToolAgentAdapter(t, tool.parameters()));
+                    } else {
+                        log.warn("BEAN tool payload is not a Tool instance, skipped: {}", tool.name());
+                    }
+                }
                 default -> log.warn("tool source_type={} not supported yet, skipped: {}",
                         tool.sourceType(), tool.name());
             }

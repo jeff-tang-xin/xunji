@@ -24,6 +24,11 @@
       <groupId>io.xuanji</groupId>
       <artifactId>xuanji-core</artifactId>
     </dependency>
+    <!-- PostgresAgentStateStore 依赖 JdbcTemplate（版本由 spring-boot-dependencies 3.5.0 管理） -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-jdbc</artifactId>
+    </dependency>
     <dependency>
       <groupId>io.agentscope</groupId>
       <artifactId>agentscope</artifactId>
