@@ -140,7 +140,13 @@ public class PeerConsultService {
         }
 
         // CONSULT 台账：发起方=agent，目的方=participants，问答全文留档（主控下轮 boardDigest 可见）
-        saveConsultStep(step, target, question, answer);
+        List<String> reqCodes = req.input().get("requirement_codes") instanceof List<?> rl
+                ? rl.stream().map(String::valueOf).filter(c -> !c.isBlank()).toList() : List.of();
+        if (reqCodes.isEmpty()) {
+            // 兜底：LLM 漏传时从问题文本提取 REQ-xxx
+            reqCodes = StageStep.extractRequirementCodes(question);
+        }
+        saveConsultStep(step, target, question, answer, reqCodes);
         log.info("peer consult: ws={} seq={} {} -> {} ({} 字)", step.workspaceId(), step.seq(),
                 step.agent(), target, answer.length());
         return ToolResult.of(Map.of(
@@ -149,8 +155,8 @@ public class PeerConsultService {
                 "message", "已获得 " + target + " 的解答（问答已留档，主控可见）"));
     }
 
-    /** 求助留档：独立 CONSULT 步，DONE 态，不参与执行计数但进黑板摘要。 */
-    private void saveConsultStep(StageStep from, String target, String question, String answer) {
+    /** 求助留档：独立 CONSULT 步，DONE 态，不参与执行计数但进黑板摘要；requirementCodes 关联需求（看板统计澄清次数）。 */
+    private void saveConsultStep(StageStep from, String target, String question, String answer, List<String> reqCodes) {
         int seq = stepRepo.findByStage(from.workspaceId(), from.stage(), from.iteration()).stream()
                 .mapToInt(StageStep::seq).max().orElse(0) + 1;
         String name = consultPrefix(from.seq()) + "步骤#" + from.seq() + "·" + target + "·"
@@ -159,7 +165,7 @@ public class PeerConsultService {
         StageStep consult = new StageStep(null, from.workspaceId(), from.stage(), from.iteration(),
                 seq, name, StepType.CONSULT, from.agent(), List.of(target), StepStatus.DONE,
                 question, answer.length() > 300 ? answer.substring(0, 300) + "…" : answer,
-                full, null, null, null, null, null, null, null, null, null, null);
+                full, null, null, null, null, null, null, null, null, null, reqCodes);
         stepRepo.insert(consult);
     }
 
@@ -171,6 +177,8 @@ public class PeerConsultService {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("target_agent", str("目的方 agent 英文名（需求问题→product_analyst，架构/技术→architect，数据库→dba；禁用中文显示名）"));
         props.put("question", str("要问的具体问题：带上下文（你在做什么、卡在哪、已试过什么），让对方不需要猜"));
+        props.put("requirement_codes", java.util.Map.of("type", "array", "items", java.util.Map.of("type", "string"),
+                "description", "本次提问涉及的需求编号（如 [\"REQ-001\"]），涉及多个需求就都列上；不涉及具体需求可省略。需求看板会据此统计每个需求被澄清的次数"));
         Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
         schema.put("properties", props);

@@ -30,6 +30,10 @@ import java.util.Optional;
  */
 public class OrchestrationTools {
 
+    /** 黑板条目留痕时间格式（谁记录的 · 什么时间 · 是否完结）。 */
+    private static final java.time.format.DateTimeFormatter TS_FMT =
+            java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm");
+
     private final LoginUser user;
     private final String wsId;
     private final String stage;
@@ -346,6 +350,15 @@ public class OrchestrationTools {
             int rounds = parseInt(req.input().get("rounds"), 0);
             String summarizer = orDefault(str(req.input().get("summarizer")), "project_manager");
             StageStep step = nextStep(name, StepType.DISCUSS, summarizer, roster, topic);
+            List<String> codes = req.input().get("requirement_codes") instanceof List<?> rl
+                    ? rl.stream().map(String::valueOf).filter(c -> !c.isBlank()).toList() : List.of();
+            if (codes.isEmpty()) {
+                // 兜底：LLM 漏传时从讨论名/议题提取 REQ-xxx（实测 PM 会漏）
+                codes = StageStep.extractRequirementCodes(name + " " + topic);
+            }
+            if (!codes.isEmpty()) {
+                step = step.withRequirementCodes(codes);
+            }
             long id = stepRepo.insert(step);
             discussionEngine.submit(step.withId(id), brief(topic), rounds, summarizer);
             return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
@@ -468,7 +481,11 @@ public class OrchestrationTools {
             if (s.outputSummary() != null && !s.outputSummary().isBlank()) {
                 sb.append("：").append(truncate(s.outputSummary(), 120));
             }
-            sb.append("\n");
+            // 留痕三要素：谁记录的、什么时间、是否完结（用户要求黑板条目可追溯）
+            sb.append(" —— by ").append(s.agent())
+                    .append(" · ").append(s.createdAt() == null ? "?" : s.createdAt().format(TS_FMT))
+                    .append(" · ").append(s.status().active() ? "进行中" : "已完结")
+                    .append("\n");
         }
         return sb.length() == 0 ? "（本阶段尚无记录）" : sb.toString();
     }
@@ -606,6 +623,7 @@ public class OrchestrationTools {
         props.put("participants", arr(str("参与方 agent 英文名名单（至少 2 个：按问题域拉能解答的目的方，如需求会诊 [\"product_analyst\",\"architect\"]；PM 会自动加入主持与汇总，不用写；禁用中文显示名）")));
         props.put("rounds", str("互见讨论轮数，默认 0（只收集一轮独立观点）"));
         props.put("summarizer", str("汇总人 agent 英文名，默认 project_manager（你主持并汇总）"));
+        props.put("requirement_codes", arr(str("本次讨论涉及的需求编号（如 [\"REQ-001\",\"REQ-003\"]）；讨论为了哪个需求就关联哪个，需求看板据此统计每个需求被讨论的次数")));
         return schema(props, List.of("name", "topic", "participants"));
     }
 

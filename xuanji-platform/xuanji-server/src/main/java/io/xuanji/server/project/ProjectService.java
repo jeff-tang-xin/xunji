@@ -1115,6 +1115,9 @@ public class ProjectService {
         for (io.xuanji.server.project.orchestrator.RequirementRepository.Requirement r : rows) {
             depth.put(r.code(), depthOf(r.code(), rows, depth, rows.size()));
         }
+        // 需求活动留痕：讨论（DISCUSS）/澄清（CONSULT）次数与记录（结论/日期/谁/是否完结）——
+        // 台账 requirementCodes 关联（ask_peer/discuss 落库时写入），一次拉全项目内存分组
+        List<io.xuanji.server.project.orchestrator.StageStep> steps = stepRepo.findByWorkspace(wsId);
         java.util.LinkedHashMap<String, Object> out = new java.util.LinkedHashMap<>();
         java.util.ArrayList<Map<String, Object>> items = new java.util.ArrayList<>();
         for (io.xuanji.server.project.orchestrator.RequirementRepository.Requirement r : rows) {
@@ -1128,6 +1131,26 @@ public class ProjectService {
             item.put("depth", depth.getOrDefault(r.code(), 0));
             item.put("created_by", r.createdBy());
             item.put("updated_at", r.updatedAt() == null ? null : r.updatedAt().toString());
+            List<io.xuanji.server.project.orchestrator.StageStep> related = steps.stream()
+                    .filter(s -> s.requirementCodes().contains(r.code()))
+                    .toList();
+            item.put("discuss_count", related.stream()
+                    .filter(s -> s.stepType() == io.xuanji.server.project.orchestrator.StepType.DISCUSS).count());
+            item.put("clarify_count", related.stream()
+                    .filter(s -> s.stepType() == io.xuanji.server.project.orchestrator.StepType.CONSULT).count());
+            java.util.ArrayList<Map<String, Object>> acts = new java.util.ArrayList<>();
+            for (io.xuanji.server.project.orchestrator.StageStep s : related) {
+                java.util.LinkedHashMap<String, Object> a = new java.util.LinkedHashMap<>();
+                a.put("type", s.stepType().name());
+                a.put("name", s.name());
+                a.put("summary", s.outputSummary());
+                a.put("date", s.createdAt() == null ? null : s.createdAt().toString());
+                a.put("actor", s.agent());
+                a.put("participants", s.participants());
+                a.put("done", !s.status().active());
+                acts.add(a);
+            }
+            item.put("activities", acts);
             items.add(item);
         }
         out.put("requirements", items);

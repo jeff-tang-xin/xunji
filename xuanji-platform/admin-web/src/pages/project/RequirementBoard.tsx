@@ -9,6 +9,16 @@ import { apiJson } from '../../api/client'
  * 依赖未满足（存在非 DONE 的依赖）的卡片降透明度——一眼看出哪些需求当前可开工。
  */
 
+interface RequirementActivity {
+  type: string
+  name?: string | null
+  summary?: string | null
+  date?: string | null
+  actor?: string | null
+  participants?: string[] | null
+  done?: boolean
+}
+
 interface RequirementItem {
   code: string
   title: string
@@ -19,6 +29,9 @@ interface RequirementItem {
   depth: number
   created_by?: string | null
   updated_at?: string | null
+  discuss_count?: number
+  clarify_count?: number
+  activities?: RequirementActivity[]
 }
 
 const STATUS_META: Record<string, { label: string; color: string }> = {
@@ -158,6 +171,8 @@ export function RequirementBoard({ projectId }: { projectId: string }) {
                   </text>
                   <text x={10} y={54} fontSize={10} fill={r.status === 'DONE' ? '#389e0d' : r.status === 'IN_PROGRESS' ? '#d46b08' : '#8c8c8c'}>
                     {meta.label}
+                    {(r.discuss_count || 0) + (r.clarify_count || 0) > 0 &&
+                      ` · 讨论${r.discuss_count || 0} 澄清${r.clarify_count || 0}`}
                   </text>
                 </g>
               )
@@ -185,6 +200,12 @@ export function RequirementBoard({ projectId }: { projectId: string }) {
                 <Typography.Text strong style={{ fontSize: 12 }}>{r.code}</Typography.Text>
                 <Typography.Text style={{ fontSize: 12 }}>{r.title}</Typography.Text>
                 <Tag color={meta.color} style={{ marginRight: 0 }}>{meta.label}</Tag>
+                {(r.discuss_count || 0) > 0 && (
+                  <Tag style={{ marginRight: 0 }}>讨论 {r.discuss_count}</Tag>
+                )}
+                {(r.clarify_count || 0) > 0 && (
+                  <Tag style={{ marginRight: 0 }}>澄清 {r.clarify_count}</Tag>
+                )}
                 {(r.depends_on || []).length > 0 && (
                   <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                     依赖 {r.depends_on.join('、')}
@@ -195,6 +216,27 @@ export function RequirementBoard({ projectId }: { projectId: string }) {
                 <Typography.Paragraph type="secondary" style={{ fontSize: 11, marginBottom: 0, marginTop: 2 }} ellipsis={{ rows: 2 }}>
                   {r.description}
                 </Typography.Paragraph>
+              )}
+              {(r.activities || []).length > 0 && (
+                <div style={{ marginTop: 4, borderTop: '1px dashed #f0f0f0', paddingTop: 4 }}>
+                  {r.activities!.map((a, i) => (
+                    <div key={i} style={{ fontSize: 11, color: '#595959', lineHeight: '18px' }}>
+                      <Tag
+                        color={a.type === 'DISCUSS' ? 'purple' : 'cyan'}
+                        style={{ marginRight: 4, fontSize: 10, lineHeight: '16px' }}
+                      >
+                        {a.type === 'DISCUSS' ? '讨论' : '澄清'}
+                      </Tag>
+                      <Typography.Text type={a.done ? 'secondary' : undefined} style={{ fontSize: 11 }}>
+                        {a.summary ? (a.summary.length > 60 ? `${a.summary.slice(0, 60)}…` : a.summary) : a.name || '（无结论）'}
+                      </Typography.Text>
+                      <Typography.Text type="secondary" style={{ fontSize: 10, marginLeft: 6 }}>
+                        {a.date ? a.date.slice(5, 16).replace('T', ' ') : ''} · {a.actor || '?'}
+                        {a.done === false && ' · 进行中'}
+                      </Typography.Text>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )

@@ -121,12 +121,56 @@ public record StageStep(
                 verifiedBy, acceptanceJson, deviationJson, requirementCodes);
     }
 
+    /** 关联需求编号（ask_peer/discuss 留痕到需求：需求看板据此统计讨论/澄清次数）。 */
+    public StageStep withRequirementCodes(List<String> codes) {
+        return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
+                participants, status, instruction, outputSummary, outputFull,
+                artifactId, skipReason, error, createdAt, startedAt, finishedAt,
+                verifiedBy, acceptanceJson, deviationJson,
+                codes == null || codes.isEmpty() ? List.of() : codes);
+    }
+
     /** participants 列的存储形态（逗号分隔），解析与序列化收敛在此。 */
     public static List<String> parseParticipants(String stored) {
         if (stored == null || stored.isBlank()) {
             return List.of();
         }
         return Arrays.stream(stored.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
+    }
+
+    /**
+     * 从文本提取需求编号（REQ-001 形态）——LLM 漏传 requirement_codes 时的确定性兜底
+     * （实测 PM 讨论名带 REQ-005 但参数没带，不能依赖 LLM 自觉）。
+     */
+    public static List<String> extractRequirementCodes(String text) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        return java.util.regex.Pattern.compile("REQ-\\d+").matcher(text).results()
+                .map(m -> m.group()).distinct().toList();
+    }
+
+    /** requirement_codes JSONB 写侧：白名单元素（字母数字下划线连字符）拼 JSON 数组，防注入。 */
+    public static String joinRequirementCodes(List<String> codes) {
+        if (codes == null || codes.isEmpty()) {
+            return null;
+        }
+        List<String> safe = codes.stream().filter(c -> c.matches("[A-Za-z0-9_-]+")).distinct().toList();
+        return safe.isEmpty() ? null : "[\"" + String.join("\",\"", safe) + "\"]";
+    }
+
+    /** requirement_codes JSONB 读侧：提取 JSON 数组里的字符串 token（兼容历史逗号串形态）。 */
+    public static List<String> parseRequirementCodes(String stored) {
+        if (stored == null || stored.isBlank() || "null".equals(stored)) {
+            return List.of();
+        }
+        String s = stored.trim();
+        if (s.startsWith("[")) {
+            return java.util.regex.Pattern.compile("\"([^\"]+)\"").matcher(s).results()
+                    .map(m -> m.group(1)).distinct().toList();
+        }
+        // 历史兼容：非 JSON 形态按逗号分隔
+        return parseParticipants(s);
     }
 
     public static String joinParticipants(List<String> participants) {

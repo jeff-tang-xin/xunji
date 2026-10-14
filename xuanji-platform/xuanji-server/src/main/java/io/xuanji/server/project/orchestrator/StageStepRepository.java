@@ -47,7 +47,7 @@ public class StageStepRepository {
             rs.getString("verified_by"),
             rs.getString("acceptance_json"),
             rs.getString("deviation_json"),
-            StageStep.parseParticipants(rs.getString("requirement_codes")));
+            StageStep.parseRequirementCodes(rs.getString("requirement_codes")));
 
     private static LocalDateTime toLocal(Timestamp ts) {
         return ts == null ? null : ts.toLocalDateTime();
@@ -59,6 +59,15 @@ public class StageStepRepository {
                 WHERE workspace_id = ? AND stage = ? AND iteration = ?
                 ORDER BY seq, id
                 """, MAPPER, workspaceId, stage, iteration);
+    }
+
+    /** 项目全部台账（跨阶段/迭代）——需求活动统计（讨论/澄清次数与记录）用。 */
+    public List<StageStep> findByWorkspace(String workspaceId) {
+        return jdbc.query("""
+                SELECT * FROM project_stage_step
+                WHERE workspace_id = ?
+                ORDER BY created_at, id
+                """, MAPPER, workspaceId);
     }
 
     public Optional<StageStep> findById(long id) {
@@ -112,7 +121,7 @@ public class StageStepRepository {
                 s.startedAt() == null ? null : Timestamp.valueOf(s.startedAt()),
                 s.finishedAt() == null ? null : Timestamp.valueOf(s.finishedAt()),
                 s.verifiedBy(), s.acceptanceJson(), s.deviationJson(),
-                s.requirementCodes().isEmpty() ? null : StageStep.joinParticipants(s.requirementCodes()));
+                StageStep.joinRequirementCodes(s.requirementCodes()));
         return id == null ? 0L : id;
     }
 

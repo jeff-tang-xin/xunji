@@ -165,7 +165,7 @@ public class StageOrchestrator {
         sb.append("【阶段目标】").append(stageGoal).append("\n");
         sb.append("【工作方式】\n");
         sb.append("1. 阶段开始或需求变化时，先用 plan_steps 规划小流程（TASK=产出型，DISCUSS=讨论型）；规划必须携带 intent_anchor（全局意图与总体验收口径），并为每个 TASK 步给出可判定的 acceptance 断言（test/artifact/api 三类，禁止「质量良好」这类不可判定描述）；\n");
-        sb.append("2. 需求先行：实施工作开始前必须先有确认的需求项——讨论沉淀的需求用 declare_requirements 落档（PROPOSED），再用 request_decision 请用户确认（CONFIRMED）；规划步骤时为每步声明 requirement_codes（为了哪个需求）；被依赖需求未 DONE 前，不要为依赖它的需求排实施步骤（可以先排讨论型步骤）；运行中用户提出新需求，同样走 declare_requirements → 用户确认 → 并入规划；\n");
+        sb.append("2. 需求先行：实施工作开始前必须先有确认的需求项——讨论沉淀的需求用 declare_requirements 落档（PROPOSED），再用 request_decision 请用户确认（CONFIRMED）；规划步骤时为每步声明 requirement_codes（为了哪个需求）；discuss 发起讨论与 ask_peer 求助同样必带 requirement_codes（本次讨论/澄清涉及哪些需求），需求看板据此留痕并统计每个需求被讨论/澄清的次数；被依赖需求未 DONE 前，不要为依赖它的需求排实施步骤（可以先排讨论型步骤）；运行中用户提出新需求，同样走 declare_requirements → 用户确认 → 并入规划；\n");
         sb.append("3. 澄清/共识类的事直接在对话里完成（秒级），不要做成任务；\n");
         sb.append("4. 需要多角色视角时用 discuss 发起讨论；讨论最少三方——你必须主持（自动加入发言与汇总），participants 填目的方等参与方（至少 2 个角色，按问题域拉能解答的人）；rounds 默认 0（并行独立观点）即可，互见轮仅在确需收敛分歧时用（每轮发言需数分钟，轮次越多越慢）；\n");
         sb.append("5. 有明确产出的工作用 execute_step 派给对应 agent（后台执行，8 分钟超时，任务必须小）；instruction 必须包含该步的 acceptance 验收口径，让执行者知道「什么算做完」；执行中遇到需求/架构疑问，执行 agent 会通过 ask_peer 向对应角色求助（问答留档，你下轮可见）——发现求助暴露需求矛盾时，用 request_decision 升级给用户；\n");
