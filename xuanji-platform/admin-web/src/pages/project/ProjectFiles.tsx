@@ -53,6 +53,17 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
   const [selected, setSelected] = useState<string | null>(null)
   const [content, setContent] = useState<string>('')
   const [fileLoading, setFileLoading] = useState(false)
+  /** 收起的目录集合（空 = 全部展开）；点目录切换展开/收起 */
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+
+  const toggleDir = (key: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -135,15 +146,26 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
 
   const nodes = tree()
 
-  /** 递归渲染树节点（目录任意深度嵌套，文件可点击查看） */
+  /** 递归渲染树节点（目录可点击展开/收起，文件可点击查看） */
   const renderNodes = (list: FileNode[], depth: number): ReactNode =>
-    list.map((n) => (
-      <div key={n.key} style={{ paddingLeft: depth > 0 ? 18 : 0, cursor: n.isLeaf ? 'pointer' : 'default' }}
-        onClick={() => n.isLeaf && void openFile(n.key)}>
-        {n.title}
-        {n.children && renderNodes(n.children, depth + 1)}
-      </div>
-    ))
+    list.map((n) => {
+      const isDir = !n.isLeaf
+      const isCollapsed = isDir && collapsed.has(n.key)
+      return (
+        <div key={n.key} style={{ paddingLeft: depth > 0 ? 18 : 0, cursor: 'pointer' }}
+          onClick={() => (isDir ? toggleDir(n.key) : void openFile(n.key))}>
+          {isDir
+            ? (
+              <span>
+                {isCollapsed ? '▸ ' : '▾ '}
+                {n.title}
+              </span>
+            )
+            : n.title}
+          {isDir && !isCollapsed && n.children && renderNodes(n.children, depth + 1)}
+        </div>
+      )
+    })
 
   return (
     <div>

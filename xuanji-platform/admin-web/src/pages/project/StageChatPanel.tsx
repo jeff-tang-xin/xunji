@@ -17,7 +17,7 @@ import {
   SendOutlined,
 } from '@ant-design/icons'
 import { apiFetch, apiJson } from '../../api/client'
-import { PlanTask, STEP_STATUS_COLOR, STEP_STATUS_LABEL, StageExecution, isOrchestrated } from './types'
+import { PlanTask, STEP_STATUS_COLOR, STEP_STATUS_LABEL, StageExecution, StageStepRow, isOrchestrated } from './types'
 import { MarkdownView } from './shared'
 
 /** 附件（对话消息可带图片/文本附件） */
@@ -29,14 +29,16 @@ interface ChatAttachment {
   dataUrl?: string
 }
 
-/** 阶段对话消息（user 右侧蓝底，agent 左侧白底，error 红底，queued 灰底待发送） */
+/** 阶段对话消息（user 右侧蓝底，agent 左侧白底，error 红底，queued 灰底待发送，process 过程留档卡片） */
 export interface StageChatMsg {
   id: number
-  type: 'user' | 'agent' | 'error' | 'queued' | 'system'
+  type: 'user' | 'agent' | 'error' | 'queued' | 'system' | 'process'
   text: string
   attachments?: ChatAttachment[]
   /** agent 回复流式生成中 */
   streaming?: boolean
+  /** process 消息的标题（如「💬 #3 讨论·发言」「❓ #5 求助·architect」） */
+  title?: string
 }
 
 async function readSse(res: Response, onEvent: (event: string, data: string) => void) {
@@ -128,31 +130,76 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
 
   // AI 过程可见化：步骤状态变化以系统消息进对话流（讨论完成/任务完成/失败/等待答复），
   // 进行中的步骤由下方「活跃步骤条」实时展示——后台跑几分钟时用户不再干等。
-  const prevStepsRef = useRef<Map<number, string>>(new Map())
+  // 过程内容可见化（讨论发言/求助问答）：跟踪 outputFull 长度增量，新发言/新问答以
+  // process 卡片进对话流——用户在聊天框直接看到 agent 们在说什么、问了什么，不用切去执行 tab。
+  const prevStepsRef = useRef<Map<number, { status: string; fullLen: number }>>(new Map())
+  /** process 卡片展开状态（默认收起，只显示开头一段） */
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const toggleExpanded = (id: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  /** 发言/问答文本 → markdown：【说话人】加粗，段落保留 */
+  const renderSpeech = (raw: string): string =>
+    raw.replace(/^【([^】]+)】/gm, '**【$1】**').trim()
+
+  /** 讨论纪要里的汇总段（===== 汇总 ===== 之后）；无分隔符返回全文 */
+  const summaryPart = (full: string): string => {
+    const idx = full.indexOf('===== 汇总 =====')
+    return idx >= 0 ? full.slice(idx + '===== 汇总 ====='.length).trim() : full.trim()
+  }
+
   useEffect(() => {
     const steps = exec?.steps || []
     const prev = prevStepsRef.current
-    const next = new Map<number, string>()
+    const next = new Map<number, { status: string; fullLen: number }>()
     const events: string[] = []
+    const processMsgs: { title: string; text: string }[] = []
     for (const s of steps) {
-      next.set(s.id, s.status)
+      const full = s.outputFull || ''
       const before = prev.get(s.id)
-      if (!before || before === s.status) continue
-      if (s.status === 'EXECUTING') {
-        events.push(`⚙ #${s.seq} ${s.name} 开始执行${(s.participants || []).length ? `（${(s.participants || []).join('、')}）` : ''}`)
-      } else if (s.status === 'DONE') {
-        events.push(`✅ #${s.seq} ${s.name} 完成${s.outputSummary ? `：${s.outputSummary.slice(0, 100)}` : ''}`)
-      } else if (s.status === 'FAILED') {
-        events.push(`❌ #${s.seq} ${s.name} 失败：${(s.error || '').slice(0, 100)}`)
-      } else if (s.status === 'SKIPPED') {
-        events.push(`⏭ #${s.seq} ${s.name} 已跳过：${(s.skipReason || '').slice(0, 80)}`)
-      } else if (s.status === 'WAITING') {
-        events.push(`⏸ #${s.seq} ${s.name} 等待你的答复：${(s.instruction || '').slice(0, 100)}`)
+      next.set(s.id, { status: s.status, fullLen: full.length })
+      if (!before) continue // 首次见到的步骤由历史回放负责展示，避免重复
+      if (before.status !== s.status) {
+        if (s.status === 'EXECUTING') {
+          events.push(`⚙ #${s.seq} ${s.name} 开始执行${(s.participants || []).length ? `（${(s.participants || []).join('、')}）` : ''}`)
+        } else if (s.status === 'DONE' && s.stepType !== 'DISCUSS' && s.stepType !== 'CONSULT') {
+          events.push(`✅ #${s.seq} ${s.name} 完成${s.outputSummary ? `：${s.outputSummary.slice(0, 100)}` : ''}`)
+        } else if (s.status === 'FAILED') {
+          events.push(`❌ #${s.seq} ${s.name} 失败：${(s.error || '').slice(0, 100)}`)
+        } else if (s.status === 'SKIPPED') {
+          events.push(`⏭ #${s.seq} ${s.name} 已跳过：${(s.skipReason || '').slice(0, 80)}`)
+        } else if (s.status === 'WAITING') {
+          events.push(`⏸ #${s.seq} ${s.name} 等待你的答复：${(s.instruction || '').slice(0, 100)}`)
+        }
+      }
+      // 讨论进行中：新落库的发言增量进对话流
+      if (s.stepType === 'DISCUSS' && full.length > before.fullLen) {
+        const delta = full.slice(before.fullLen, full.length)
+        if (delta.trim()) processMsgs.push({ title: `💬 #${s.seq} ${s.name}·新发言`, text: renderSpeech(delta) })
+      }
+      // 讨论完成：汇总进对话流（发言已按增量推过，只推汇总段）
+      if (s.stepType === 'DISCUSS' && s.status === 'DONE' && before.status !== 'DONE') {
+        const sum = summaryPart(full)
+        if (sum) processMsgs.push({ title: `📋 #${s.seq} ${s.name}·汇总`, text: renderSpeech(sum) })
+      }
+      // 求助问答完成：问答全文进对话流
+      if (s.stepType === 'CONSULT' && s.status === 'DONE' && before.status !== 'DONE') {
+        if (full.trim()) processMsgs.push({ title: `❓ #${s.seq} ${s.name}`, text: renderSpeech(full) })
       }
     }
     prevStepsRef.current = next
-    if (events.length > 0) {
-      setMsgs((x) => [...x, { id: nextId(), type: 'system', text: events.join('\n') }])
+    if (events.length > 0 || processMsgs.length > 0) {
+      setMsgs((x) => [
+        ...x,
+        ...(events.length > 0 ? [{ id: nextId(), type: 'system' as const, text: events.join('\n') }] : []),
+        ...processMsgs.map((p) => ({ id: nextId(), type: 'process' as const, title: p.title, text: p.text })),
+      ])
     }
   }, [exec?.steps])
   const stageText = exec?.stage_label || '当前阶段'
@@ -184,7 +231,26 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
           type: (m.role === 'USER' ? 'user' : 'agent') as 'user' | 'agent',
           text: m.text || '',
         }))
-      if (hist.length) setMsgs(hist)
+      // 过程留档回放：讨论发言与求助问答落在 project_stage_step（不在 agent_state 会话），
+      // 单独拉 stage-execution 补齐——刷新后聊天框仍能看到 agent 们讨论了什么、问了什么
+      apiJson<{ steps?: StageStepRow[] }>(`/api/projects/${projectId}/stage-execution`)
+        .then((ex) => {
+          if (!alive) return
+          const proc = (ex?.steps || [])
+            .filter((s) => (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT') && (s.outputFull || '').trim())
+            .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+            .flatMap((s) => {
+              const label = s.stepType === 'DISCUSS'
+                ? `📋 #${s.seq} ${s.name}（讨论纪要${s.status === 'FAILED' ? '·中断' : ''}）`
+                : `❓ #${s.seq} ${s.name}`
+              return [{ id: nextId(), type: 'process' as const, title: label, text: renderSpeech(s.outputFull || '') }]
+            })
+          const divider = proc.length > 0
+            ? [{ id: nextId(), type: 'system' as const, text: '── 以下为讨论与求助留档 ──' }]
+            : []
+          if (hist.length || divider.length) setMsgs([...hist, ...divider, ...proc])
+        })
+        .catch(() => { if (hist.length) setMsgs(hist) })
     }).catch(() => { /* 历史取不到不打断对话主流程 */ })
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -379,6 +445,33 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
               marginBottom: 10,
               textAlign: m.type === 'user' ? 'right' : m.type === 'system' ? 'center' : 'left',
             }}>
+              {m.type === 'process' ? (
+                <div style={{
+                  maxWidth: '94%', padding: '8px 12px', borderRadius: 8, textAlign: 'left',
+                  background: '#f9f0ff', border: '1px solid #d3adf7',
+                }}>
+                  <div
+                    style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#531dab' }}
+                    onClick={() => toggleExpanded(m.id)}
+                  >
+                    {expanded.has(m.id) ? '▾ ' : '▸ '}{m.title}
+                  </div>
+                  <div style={{
+                    marginTop: 4, fontSize: 13,
+                    maxHeight: expanded.has(m.id) ? 'none' : 120,
+                    overflow: 'hidden',
+                    maskImage: expanded.has(m.id) ? 'none' : 'linear-gradient(to bottom, #000 70%, transparent)',
+                    WebkitMaskImage: expanded.has(m.id) ? 'none' : 'linear-gradient(to bottom, #000 70%, transparent)',
+                  }}>
+                    <MarkdownView scroll={false} text={m.text} />
+                  </div>
+                  {!expanded.has(m.id) && (
+                    <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => toggleExpanded(m.id)}>
+                      展开全文
+                    </Button>
+                  )}
+                </div>
+              ) : (
               <div
                 style={{
                   display: 'inline-block',
@@ -413,6 +506,7 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
                   : <MarkdownView scroll={false} text={m.text} />}
                 {m.streaming && <Typography.Text type="secondary"> ▍</Typography.Text>}
               </div>
+              )}
             </div>
           ))
         )}

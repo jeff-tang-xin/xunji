@@ -135,7 +135,7 @@ export interface StageStepRow {
   id: number
   seq: number
   name: string
-  stepType: 'TASK' | 'DISCUSS' | 'DECISION'
+  stepType: 'TASK' | 'DISCUSS' | 'DECISION' | 'CONSULT'
   agent?: string | null
   participants?: string[]
   status: 'PLANNED' | 'EXECUTING' | 'DONE' | 'SKIPPED' | 'FAILED' | 'WAITING'
