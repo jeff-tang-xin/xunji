@@ -94,7 +94,8 @@ public class ProjectService {
         this.workspaceRepo.insertProject(wsId, name, rootPath, user.orgId(), user.username(), template, currentStage, mode);
         this.repo.upsertPmSession(wsId, PM_AGENT, null);
         this.createProjectDirectories(rootPath);
-        long planId = this.draftStagePlan(user, wsId, currentStage, 1);
+        // 不再自动生成规划草稿——规划由主控在对话里通过 plan_steps 发起（对话触发原则）：
+        // 用户还没给需求就出现「批准规划」操作，是流程被人肉按钮驱动，违背 AI 驱动内核的设计。
         if (template != null && !template.isBlank()) {
             templateService.applyTemplateStages(wsId, template, user.username());
         }
@@ -148,8 +149,8 @@ public class ProjectService {
         result.put("project_mode", mode);
         result.put("current_stage", currentStage);
         result.put("nodes", List.of());
-        result.put("plan_id", planId);
-        result.put("plan_status", "PENDING");
+        result.put("plan_id", null);
+        result.put("plan_status", "NONE");
         if (boundWf != null) {
             result.put("requirement_workflow", boundWf);
         }
@@ -499,7 +500,8 @@ public class ProjectService {
         }
         this.workspaceRepo.updateCurrentStage(wsId, next);
         this.repo.lockStageSession(wsId, current, iteration);
-        long planId = this.draftStagePlan(user, wsId, next, this.currentIteration(wsId, next));
+        // 不再自动生成下一阶段规划草稿——下一阶段的规划同样由主控在对话里 plan_steps 发起，
+        // 否则推进后立刻又出现「批准规划」操作，用户被迫批准一份自己没参与过的规划。
         LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("current_stage", next);
         result.put("advanced", true);
@@ -507,8 +509,8 @@ public class ProjectService {
         result.put("label", stageLabel(next));
         result.put("locked_stage", current);
         result.put("locked_iteration", iteration);
-        result.put("plan_id", planId);
-        result.put("plan_status", "PENDING");
+        result.put("plan_id", null);
+        result.put("plan_status", "NONE");
         result.put("waived_open_items", openItems.size());
         return result;
     }
@@ -734,8 +736,9 @@ public class ProjectService {
         String stage = this.resolveCurrentStage(ws.get("current_stage"), nodes);
         List<Map<String, Object>> rows = this.repo.findCurrentStagePlan(wsId, stage, iteration = this.currentIteration(wsId, stage));
         if (rows.isEmpty()) {
-            long fresh = this.draftStagePlan(user, wsId, stage, iteration);
-            rows = this.repo.findStagePlan(fresh);
+            // 读端点不再自动生成规划草稿（副作用违背对话触发原则）；无规划如实返回 404
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND,
+                    "暂无规划——由主控在对话里通过 plan_steps 发起");
         }
         Map<String, Object> row = rows.get(0);
         LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();

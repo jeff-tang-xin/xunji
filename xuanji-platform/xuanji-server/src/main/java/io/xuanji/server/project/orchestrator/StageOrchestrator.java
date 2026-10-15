@@ -57,6 +57,7 @@ public class StageOrchestrator {
     private final StageAdvancer advancer;
     private final ObjectMapper objectMapper;
     private final RequirementRepository requirementRepo;
+    private final PeerConsultService peerConsult;
 
     /** SSE 会话执行池：虚拟线程（JDK21），阻塞 IO 型任务不占平台线程，并发对话不再互相排队。 */
     private final ExecutorService chatExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -66,7 +67,8 @@ public class StageOrchestrator {
                              DiscussionEngine discussionEngine,
                              io.xuanji.server.repository.ProjectRepository projectRepo,
                              WorkspaceRepository workspaceRepo, StageAdvancer advancer,
-                             ObjectMapper objectMapper, RequirementRepository requirementRepo) {
+                             ObjectMapper objectMapper, RequirementRepository requirementRepo,
+                             PeerConsultService peerConsult) {
         this.runtime = runtime;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
@@ -77,6 +79,7 @@ public class StageOrchestrator {
         this.advancer = advancer;
         this.objectMapper = objectMapper;
         this.requirementRepo = requirementRepo;
+        this.peerConsult = peerConsult;
     }
 
     /**
@@ -102,7 +105,7 @@ public class StageOrchestrator {
 
         OrchestrationTools tools = new OrchestrationTools(user, wsId, stage, iteration,
                 projectGoal, stageGoal, stepRepo, taskRunner, discussionEngine,
-                projectRepo, advancer, agentNodes, objectMapper, requirementRepo);
+                projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult);
 
         AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance);
         AgentSpec spec = withTools(base, tools.toolDefs());

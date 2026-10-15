@@ -3,7 +3,6 @@ import {
   Button,
   Empty,
   Input,
-  Select,
   Space,
   Tag,
   Typography,
@@ -17,7 +16,7 @@ import {
   SendOutlined,
 } from '@ant-design/icons'
 import { apiFetch, apiJson } from '../../api/client'
-import { PlanTask, STEP_STATUS_COLOR, STEP_STATUS_LABEL, StageExecution, StageStepRow, isOrchestrated } from './types'
+import { STEP_STATUS_COLOR, STEP_STATUS_LABEL, StageExecution, StageStepRow } from './types'
 import { MarkdownView } from './shared'
 
 /** 附件（对话消息可带图片/文本附件） */
@@ -68,13 +67,12 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
   const [msgs, setMsgs] = useState<StageChatMsg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [taskKey, setTaskKey] = useState<string | undefined>(undefined)
   const idRef = useRef(0)
   const nextId = () => ++idRef.current
   const listRef = useRef<HTMLDivElement>(null)
   // 多轮交流：busy 时输入不锁——Enter 入队 / Ctrl+Enter 插队，当前轮结束自动发队首。
   // 队列用 ref 存（同步读写），queueLen 只做渲染镜像。
-  const queueRef = useRef<{ id: number; text: string; taskKey?: string; attachments?: ChatAttachment[] }[]>([])
+  const queueRef = useRef<{ id: number; text: string; attachments?: ChatAttachment[] }[]>([])
   const [queueLen, setQueueLen] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
   const busyRef = useRef(false)
@@ -124,10 +122,6 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
     }
   }
 
-  // 新内核（AI 编排）模式：子任务聚焦是旧链路概念（plan.tasks 草稿与新内核 steps 无关），隐藏
-  const orchestrated = isOrchestrated(exec)
-  const tasks = orchestrated ? [] : ((exec?.plan?.tasks || []) as PlanTask[])
-
   // AI 过程可见化：步骤状态变化以系统消息进对话流（讨论完成/任务完成/失败/等待答复），
   // 进行中的步骤由下方「活跃步骤条」实时展示——后台跑几分钟时用户不再干等。
   // 过程内容可见化（讨论发言/求助问答）：跟踪 outputFull 长度增量，新发言/新问答以
@@ -164,7 +158,16 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
       const full = s.outputFull || ''
       const before = prev.get(s.id)
       next.set(s.id, { status: s.status, fullLen: full.length })
-      if (!before) continue // 首次见到的步骤由历史回放负责展示，避免重复
+      if (!before) {
+        // 首次见到的步骤：内容由历史回放负责，但「进行中」要即时提示——
+        // 讨论刚发起时发言还没落库（qwen 单次 2-3 分钟），不提示的话聊天框毫无动静
+        if (s.status === 'EXECUTING' && s.stepType === 'DISCUSS') {
+          events.push(`💬 #${s.seq} ${s.name} 讨论进行中${(s.participants || []).length ? `（${(s.participants || []).join('、')}）` : ''}，发言将实时显示在这里`)
+        } else if (s.status === 'EXECUTING' && s.stepType === 'CONSULT') {
+          events.push(`❓ #${s.seq} ${s.name} 求助进行中，答复后将显示在这里`)
+        }
+        continue
+      }
       if (before.status !== s.status) {
         if (s.status === 'EXECUTING') {
           events.push(`⚙ #${s.seq} ${s.name} 开始执行${(s.participants || []).length ? `（${(s.participants || []).join('、')}）` : ''}`)
@@ -263,7 +266,7 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
   }, [msgs])
 
   /** 发送一条（q 已在 msgs 里以 queued 形态占位）：SSE 流式回填，停止走 AbortController */
-  const sendMsg = async (q: { id: number; text: string; taskKey?: string; attachments?: ChatAttachment[] }) => {
+  const sendMsg = async (q: { id: number; text: string; attachments?: ChatAttachment[] }) => {
     const agentMsgId = nextId()
     setMsgs((x) => [
       ...x.map((m) => (m.id === q.id ? { ...m, type: 'user' as const } : m)),
@@ -278,7 +281,6 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
         method: 'POST',
         body: JSON.stringify({
           message: q.text,
-          ...(q.taskKey ? { task_key: q.taskKey } : {}),
           ...(q.attachments?.length ? {
             attachments: q.attachments.map((a) => ({
               name: a.name, media_type: a.mediaType, data_base64: a.dataBase64, content: a.content,
@@ -341,7 +343,7 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
     const query = input.trim()
     if (!query && files.length === 0) return
     const atts = files.length ? [...files] : undefined
-    const q = { id: nextId(), text: query || '（见附件）', taskKey, attachments: atts }
+    const q = { id: nextId(), text: query || '（见附件）', attachments: atts }
     setInput('')
     setFiles([])
     setMsgs((x) => [...x, { id: q.id, type: 'queued', text: q.text, attachments: atts }])
@@ -376,23 +378,6 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <Space wrap size={6}>
-        {tasks.length > 0 && (
-          <>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>本轮聚焦：</Typography.Text>
-            <Select
-              size="small"
-              style={{ minWidth: 280 }}
-              placeholder={`整个${stageText}（不指定子任务）`}
-              allowClear
-              value={taskKey}
-              onChange={(v) => setTaskKey(v)}
-              options={tasks.map((t, i) => ({
-                value: String(t.key ?? i),
-                label: `${t.key ?? i + 1}. ${t.name || '未命名子任务'}`,
-              }))}
-            />
-          </>
-        )}
         {msgs.length > 0 && (
           <Button size="small" type="text" onClick={() => setMsgs([])}>清空显示</Button>
         )}

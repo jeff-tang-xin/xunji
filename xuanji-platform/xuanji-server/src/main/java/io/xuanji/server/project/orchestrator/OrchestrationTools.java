@@ -49,6 +49,18 @@ public class OrchestrationTools {
     private final io.xuanji.server.engine.AgentNodeExecutor agentNodes;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
     private final RequirementRepository requirementRepo;
+    private final PeerConsultService peerConsult;
+
+    /** 阶段兜底智能体（与 ProjectChatService.STAGE_DEFAULT_AGENT 同口径）：跨阶段求助按目标阶段选人。 */
+    private static final Map<String, String> STAGE_DEFAULT_AGENT = Map.of(
+            "REQUIREMENT", "product_analyst",
+            "DEVELOP", "architect",
+            "OPERATE", "devops");
+
+    /** 跨阶段求助每轮上限（防主控把支援当外包，自己的活不干）。 */
+    private static final int MAX_ASK_STAGE_PER_ITERATION = 5;
+
+    private static final List<String> STAGES = List.of("REQUIREMENT", "DEVELOP", "OPERATE");
 
     public OrchestrationTools(LoginUser user, String wsId, String stage, int iteration,
                               String projectGoal, String stageGoal,
@@ -56,7 +68,7 @@ public class OrchestrationTools {
                               DiscussionEngine discussionEngine, ProjectRepository projectRepo,
                               StageAdvancer advancer, io.xuanji.server.engine.AgentNodeExecutor agentNodes,
                               com.fasterxml.jackson.databind.ObjectMapper objectMapper,
-                              RequirementRepository requirementRepo) {
+                              RequirementRepository requirementRepo, PeerConsultService peerConsult) {
         this.user = user;
         this.wsId = wsId;
         this.stage = stage;
@@ -71,6 +83,7 @@ public class OrchestrationTools {
         this.agentNodes = agentNodes;
         this.objectMapper = objectMapper;
         this.requirementRepo = requirementRepo;
+        this.peerConsult = peerConsult;
     }
 
     /** 主控可见的全部编排工具（BEAN 形态 ToolDef）。 */
@@ -94,6 +107,8 @@ public class OrchestrationTools {
                 recordAnswerSchema(), List.of("seq", "answer")));
         defs.add(def("complete_stage", "宣告本阶段完成并推进到下一阶段。前提：无执行中/等待中的小流程；收口总结会留档。交付物有缺口时必须先补齐或说明豁免理由。",
                 completeStageSchema(), List.of("summary")));
+        defs.add(def("ask_stage", "跨阶段求助：向另一个阶段的负责角色发起支援请求（如 REQUIREMENT 阶段请 OPERATE 的 devops 确认服务器现状、DEVELOP 阶段请 REQUIREMENT 的 product_analyst 澄清需求）。异步进行——发起后本阶段可继续工作，对方答复后结果进黑板与对话流，问答双落文档。仅限跨阶段协作；本阶段内的疑问用 discuss 或让执行步走 ask_peer。",
+                askStageSchema(), List.of("target_stage", "name", "question")));
         return defs;
     }
 
@@ -366,6 +381,68 @@ public class OrchestrationTools {
         });
     }
 
+    /** 跨阶段求助：向另一阶段的负责角色发起异步支援请求（双阶段台账 + 文档双落）。 */
+    private Tool askStage() {
+        return tool("ask_stage", req -> {
+            String targetStage = str(req.input().get("target_stage")).trim().toUpperCase();
+            String name = str(req.input().get("name"));
+            String question = str(req.input().get("question"));
+            if (targetStage.isBlank() || name.isBlank() || question.isBlank()) {
+                return ToolResult.of(Map.of("ok", false, "message", "target_stage/name/question 必填"));
+            }
+            if (!STAGES.contains(targetStage)) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "target_stage 必须是 " + String.join("/", STAGES) + " 之一，当前值: " + targetStage));
+            }
+            if (targetStage.equals(stage)) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "目标阶段不能是当前阶段（" + stage + "）：本阶段内的疑问用 discuss 发起讨论，"
+                                + "执行中的疑问由执行步走 ask_peer"));
+            }
+            long asked = stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .filter(s -> s.name() != null && s.name().startsWith("跨阶段求助·"))
+                    .count();
+            if (asked >= MAX_ASK_STAGE_PER_ITERATION) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "本轮跨阶段求助已达上限（" + MAX_ASK_STAGE_PER_ITERATION + " 次）："
+                                + "反复求助说明阶段边界或规划有问题，请基于已有答复继续"));
+            }
+            String targetAgent = STAGE_DEFAULT_AGENT.get(targetStage);
+            String bad = checkAgents(List.of(targetAgent));
+            if (bad != null) {
+                return ToolResult.of(Map.of("ok", false, "message", bad));
+            }
+            // 发起阶段台账步（EXECUTING 起步，答复后 DONE——聊天框可见）
+            StageStep launch = nextStep("跨阶段求助·" + targetStage + "·" + name, StepType.CONSULT,
+                    "project_manager", List.of(targetAgent), question);
+            List<String> codes = req.input().get("requirement_codes") instanceof List<?> rl
+                    ? rl.stream().map(String::valueOf).filter(c -> !c.isBlank()).toList() : List.of();
+            if (codes.isEmpty()) {
+                codes = StageStep.extractRequirementCodes(name + " " + question);
+            }
+            if (!codes.isEmpty()) {
+                launch = launch.withRequirementCodes(codes);
+            }
+            long launchId = stepRepo.insert(launch);
+            // 目标阶段支援记录步（该阶段台账/聊天框同样可见）
+            List<StageStep> targetSteps = stepRepo.findByWorkspace(wsId).stream()
+                    .filter(s -> targetStage.equals(s.stage())).toList();
+            int targetIter = targetSteps.stream().mapToInt(StageStep::iteration).max().orElse(1);
+            int targetSeq = targetSteps.stream().filter(s -> s.iteration() == targetIter)
+                    .mapToInt(StageStep::seq).max().orElse(0) + 1;
+            StageStep support = new StageStep(null, wsId, targetStage, targetIter, targetSeq,
+                    "支援·" + stage + "·" + name, StepType.CONSULT, targetAgent, List.of("project_manager"),
+                    StepStatus.PLANNED, question, null, null, null, null, null, null,
+                    null, null, null, null, null, codes);
+            long supportId = stepRepo.insert(support);
+            peerConsult.askStageAsync(launch.withId(launchId), support.withId(supportId),
+                    targetAgent, stage, question, brief(question));
+            return ToolResult.of(Map.of("ok", true, "seq", launch.seq(),
+                    "message", "已向 " + targetStage + " 阶段的 " + targetAgent + " 发起支援请求（后台处理中），"
+                            + "答复后进黑板与对话流，问答双落文档"));
+        });
+    }
+
     private Tool executeStep() {
         return tool("execute_step", req -> {
             String name = str(req.input().get("name"));
@@ -575,6 +652,7 @@ public class OrchestrationTools {
             case "request_decision" -> requestDecision();
             case "record_answer" -> recordAnswer();
             case "complete_stage" -> completeStage();
+            case "ask_stage" -> askStage();
             default -> throw new IllegalArgumentException("unknown orchestration tool: " + name);
         };
     }
@@ -617,6 +695,20 @@ public class OrchestrationTools {
         acceptanceProps.put("target", str("判定对象：测试类名/产物路径/接口端点"));
         acceptanceProps.put("expect", str("可判定的预期：如 pass、含某章节、返回 200 且含某字段——禁止写「质量良好」这类不可判定描述"));
         return acceptanceProps;
+    }
+
+    private Map<String, Object> askStageSchema() {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("target_stage", str("目标阶段：REQUIREMENT / DEVELOP / OPERATE（不能是当前阶段）"));
+        props.put("name", str("求助标题（如：确认服务器现状、澄清需求边界）"));
+        props.put("question", str("求助内容：具体说清要对方做什么/答什么，带上下文，让对方不需要猜"));
+        props.put("requirement_codes", java.util.Map.of("type", "array", "items", java.util.Map.of("type", "string"),
+                "description", "本次求助涉及的需求编号（如 [\"REQ-001\"]），不涉及可省略"));
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "object");
+        schema.put("properties", props);
+        schema.put("required", List.of("target_stage", "name", "question"));
+        return schema;
     }
 
     private Map<String, Object> discussSchema() {

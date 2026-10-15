@@ -50,6 +50,7 @@ public class DiscussionEngine {
     private final AgentInvoker invoker;
     private final AgentNodeExecutor agentNodes;
     private final StageStepRepository stepRepo;
+    private final StageDocStore docStore;
 
     /** 发言线程池：第一轮并行度 = 参与者数（cached 池按需扩）。 */
     private final ExecutorService speakerPool = Executors.newCachedThreadPool(r -> {
@@ -66,10 +67,11 @@ public class DiscussionEngine {
     });
 
     public DiscussionEngine(AgentInvoker invoker, AgentNodeExecutor agentNodes,
-                            StageStepRepository stepRepo) {
+                            StageStepRepository stepRepo, StageDocStore docStore) {
         this.invoker = invoker;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
+        this.docStore = docStore;
     }
 
     /**
@@ -129,8 +131,11 @@ public class DiscussionEngine {
             }
 
             String summary = consensus.length() > 300 ? consensus.substring(0, 300) + "…" : consensus;
-            stepRepo.updateStatus(step.withOutput(summary,
-                    "===== 讨论纪要 =====\n" + transcript + "\n\n===== 汇总 =====\n" + consensus, null));
+            String full = "===== 讨论纪要 =====\n" + transcript + "\n\n===== 汇总 =====\n" + consensus;
+            stepRepo.updateStatus(step.withOutput(summary, full, null));
+            // 文档双落：纪要进项目目录（docs/{stage}/iter{n}/）+ project_artifact 索引
+            docStore.write(step.workspaceId(), step.stage(), step.iteration(), "DISCUSS",
+                    step.seq(), step.name(), full, summarizer);
             log.info("讨论完成: ws={} seq={} 发言 {} 条", step.workspaceId(), step.seq(), history.size());
         } catch (Exception e) {
             String msg = TaskRunner.rootMessage(e);

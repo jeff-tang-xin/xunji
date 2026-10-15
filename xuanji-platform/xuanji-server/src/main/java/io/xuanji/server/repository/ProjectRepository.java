@@ -220,6 +220,21 @@ public class ProjectRepository {
                 workspaceId, nodeId, kind, name, type, filePath, contentMd, version, status, createdBy);
     }
 
+    /** 带 stage 的登记（文档双落用）：project_artifact.stage 由 V27/V29 引入，旧重载保持兼容。 */
+    public void insertArtifactWithStage(String workspaceId, String nodeId, String kind, String name, String type,
+                                        String filePath, String contentMd, Integer version, String status,
+                                        String createdBy, String stage) {
+        jdbc.update("INSERT INTO project_artifact (workspace_id, node_id, kind, name, type, file_path, "
+                        + "content_md, version, status, created_by, stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                workspaceId, nodeId, kind, name, type, filePath, contentMd, version, status, createdBy, stage);
+    }
+
+    /** 回填产出文档的相对路径（文档双落：文件落盘后把路径写进既有索引）。 */
+    public void updateArtifactFilePath(String workspaceId, String nodeId, String filePath) {
+        jdbc.update("UPDATE project_artifact SET file_path = ? WHERE workspace_id = ? AND node_id = ?",
+                filePath, workspaceId, nodeId);
+    }
+
     public void deleteArtifactsByWorkspace(String workspaceId) {
         jdbc.update("DELETE FROM project_artifact WHERE workspace_id = ?", workspaceId);
     }

@@ -38,6 +38,7 @@ public class TaskRunner {
     private final ProjectRepository projectRepo;
     private final PeerConsultService peerConsult;
     private final RequirementRepository requirementRepo;
+    private final StageDocStore docStore;
 
     /** 双池防自等死锁：调度池跑 run（含限时等待），工作池跑阻塞的 invoke。
      * 工作池 4 线程：单线程时一个 8 分钟任务就把全平台任务型步骤串成队，多项目并发必排队。 */
@@ -55,13 +56,15 @@ public class TaskRunner {
 
     public TaskRunner(AgentInvoker invoker, AgentNodeExecutor agentNodes,
                       StageStepRepository stepRepo, ProjectRepository projectRepo,
-                      PeerConsultService peerConsult, RequirementRepository requirementRepo) {
+                      PeerConsultService peerConsult, RequirementRepository requirementRepo,
+                      StageDocStore docStore) {
         this.invoker = invoker;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
         this.projectRepo = projectRepo;
         this.peerConsult = peerConsult;
         this.requirementRepo = requirementRepo;
+        this.docStore = docStore;
     }
 
     /**
@@ -96,6 +99,13 @@ public class TaskRunner {
                     "DELIVERABLE", step.name(), "TEXT", null, output, 1, "ACTIVE", step.agent());
             String summary = output.length() > 300 ? output.substring(0, 300) + "…" : output;
             stepRepo.updateStatus(step.withOutput(summary, output, null));
+            // 文档双落：产出落项目目录（docs/{stage}/iter{n}/），相对路径回填 DELIVERABLE 索引
+            // （不另插 DOC 索引——同一产出两条索引会让交付物 tab 重复）
+            String docPath = docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(),
+                    "TASK", step.seq(), step.name(), output);
+            if (docPath != null) {
+                projectRepo.updateArtifactFilePath(step.workspaceId(), "step-" + step.seq(), docPath);
+            }
             settleRequirements(step);
             log.info("任务执行完成: ws={} seq={} 产出 {} 字", step.workspaceId(), step.seq(), output.length());
         } catch (Exception e) {

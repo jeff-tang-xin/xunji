@@ -49,6 +49,7 @@ public class PeerConsultService {
     private final AgentInvoker invoker;
     private final AgentNodeExecutor agentNodes;
     private final StageStepRepository stepRepo;
+    private final StageDocStore docStore;
 
     /** 求助线程池：cached 按需扩（求助低频，目的方是裸 invoke 无递归）。 */
     private final ExecutorService consultPool = Executors.newCachedThreadPool(r -> {
@@ -58,10 +59,11 @@ public class PeerConsultService {
     });
 
     public PeerConsultService(AgentInvoker invoker, AgentNodeExecutor agentNodes,
-                              StageStepRepository stepRepo) {
+                              StageStepRepository stepRepo, StageDocStore docStore) {
         this.invoker = invoker;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
+        this.docStore = docStore;
     }
 
     /**
@@ -167,6 +169,63 @@ public class PeerConsultService {
                 question, answer.length() > 300 ? answer.substring(0, 300) + "…" : answer,
                 full, null, null, null, null, null, null, null, null, null, reqCodes);
         stepRepo.insert(consult);
+        // 文档双落：问答全文进项目目录 + project_artifact 索引
+        docStore.write(from.workspaceId(), from.stage(), from.iteration(), "CONSULT",
+                seq, name, full, from.agent());
+    }
+
+    /**
+     * 跨阶段求助（ask_stage）执行体：异步直答 → 双阶段台账 → 文档双落。
+     *
+     * <p>与 {@link #ask}（同阶段执行中求助，同步等答案）互补：跨阶段求助由主控发起、
+     * 异步进行（发起阶段不阻塞，可继续规划/讨论），目标阶段 agent 直答后结果回流——
+     * 发起阶段 CONSULT 步 DONE（聊天框可见），目标阶段留支援记录，问答双落文档。</p>
+     *
+     * @param launchStep  发起阶段的 CONSULT 步（已 insert，PLANNED 态）
+     * @param supportStep 目标阶段的支援记录步（已 insert，PLANNED 态）
+     * @param targetAgent 目标阶段负责 agent
+     * @param fromStage   发起阶段名
+     * @param question    求助内容
+     * @param brief       议题包（发起阶段意图锚 + 需求全景，供目标 agent 对照回答）
+     */
+    public void askStageAsync(StageStep launchStep, StageStep supportStep, String targetAgent,
+                              String fromStage, String question, TopicBrief brief) {
+        stepRepo.updateStatus(launchStep.withStatus(StepStatus.EXECUTING));
+        consultPool.submit(() -> {
+            String prompt = "【跨阶段支援】你是 " + targetAgent + "（" + supportStep.stage()
+                    + " 阶段负责角色），另一阶段（" + fromStage + "）的团队向你求助。\n"
+                    + brief.render("解答兄弟阶段的提问", null)
+                    + "\n【求助方】" + fromStage + " 阶段主控\n"
+                    + "【求助内容】\n" + question + "\n\n"
+                    + "【回答要求】以你所在阶段的职责域直接给出可执行的结论/操作/依据，不要寒暄；"
+                    + "若求助超出你的职责域，说明该由哪个阶段接手；若与意图锚冲突，明确指出冲突点。";
+            try {
+                AgentSpec targetSpec = agentNodes.buildSpecByAgentName(targetAgent, null);
+                String answer = CompletableFuture.supplyAsync(() -> invoker.invoke(targetSpec, prompt), consultPool)
+                        .get(ANSWER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                String full = "【问】(" + fromStage + " 阶段)\n" + question + "\n\n【答】(" + targetAgent + ")\n" + answer;
+                String summary = answer.length() > 300 ? answer.substring(0, 300) + "…" : answer;
+                // 发起阶段：问答留档（聊天框 process 卡片可见，boardDigest 可见）
+                stepRepo.updateStatus(launchStep.withOutput(summary, full, null));
+                // 目标阶段：支援记录（该阶段台账/聊天框同样可见）
+                stepRepo.updateStatus(supportStep.withOutput(summary, full, null));
+                // 文档双落（落在发起阶段目录——求助产出归发起方）
+                docStore.write(launchStep.workspaceId(), launchStep.stage(), launchStep.iteration(),
+                        "CONSULT", launchStep.seq(), launchStep.name(), full, targetAgent);
+                log.info("跨阶段求助完成: ws={} {} -> {} ({} 字)", launchStep.workspaceId(),
+                        fromStage, supportStep.stage(), answer.length());
+            } catch (java.util.concurrent.TimeoutException te) {
+                stepRepo.updateStatus(launchStep.withError(
+                        "对方超时未答（" + ANSWER_TIMEOUT_SECONDS + "s）"));
+                stepRepo.updateStatus(supportStep.withError("支援超时（" + ANSWER_TIMEOUT_SECONDS + "s）"));
+            } catch (Exception e) {
+                String msg = TaskRunner.rootMessage(e);
+                stepRepo.updateStatus(launchStep.withError(msg));
+                stepRepo.updateStatus(supportStep.withError(msg));
+                log.warn("跨阶段求助失败: ws={} {} -> {} -> {}", launchStep.workspaceId(),
+                        fromStage, supportStep.stage(), msg);
+            }
+        });
     }
 
     static String consultPrefix(int seq) {
