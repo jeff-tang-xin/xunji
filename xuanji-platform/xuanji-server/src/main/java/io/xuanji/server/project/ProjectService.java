@@ -1376,14 +1376,55 @@ public class ProjectService {
         return Map.of("definitionId", definitionId);
     }
 
-    /** 项目改名：只改显示名（root_path 不变，目录不动）。 */
-    public Map<String, Object> renameProject(LoginUser user, String wsId, String name) {
-        if (name == null || name.isBlank()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "name is required");
-        }
+    /**
+     * 编辑项目：name（改名，root_path 不变目录不动）+ servers/connectors（运维资源绑定，
+     * 显式传入即覆盖写入 OPERATE 阶段 capability——空数组=清空，不传=不动）。
+     */
+    public Map<String, Object> updateProject(LoginUser user, String wsId, Map<String, Object> body) {
         requireProject(user, wsId);
-        workspaceRepo.rename(wsId, name.trim());
-        return Map.of("id", wsId, "name", name.trim());
+        String name = body.get("name") == null ? null : String.valueOf(body.get("name"));
+        boolean nameChanged = name != null && !name.isBlank();
+        boolean hasServers = body.containsKey("servers");
+        boolean hasConnectors = body.containsKey("connectors");
+        if (!nameChanged && !hasServers && !hasConnectors) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST,
+                    "无可更新字段（name / servers / connectors）");
+        }
+        if (nameChanged) {
+            workspaceRepo.rename(wsId, name.trim());
+        }
+        if (hasServers || hasConnectors) {
+            List<String> servers = strList(objectMapper, body.get("servers"));
+            List<String> connectors = strList(objectMapper, body.get("connectors"));
+            // 白名单初始化 → 现值 → 显式键覆盖（与创建时绑定同款 merge，但空数组语义为清空）
+            LinkedHashMap<String, Object> cap = new LinkedHashMap<String, Object>();
+            for (String k : CAPABILITY_KEYS) {
+                cap.put(k, "workflow".equals(k) ? "" : List.of());
+            }
+            List<Map<String, Object>> existing = this.repo.findStageCapability(wsId, STAGE_OPERATE);
+            if (!existing.isEmpty()) {
+                cap.putAll(parseJsonMap(objectMapper, existing.get(0).get("capability_json")));
+            }
+            if (hasServers) {
+                cap.put("servers", servers);
+            }
+            if (hasConnectors) {
+                cap.put("connectors", connectors);
+            }
+            this.repo.upsertStageCapability(wsId, STAGE_OPERATE, toJson(objectMapper, cap), "编辑项目时绑定", user.username());
+        }
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("id", wsId);
+        if (nameChanged) {
+            result.put("name", name.trim());
+        }
+        if (hasServers) {
+            result.put("servers", strList(objectMapper, body.get("servers")));
+        }
+        if (hasConnectors) {
+            result.put("connectors", strList(objectMapper, body.get("connectors")));
+        }
+        return result;
     }
 
     /**

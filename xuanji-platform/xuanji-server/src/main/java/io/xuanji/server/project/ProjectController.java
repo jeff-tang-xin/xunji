@@ -162,11 +162,11 @@ public class ProjectController {
         return projects.listFiles(user, id);
     }
 
-    /** 项目改名：body = {"name":"新名"}（root_path 不变，目录不动）。 */
+    /** 编辑项目：body = {"name":"新名","servers":[…],"connectors":["connector:{id}"]}（servers/connectors 显式传入即覆盖，空数组=清空）。 */
     @PutMapping("/{id}")
-    public Object rename(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+    public Object update(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
                          @RequestBody Map<String, Object> body) {
-        return projects.renameProject(user, id, body.get("name") == null ? null : String.valueOf(body.get("name")));
+        return projects.updateProject(user, id, body);
     }
 
     /** 删除项目：级联清理项目域数据 + 递归删除项目目录（破坏性，前端须二次确认）。 */

@@ -15,9 +15,11 @@ import {
   Col,
   Drawer,
   Empty,
+  Form,
   Input,
   Modal,
   Row,
+  Select,
   Space,
   Spin,
   Tabs,
@@ -43,6 +45,7 @@ import { CreateProjectModal } from './project/CreateProjectModal'
 import ProjectFiles from './project/ProjectFiles'
 import { StageChatPanel } from './project/StageChatPanel'
 import { MarkdownView } from './project/shared'
+import { DsOption } from './project/types'
 import { StageExecutionPanel } from './project/StageExecutionPanel'
 import { StageGroups } from './project/StageGroups'
 import { StageSessionsPanel } from './project/StageSessionsPanel'
@@ -58,24 +61,46 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [viewArtifact, setViewArtifact] = useState<ProjectDetailData['artifacts'][number] | null>(null)
   /** 项目编辑/删除 */
   const [editOpen, setEditOpen] = useState(false)
-  const [editName, setEditName] = useState('')
-  const [savingName, setSavingName] = useState(false)
+  const [savingEdit, setSavingEdit] = useState(false)
+  const [editForm] = Form.useForm()
+  const [datasources, setDatasources] = useState<DsOption[]>([])
 
-  const renameProject = async () => {
-    if (!editName.trim()) {
-      message.warning('项目名不能为空')
-      return
-    }
-    setSavingName(true)
+  /** 打开编辑弹窗：回显项目名 + OPERATE 阶段已绑定的服务器/数据库 */
+  const openEdit = () => {
+    if (!detail) return
+    editForm.setFieldsValue({ name: detail.name, servers: [], connectors: [] })
+    setEditOpen(true)
+    apiJson<Record<string, unknown>>(`/api/projects/${id}/stage/OPERATE/capability`)
+      .then((cap) => {
+        const capObj = (cap && typeof cap === 'object' ? cap : {}) as { servers?: string[]; connectors?: string[] }
+        editForm.setFieldsValue({
+          servers: Array.isArray(capObj.servers) ? capObj.servers : [],
+          connectors: Array.isArray(capObj.connectors) ? capObj.connectors : [],
+        })
+      })
+      .catch(() => { /* capability 拉取失败保持空值，可正常保存 */ })
+    apiJson<DsOption[]>('/api/datasources')
+      .then((list) => setDatasources(Array.isArray(list) ? list : []))
+      .catch(() => setDatasources([]))
+  }
+
+  const submitEdit = async () => {
+    const v = await editForm.validateFields().catch(() => null)
+    if (!v) return
+    setSavingEdit(true)
     try {
-      await apiJson(`/api/projects/${id}`, 'PUT', { name: editName.trim() })
-      message.success('项目已改名')
+      await apiJson(`/api/projects/${id}`, 'PUT', {
+        name: (v.name || '').trim(),
+        servers: (v.servers || []) as string[],
+        connectors: (v.connectors || []) as string[],
+      })
+      message.success('项目已更新')
       setEditOpen(false)
       await load()
     } catch (e) {
       if (e instanceof Error) message.error(e.message)
     } finally {
-      setSavingName(false)
+      setSavingEdit(false)
     }
   }
 
@@ -199,24 +224,57 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
           {detail.root_path}
         </Typography.Text>
         <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>
-        <Button size="small" icon={<EditOutlined />} onClick={() => { setEditName(detail.name); setEditOpen(true) }}>编辑</Button>
+        <Button size="small" icon={<EditOutlined />} onClick={openEdit}>编辑</Button>
         <Button size="small" danger icon={<DeleteOutlined />} onClick={deleteProject}>删除</Button>
       </Space>
 
       <Modal
         title="编辑项目"
         open={editOpen}
-        onOk={() => void renameProject()}
-        confirmLoading={savingName}
+        onOk={() => void submitEdit()}
+        confirmLoading={savingEdit}
         onCancel={() => setEditOpen(false)}
         okText="保存"
         cancelText="取消"
         destroyOnClose
       >
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          只修改显示名；项目目录（{detail.root_path}）保持不变。
-        </Typography.Paragraph>
-        <Input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="项目名" maxLength={64} />
+        <Form form={editForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="项目名"
+            rules={[{ required: true, message: '项目名不能为空' }]}
+            extra={`只修改显示名；项目目录（${detail.root_path}）保持不变`}
+          >
+            <Input placeholder="项目名" maxLength={64} />
+          </Form.Item>
+          <Form.Item
+            name="servers"
+            label="运维服务器"
+            extra="部署 / 巡检 / 变更的目标机器，写入运维阶段能力绑定；输入后回车添加，清空即解除绑定"
+          >
+            <Select
+              mode="tags"
+              placeholder="如 root@1.2.3.4:22（回车确认）"
+              tokenSeparators={[' ']}
+              open={false}
+            />
+          </Form.Item>
+          <Form.Item
+            name="connectors"
+            label="可查询数据库"
+            extra="运维排障时 agent 可直接查询的数据源连接器（JDBC）；清空即解除绑定"
+          >
+            <Select
+              mode="multiple"
+              allowClear
+              placeholder={datasources.length ? '选择可用的数据库（可留空）' : '未加载数据源，请先在「数据源」页添加'}
+              options={datasources.map((d) => ({
+                value: `connector:${d.id}`,
+                label: `${d.name}（${d.platform || 'jdbc'} #${d.id}）`,
+              }))}
+            />
+          </Form.Item>
+        </Form>
       </Modal>
 
       {/* 旧「阶段链」横条已下线（2026-10-15）：只保留新流程（AI 主控编排），
