@@ -2,6 +2,7 @@ package io.xuanji.server.repository;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
@@ -91,6 +92,30 @@ public class WorkspaceRepository {
     }
 
     public void delete(String id) {
+        jdbc.update("DELETE FROM workspace WHERE id = ?", id);
+    }
+
+    /** 项目改名：只改显示名，root_path 保持不变（目录已存在，改名不动目录避免路径错乱）。 */
+    public void rename(String id, String name) {
+        jdbc.update("UPDATE workspace SET name = ?, updated_at = now() WHERE id = ?", name, id);
+    }
+
+    /**
+     * 项目级联删除：项目域全部关联数据 + workspace 主表（目录文件由调用方负责删除）。
+     * 引擎侧 wf_run/wf_node_run/wf_decision 不删——运行历史是审计数据，且与 workspace 无外键。
+     */
+    @Transactional
+    public void deleteProjectCascade(String id) {
+        jdbc.update("DELETE FROM project_stage_step WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_stage_anchor WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_requirement WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_artifact WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_stage_capability WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_pm_session WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_stage_session WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_stage_summary WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_work_node WHERE workspace_id = ?", id);
+        jdbc.update("DELETE FROM project_stage_plan WHERE workspace_id = ?", id);
         jdbc.update("DELETE FROM workspace WHERE id = ?", id);
     }
 

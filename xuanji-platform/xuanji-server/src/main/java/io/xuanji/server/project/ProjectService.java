@@ -1376,6 +1376,46 @@ public class ProjectService {
         return Map.of("definitionId", definitionId);
     }
 
+    /** 项目改名：只改显示名（root_path 不变，目录不动）。 */
+    public Map<String, Object> renameProject(LoginUser user, String wsId, String name) {
+        if (name == null || name.isBlank()) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "name is required");
+        }
+        requireProject(user, wsId);
+        workspaceRepo.rename(wsId, name.trim());
+        return Map.of("id", wsId, "name", name.trim());
+    }
+
+    /**
+     * 删除项目：项目域关联数据级联清理 + 项目目录递归删除（破坏性，调用方须已获用户确认）。
+     * 引擎侧 run 历史不删（审计数据）。
+     */
+    public Map<String, Object> deleteProject(LoginUser user, String wsId) {
+        Map ws = (Map)this.workspaceRepo.findById(wsId).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "project not found"));
+        this.requireOwner(user, ws);
+        if (!"PROJECT".equals(ws.get("binding_type"))) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "该 workspace 不是项目，不能用项目删除接口");
+        }
+        String rootPath = String.valueOf(ws.get("root_path"));
+        workspaceRepo.deleteProjectCascade(wsId);
+        Path root = Paths.get(rootPath).normalize();
+        if (Files.isDirectory(root)) {
+            try (java.util.stream.Stream<Path> stream = Files.walk(root)) {
+                stream.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                    try {
+                        Files.deleteIfExists(p);
+                    } catch (IOException ignore) {
+                        // 单个文件删除失败不阻断（目录可能被进程占用），残留由运维清理
+                    }
+                });
+            }
+            catch (IOException ignore) {
+                // 目录遍历失败同上：数据已删，目录残留可手工清理
+            }
+        }
+        return Map.of("deleted", wsId, "root_path", rootPath);
+    }
+
     /** 项目文件树：列出项目目录（root_path）下的文件与子目录——代码/文档产出直接可见，不再只看对话碎片。 */
     public List<Map<String, Object>> listFiles(LoginUser user, String wsId) {
         Path root = projectRoot(user, wsId);

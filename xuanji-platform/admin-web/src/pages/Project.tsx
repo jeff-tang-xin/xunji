@@ -13,7 +13,10 @@ import {
   Button,
   Card,
   Col,
+  Drawer,
   Empty,
+  Input,
+  Modal,
   Row,
   Space,
   Spin,
@@ -25,6 +28,9 @@ import {
 import {
   PlusOutlined,
   ArrowLeftOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  ExclamationCircleOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
   ReloadOutlined,
@@ -36,6 +42,7 @@ import { ArtifactDrawer } from './project/ArtifactDrawer'
 import { CreateProjectModal } from './project/CreateProjectModal'
 import ProjectFiles from './project/ProjectFiles'
 import { StageChatPanel } from './project/StageChatPanel'
+import { MarkdownView } from './project/shared'
 import { StageExecutionPanel } from './project/StageExecutionPanel'
 import { StageGroups } from './project/StageGroups'
 import { StageSessionsPanel } from './project/StageSessionsPanel'
@@ -47,6 +54,50 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [advancing, setAdvancing] = useState(false)
+  /** 交付物全文查看：点卡片打开抽屉渲染完整 markdown */
+  const [viewArtifact, setViewArtifact] = useState<ProjectDetailData['artifacts'][number] | null>(null)
+  /** 项目编辑/删除 */
+  const [editOpen, setEditOpen] = useState(false)
+  const [editName, setEditName] = useState('')
+  const [savingName, setSavingName] = useState(false)
+
+  const renameProject = async () => {
+    if (!editName.trim()) {
+      message.warning('项目名不能为空')
+      return
+    }
+    setSavingName(true)
+    try {
+      await apiJson(`/api/projects/${id}`, 'PUT', { name: editName.trim() })
+      message.success('项目已改名')
+      setEditOpen(false)
+      await load()
+    } catch (e) {
+      if (e instanceof Error) message.error(e.message)
+    } finally {
+      setSavingName(false)
+    }
+  }
+
+  const deleteProject = () => {
+    Modal.confirm({
+      title: '删除项目',
+      icon: <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />,
+      content: `将永久删除项目「${detail?.name}」的全部数据（需求/规划/台账/交付物/会话）与项目目录下的所有文件，不可恢复。确定删除？`,
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await apiJson(`/api/projects/${id}`, 'DELETE')
+          message.success('项目已删除')
+          onBack()
+        } catch (e) {
+          if (e instanceof Error) message.error(e.message)
+        }
+      },
+    })
+  }
   /** 阶段执行视图数据，由本页轮询后喂给 StageExecutionPanel */
   const [exec, setExec] = useState<StageExecution | null>(null)
   const [execBusy, setExecBusy] = useState(false)
@@ -148,7 +199,25 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
           {detail.root_path}
         </Typography.Text>
         <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>
+        <Button size="small" icon={<EditOutlined />} onClick={() => { setEditName(detail.name); setEditOpen(true) }}>编辑</Button>
+        <Button size="small" danger icon={<DeleteOutlined />} onClick={deleteProject}>删除</Button>
       </Space>
+
+      <Modal
+        title="编辑项目"
+        open={editOpen}
+        onOk={() => void renameProject()}
+        confirmLoading={savingName}
+        onCancel={() => setEditOpen(false)}
+        okText="保存"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          只修改显示名；项目目录（{detail.root_path}）保持不变。
+        </Typography.Paragraph>
+        <Input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="项目名" maxLength={64} />
+      </Modal>
 
       {/* 旧「阶段链」横条已下线（2026-10-15）：只保留新流程（AI 主控编排），
           旧节点链台账与新流程并存时互相干扰（链上显示全完成、对话里还在推进）。 */}
@@ -227,7 +296,8 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
                     {deliverables.length === 0
                       ? <Empty description="暂无交付留档" />
                       : deliverables.map((a) => (
-                        <Card key={a.id} size="small" style={{ marginBottom: 8 }}>
+                        <Card key={a.id} size="small" style={{ marginBottom: 8, cursor: 'pointer' }}
+                          onClick={() => setViewArtifact(a)}>
                           <Space direction="vertical" size={2} style={{ width: '100%' }}>
                             <Space>
                               <FileTextOutlined />
@@ -272,6 +342,15 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
         </Col>
       </Row>
 
+      {/* 交付物全文查看：点卡片打开，markdown 渲染完整 content_md */}
+      <Drawer
+        open={viewArtifact != null}
+        title={viewArtifact?.name}
+        width={640}
+        onClose={() => setViewArtifact(null)}
+      >
+        {viewArtifact && <MarkdownView text={viewArtifact.content_md} />}
+      </Drawer>
       <ArtifactDrawer
         open={artifactDrawer}
         projectId={id}

@@ -162,6 +162,19 @@ public class ProjectController {
         return projects.listFiles(user, id);
     }
 
+    /** 项目改名：body = {"name":"新名"}（root_path 不变，目录不动）。 */
+    @PutMapping("/{id}")
+    public Object rename(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+                         @RequestBody Map<String, Object> body) {
+        return projects.renameProject(user, id, body.get("name") == null ? null : String.valueOf(body.get("name")));
+    }
+
+    /** 删除项目：级联清理项目域数据 + 递归删除项目目录（破坏性，前端须二次确认）。 */
+    @DeleteMapping("/{id}")
+    public Object delete(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {
+        return projects.deleteProject(user, id);
+    }
+
     /** 读项目文件内容：path 为相对项目根的相对路径（≤200KB 文本）。 */
     @GetMapping("/{id}/files/content")
     public Object fileContent(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,

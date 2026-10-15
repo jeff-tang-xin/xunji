@@ -135,6 +135,16 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
 
   const nodes = tree()
 
+  /** 递归渲染树节点（目录任意深度嵌套，文件可点击查看） */
+  const renderNodes = (list: FileNode[], depth: number): ReactNode =>
+    list.map((n) => (
+      <div key={n.key} style={{ paddingLeft: depth > 0 ? 18 : 0, cursor: n.isLeaf ? 'pointer' : 'default' }}
+        onClick={() => n.isLeaf && void openFile(n.key)}>
+        {n.title}
+        {n.children && renderNodes(n.children, depth + 1)}
+      </div>
+    ))
+
   return (
     <div>
       <div style={{ marginBottom: 8, textAlign: 'right' }}>
@@ -147,17 +157,7 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
           : (
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
               <div style={{ width: 260, flexShrink: 0, maxHeight: 480, overflow: 'auto', border: '1px solid #f0f0f0', borderRadius: 6, padding: 8 }}>
-                {nodes.map((n) => (
-                  <div key={n.key}>
-                    {n.title}
-                    {n.children && n.children.map((c) => (
-                      <div key={c.key} style={{ paddingLeft: 18, cursor: c.isLeaf ? 'pointer' : 'default' }}
-                        onClick={() => c.isLeaf && void openFile(c.key)}>
-                        {c.title}
-                      </div>
-                    ))}
-                  </div>
-                ))}
+                {nodes.length === 0 ? <Empty description="目录为空" /> : renderNodes(nodes, 0)}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 {selected == null
