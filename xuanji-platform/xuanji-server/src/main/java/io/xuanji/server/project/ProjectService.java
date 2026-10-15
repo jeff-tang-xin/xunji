@@ -1376,6 +1376,72 @@ public class ProjectService {
         return Map.of("definitionId", definitionId);
     }
 
+    /** 项目文件树：列出项目目录（root_path）下的文件与子目录——代码/文档产出直接可见，不再只看对话碎片。 */
+    public List<Map<String, Object>> listFiles(LoginUser user, String wsId) {
+        Path root = projectRoot(user, wsId);
+        List<Map<String, Object>> out = new ArrayList<>();
+        try (java.util.stream.Stream<Path> stream = Files.walk(root, 6)) {
+            stream.filter(p -> !p.equals(root)).sorted().limit(500).forEach(p -> {
+                Map<String, Object> f = new LinkedHashMap<>();
+                f.put("path", root.relativize(p).toString().replace('\\', '/'));
+                boolean dir = Files.isDirectory(p);
+                f.put("type", dir ? "dir" : "file");
+                if (!dir) {
+                    try {
+                        f.put("size", Files.size(p));
+                    } catch (IOException ignore) {
+                        f.put("size", 0);
+                    }
+                }
+                out.add(f);
+            });
+        }
+        catch (IOException e) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.INTERNAL_SERVER_ERROR, "读取项目目录失败: " + e.getMessage());
+        }
+        return out;
+    }
+
+    /** 读项目文件文本内容（≤200KB）：path 为相对项目根的相对路径，normalize 后必须仍在项目根内（防穿越）。 */
+    public Map<String, Object> readFile(LoginUser user, String wsId, String relPath) {
+        if (relPath == null || relPath.isBlank()) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "path is required");
+        }
+        Path root = projectRoot(user, wsId);
+        Path target = root.resolve(relPath).normalize();
+        if (!target.startsWith(root)) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "路径越界");
+        }
+        if (!Files.isRegularFile(target)) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "文件不存在");
+        }
+        try {
+            long size = Files.size(target);
+            if (size > 200 * 1024) {
+                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "文件超过 200KB，暂不支持在线查看");
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("path", relPath);
+            out.put("size", size);
+            out.put("content", Files.readString(target));
+            return out;
+        }
+        catch (IOException e) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.INTERNAL_SERVER_ERROR, "读取文件失败: " + e.getMessage());
+        }
+    }
+
+    /** 项目根目录：root_path（创建时落库，相对路径按 JVM 工作目录解析），不存在则 404。 */
+    private Path projectRoot(LoginUser user, String wsId) {
+        Map ws = (Map)this.workspaceRepo.findById(wsId).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "project not found"));
+        this.requireOwner(user, ws);
+        Path root = Paths.get(String.valueOf(ws.get("root_path"))).normalize();
+        if (!Files.isDirectory(root)) {
+            throw new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "项目目录不存在: " + ws.get("root_path"));
+        }
+        return root;
+    }
+
     private void createProjectDirectories(String rootPath) {
         try {
             Path root = Paths.get(rootPath, new String[0]);

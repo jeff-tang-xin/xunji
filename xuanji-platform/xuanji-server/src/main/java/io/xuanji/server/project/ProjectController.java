@@ -156,6 +156,19 @@ public class ProjectController {
         return projects.requirements(user, id);
     }
 
+    /** 项目文件树：列出项目目录（root_path）下的文件与子目录——代码/文档产出直接可见。 */
+    @GetMapping("/{id}/files")
+    public Object files(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {
+        return projects.listFiles(user, id);
+    }
+
+    /** 读项目文件内容：path 为相对项目根的相对路径（≤200KB 文本）。 */
+    @GetMapping("/{id}/files/content")
+    public Object fileContent(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+                              @RequestParam("path") String path) {
+        return projects.readFile(user, id, path);
+    }
+
     /**
      * 审批阶段流程里的决策门：{@code {"node_id":"t2","decision":"APPROVE","comment":"..."}}。
      *

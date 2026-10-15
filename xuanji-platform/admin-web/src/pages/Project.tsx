@@ -1,8 +1,7 @@
 /**
  * 项目看板 —— 软件项目全生命周期管理（设计文档 docs/sdlc-lifecycle-design.md 阶段 D）。
- * 双线路：项目列表（数据驱动加载）→ 项目详情（阶段链 DAG 可视化 + 节点操作 + 留档）。
- * 创建线路：POST /api/projects（模板驱动生成节点链）；加载线路：GET /api/projects/{id}。
- * 节点操作：run（校验 DAG 依赖）/ complete（显式置 DONE）/ artifacts（查看/登记留档）。
+ * 主形态（2026-10-15 收敛）：对话即工作界面（AI 主控编排），右栏聚合 需求/阶段执行/生命周期/文件/交付物/会话。
+ * 旧节点链（阶段链横条 + 节点人驱动操作）已下线——只保留新流程，避免两条链路并存互相干扰。
  *
  * 2026-10-14 拆分：类型/常量 → project/types.ts，小组件 → project/shared.tsx，
  * 各面板组件 → project/<Component>.tsx；本文件保留 ProjectDetail 与路由主组件。
@@ -32,10 +31,10 @@ import {
   SettingOutlined,
 } from '@ant-design/icons'
 import { apiJson } from '../api/client'
-import { EXEC_LIVE_STATES, NODE_TYPE_LABEL, ProjectDetailData, ProjectRow, SHOW_TEMPLATE_ENTRY, STAGE_ORDER, StageExecution, StageView, WorkNode, fmtDate, nextStageOf, projectStatusColor, stageLabel } from './project/types'
+import { EXEC_LIVE_STATES, ProjectDetailData, ProjectRow, SHOW_TEMPLATE_ENTRY, STAGE_ORDER, StageExecution, StageView, fmtDate, nextStageOf, projectStatusColor, stageLabel } from './project/types'
 import { ArtifactDrawer } from './project/ArtifactDrawer'
 import { CreateProjectModal } from './project/CreateProjectModal'
-import { NodeChain, NodeDrawer } from './project/NodeDrawer'
+import ProjectFiles from './project/ProjectFiles'
 import { StageChatPanel } from './project/StageChatPanel'
 import { StageExecutionPanel } from './project/StageExecutionPanel'
 import { StageGroups } from './project/StageGroups'
@@ -47,7 +46,6 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [detail, setDetail] = useState<ProjectDetailData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [selectedNode, setSelectedNode] = useState<WorkNode | null>(null)
   const [advancing, setAdvancing] = useState(false)
   /** 阶段执行视图数据，由本页轮询后喂给 StageExecutionPanel */
   const [exec, setExec] = useState<StageExecution | null>(null)
@@ -95,26 +93,6 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
     const t = setInterval(() => { void loadExec(true) }, 5000)
     return () => clearInterval(t)
   }, [execState, loadExec])
-
-  const runNode = async (n: WorkNode) => {
-    try {
-      await apiJson(`/api/projects/${id}/nodes/${n.id}/run`, 'POST', {})
-      message.success(`节点「${NODE_TYPE_LABEL[n.type] || n.type}」已启动`)
-      await load()
-    } catch (e) {
-      if (e instanceof Error) message.error(e.message)
-    }
-  }
-
-  const completeNode = async (n: WorkNode) => {
-    try {
-      await apiJson(`/api/projects/${id}/nodes/${n.id}/complete`, 'POST', {})
-      message.success(`节点「${NODE_TYPE_LABEL[n.type] || n.type}」已完成`)
-      await load()
-    } catch (e) {
-      if (e instanceof Error) message.error(e.message)
-    }
-  }
 
   if (loading) {
     return <div style={{ padding: 80, textAlign: 'center' }}><Spin /></div>
@@ -172,9 +150,8 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
         <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>
       </Space>
 
-      <Card title="阶段链" style={{ marginBottom: 16 }}>
-        <NodeChain nodes={detail.nodes} onNodeClick={(n) => setSelectedNode(n)} />
-      </Card>
+      {/* 旧「阶段链」横条已下线（2026-10-15）：只保留新流程（AI 主控编排），
+          旧节点链台账与新流程并存时互相干扰（链上显示全完成、对话里还在推进）。 */}
 
       {/* 左右分栏（参考 Easy-Claw 工作区交互）：左侧对话是主工作界面，右侧栏聚合执行/生命周期/交付物/会话 */}
       <Row gutter={16} align="top">
@@ -235,6 +212,11 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
                 ),
               },
               {
+                key: 'files',
+                label: '文件',
+                children: <ProjectFiles projectId={id} />,
+              },
+              {
                 key: 'artifacts',
                 label: `交付物 ${deliverables.length}`,
                 children: (
@@ -290,14 +272,6 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
         </Col>
       </Row>
 
-            <NodeDrawer
-        node={selectedNode ? detail.nodes.find((n) => n.id === selectedNode.id) ?? selectedNode : null}
-        nodes={detail.nodes}
-        artifacts={detail.artifacts}
-        onClose={() => setSelectedNode(null)}
-        onRun={runNode}
-        onComplete={completeNode}
-      />
       <ArtifactDrawer
         open={artifactDrawer}
         projectId={id}

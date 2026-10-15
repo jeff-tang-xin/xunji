@@ -472,6 +472,9 @@ public class OrchestrationTools {
         if (!reqDigest.isEmpty()) {
             sb.append("【需求全景——项目级共识，所有工作围绕它】\n").append(reqDigest);
         }
+        else {
+            sb.append("【需求全景】（尚无需求项——任何实施性工作前必须先 declare_requirements 落项并请用户确认）\n");
+        }
         for (StageStep s : stepRepo.findByStage(wsId, stage, iteration)) {
             sb.append("- [").append(s.seq()).append("] ").append(s.name())
                     .append("（").append(s.status()).append("）");
