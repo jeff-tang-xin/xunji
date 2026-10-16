@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Button, Empty, Input, Segmented, Spin, Tag, Tooltip, Tree, Typography, message } from 'antd'
+import { Button, Empty, Input, Modal, Segmented, Spin, Tag, Tooltip, Tree, Typography, message } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import {
   CopyOutlined,
@@ -19,7 +19,8 @@ import { MarkdownView } from './shared'
  * 产出不再只是对话碎片——代码/文档落盘即在这里可见；点文件拉内容（≤200KB 文本）。
  * 形态对齐 AI-Claw 工作区：标准树级——同层内目录在前、文件在后按名混排，点目录进下一层；
  * 交互对齐 AntD 规范：antd Tree（hover/选中态/展开动效）、类型彩色图标（替代满屏 Tag）、
- * 搜索过滤、内容区带文件头（路径面包屑/大小/复制）。
+ * 搜索过滤；点文件弹 Modal 看内容（右栏 tab 窄，内嵌内容区每行只挤得下五六个字——
+ * 弹窗 780px 宽 + 65vh 滚动才是读文档的形态），文件头带路径面包屑/大小/渲染切换/复制。
  */
 
 interface FileEntry {
@@ -212,126 +213,117 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
         : entries.length === 0
           ? <Empty description="项目目录为空——项目产出（代码/文档）会自动落盘到这里" />
           : (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'stretch' }}>
-              {/* 文件树：antd Tree 自带 hover/选中/展开动效；目录点击 = 切换展开。
-                  窄容器（右栏 tab）时内容区 flex-basis 320 换行到下方占满全宽——
-                  固定左右分栏在 480px 容器里内容区只剩 180px，每行五六个字（实测反馈） */}
-              <div style={{
-                flex: '0 1 280px', minWidth: 220, maxHeight: 520, overflow: 'auto',
-                border: '1px solid #f0f0f0', borderRadius: 8, padding: '8px 4px', background: '#fff',
-              }}>
-                {treeData.length === 0
-                  ? <Empty description={`没有匹配「${search.trim()}」的文件`} image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                  : (
-                    <Tree
-                      blockNode
-                      treeData={treeData}
-                      expandedKeys={expandedKeys}
-                      onExpand={(keys) => setExpandedKeys(keys)}
-                      selectedKeys={selected ? [selected] : []}
-                      onSelect={(keys, info) => {
-                        const k = String(keys[0] ?? '')
-                        if (!k) return
-                        if (info.node.isLeaf) void openFile(k)
-                        else setExpandedKeys((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]))
-                      }}
-                      titleRender={(n) => {
-                        const isDir = !n.isLeaf
-                        const expanded = expandedKeys.includes(n.key)
-                        const size = !isDir
-                          ? fmtSize(entries.find((e) => e.path === n.key)?.size)
-                          : ''
-                        return (
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, minWidth: 0 }}>
-                            {isDir
-                              ? (expanded
-                                  ? <FolderOpenFilled style={{ color: '#faad14', fontSize: 14 }} />
-                                  : <FolderFilled style={{ color: '#faad14', fontSize: 14 }} />)
-                              : fileIcon(String(n.key))}
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {String(n.title)}
-                            </span>
-                            {size && <span style={{ color: 'rgba(0,0,0,0.45)', fontSize: 12, flexShrink: 0 }}>{size}</span>}
+            <div style={{
+              border: '1px solid #f0f0f0', borderRadius: 8, padding: '8px 4px', background: '#fff',
+            }}>
+              {treeData.length === 0
+                ? <Empty description={`没有匹配「${search.trim()}」的文件`} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                : (
+                  <Tree
+                    blockNode
+                    treeData={treeData}
+                    expandedKeys={expandedKeys}
+                    onExpand={(keys) => setExpandedKeys(keys)}
+                    selectedKeys={selected ? [selected] : []}
+                    onSelect={(keys, info) => {
+                      const k = String(keys[0] ?? '')
+                      if (!k) return
+                      if (info.node.isLeaf) void openFile(k)
+                      else setExpandedKeys((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]))
+                    }}
+                    titleRender={(n) => {
+                      const isDir = !n.isLeaf
+                      const expanded = expandedKeys.includes(n.key)
+                      const size = !isDir
+                        ? fmtSize(entries.find((e) => e.path === n.key)?.size)
+                        : ''
+                      return (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, minWidth: 0, maxWidth: '100%' }}>
+                          {isDir
+                            ? (expanded
+                                ? <FolderOpenFilled style={{ color: '#faad14', fontSize: 14 }} />
+                                : <FolderFilled style={{ color: '#faad14', fontSize: 14 }} />)
+                            : fileIcon(String(n.key))}
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {String(n.title)}
                           </span>
-                        )
-                      }}
-                    />
-                  )}
-              </div>
-
-              {/* 内容区：文件头（路径面包屑 + 大小 + 复制）+ 内容 */}
-              <div style={{
-                flex: '1 1 320px', minWidth: 0, border: '1px solid #f0f0f0', borderRadius: 8, background: '#fff',
-                display: 'flex', flexDirection: 'column',
-              }}>
-                {selected == null
-                  ? (
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 480 }}>
-                      <Empty description="点左侧文件查看内容" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                    </div>
-                  )
-                  : (
-                    <>
-                      <div style={{
-                        display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
-                        padding: '8px 12px', borderBottom: '1px solid #f0f0f0', background: '#fafafa',
-                        borderRadius: '8px 8px 0 0',
-                      }}>
-                        {fileIcon(selected)}
-                        {selected.split('/').map((seg, i, arr) => (
-                          <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                            <Typography.Text
-                              strong={i === arr.length - 1}
-                              type={i === arr.length - 1 ? undefined : 'secondary'}
-                              style={{ fontSize: 13 }}
-                            >
-                              {seg}
-                            </Typography.Text>
-                            {i < arr.length - 1 && <span style={{ color: 'rgba(0,0,0,0.25)' }}>/</span>}
-                          </span>
-                        ))}
-                        {selectedEntry?.size != null && (
-                          <Tooltip title="文件大小">
-                            <Tag style={{ marginInlineEnd: 0 }}>{fmtSize(selectedEntry.size)}</Tag>
-                          </Tooltip>
-                        )}
-                        <span style={{ flex: 1 }} />
-                        {selected.toLowerCase().endsWith('.md') && (
-                          <Segmented
-                            size="small"
-                            options={['渲染', '原文']}
-                            value={rawMode ? '原文' : '渲染'}
-                            onChange={(v) => setRawMode(v === '原文')}
-                          />
-                        )}
-                        <Tooltip title="复制全文">
-                          <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => void copyContent()} />
-                        </Tooltip>
-                      </div>
-                      <div style={{ flex: 1, minHeight: 0, maxHeight: 520, overflow: 'auto' }}>
-                        {fileLoading
-                          ? <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
-                          : selected.toLowerCase().endsWith('.md') && !rawMode
-                            ? (
-                              <div style={{ padding: '4px 12px 12px' }}>
-                                <MarkdownView scroll={false} text={content} />
-                              </div>
-                            )
-                            : (
-                              <pre style={{
-                                margin: 0, fontSize: 12, lineHeight: 1.6,
-                                background: '#fff', padding: 12,
-                                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                              }}>
-                                {content || '（空文件）'}
-                              </pre>
-                            )}
-                      </div>
-                    </>
-                  )}
-              </div>
+                          {size && <span style={{ color: 'rgba(0,0,0,0.45)', fontSize: 12, flexShrink: 0 }}>{size}</span>}
+                        </span>
+                      )
+                    }}
+                  />
+                )}
             </div>
           )}
+
+      {/* 文件内容弹窗：右栏 tab 太窄，读文档（CHATLOG 回放/PRD）开 Modal 才有阅读宽度 */}
+      <Modal
+        open={selected != null}
+        onCancel={() => setSelected(null)}
+        footer={null}
+        width={780}
+        title={
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            {selected && fileIcon(selected)}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected?.split('/').pop() || ''}
+            </span>
+          </span>
+        }
+      >
+        <div style={{ marginTop: -8 }}>
+          {/* 文件头：路径面包屑 + 大小 + 渲染切换 + 复制 */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+            padding: '6px 0 10px', borderBottom: '1px solid #f0f0f0', marginBottom: 10,
+          }}>
+            {selected?.split('/').map((seg, i2, arr) => (
+              <span key={i2} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                <Typography.Text
+                  strong={i2 === arr.length - 1}
+                  type={i2 === arr.length - 1 ? undefined : 'secondary'}
+                  style={{ fontSize: 12 }}
+                >
+                  {seg}
+                </Typography.Text>
+                {i2 < arr.length - 1 && <span style={{ color: 'rgba(0,0,0,0.25)' }}>/</span>}
+              </span>
+            ))}
+            {selectedEntry?.size != null && (
+              <Tooltip title="文件大小">
+                <Tag style={{ marginInlineEnd: 0 }}>{fmtSize(selectedEntry.size)}</Tag>
+              </Tooltip>
+            )}
+            <span style={{ flex: 1 }} />
+            {selected?.toLowerCase().endsWith('.md') && (
+              <Segmented
+                size="small"
+                options={['渲染', '原文']}
+                value={rawMode ? '原文' : '渲染'}
+                onChange={(v) => setRawMode(v === '原文')}
+              />
+            )}
+            <Tooltip title="复制全文">
+              <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => void copyContent()} />
+            </Tooltip>
+          </div>
+          <div style={{ maxHeight: '65vh', overflowY: 'auto' }}>
+            {fileLoading
+              ? <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
+              : selected?.toLowerCase().endsWith('.md') && !rawMode
+                ? <MarkdownView scroll={false} text={content} />
+                : (
+                  <pre style={{
+                    margin: 0, fontSize: 12, lineHeight: 1.6,
+                    background: '#fff', padding: 12,
+                    whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                  }}>
+                    {content || '（空文件）'}
+                  </pre>
+                )}
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

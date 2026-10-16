@@ -125,20 +125,34 @@ export function StageGroups({ views, currentStage, exec, artifacts, onAdvance, a
                   AI 自动流转：本阶段流程跑完后自动收口并推进下一阶段；需要你介入的只有决策门审批与对话澄清。
                 </Typography.Text>
                 {orchestrated ? (
-                  // 新内核：plan.tasks 是创建时的规划草稿（不参与执行），显示真实 steps 台账
+                  // 新内核：plan.tasks 是创建时的规划草稿（不参与执行），显示真实 steps 台账。
+                  // 行内 nowrap + 名称/摘要截断悬停看全文——Space wrap 里长名不收缩会把行撑破容器（实测反馈）
                   (exec?.steps || []).length > 0 ? (
                     (exec?.steps || []).map((s) => (
-                      <Space key={String(s.id)} size={6} wrap>
-                        <Typography.Text style={{ fontSize: 13 }}>#{s.seq} {s.name}</Typography.Text>
-                        <Tag color={STEP_STATUS_COLOR[s.status] || 'default'} style={{ marginInlineEnd: 0 }}>
+                      <div key={String(s.id)} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <Typography.Text style={{ fontSize: 13, flexShrink: 0 }}>#{s.seq}</Typography.Text>
+                        <Tooltip title={s.name}>
+                          <span style={{
+                            fontSize: 13, flex: '0 1 auto', minWidth: 0,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}>
+                            {s.name}
+                          </span>
+                        </Tooltip>
+                        <Tag color={STEP_STATUS_COLOR[s.status] || 'default'} style={{ marginInlineEnd: 0, flexShrink: 0 }}>
                           {STEP_STATUS_LABEL[s.status] || s.status}
                         </Tag>
                         {s.outputSummary && (
-                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                            {s.outputSummary.length > 30 ? s.outputSummary.slice(0, 30) + '…' : s.outputSummary}
-                          </Typography.Text>
+                          <Tooltip title={s.outputSummary}>
+                            <span style={{
+                              fontSize: 12, color: 'rgba(0,0,0,0.45)', flex: '0 1 auto', minWidth: 0,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>
+                              {s.outputSummary.length > 30 ? s.outputSummary.slice(0, 30) + '…' : s.outputSummary}
+                            </span>
+                          </Tooltip>
                         )}
-                      </Space>
+                      </div>
                     ))
                   ) : (
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -149,15 +163,22 @@ export function StageGroups({ views, currentStage, exec, artifacts, onAdvance, a
                   tasks.map((tk) => {
                     const run = nodeRuns.find((nr) => String(nr.seq) === String(tk.key))
                     return (
-                      <Space key={String(tk.key ?? tk.name)} size={6} wrap>
-                        <Typography.Text style={{ fontSize: 13 }}>{tk.name || `子任务 ${tk.key}`}</Typography.Text>
+                      <div key={String(tk.key ?? tk.name)} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <Tooltip title={tk.name || `子任务 ${tk.key}`}>
+                          <span style={{
+                            fontSize: 13, flex: '0 1 auto', minWidth: 0,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}>
+                            {tk.name || `子任务 ${tk.key}`}
+                          </span>
+                        </Tooltip>
                         {((tk.agents || tk.participants) || []).length > 0 && (
-                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          <Typography.Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
                             {((tk.agents || tk.participants) as string[]).join('、')}
                           </Typography.Text>
                         )}
-                        {runStateTag(run?.status)}
-                      </Space>
+                        <span style={{ flexShrink: 0 }}>{runStateTag(run?.status)}</span>
+                      </div>
                     )
                   })
                 ) : (

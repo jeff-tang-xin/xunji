@@ -235,7 +235,7 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
       ),
     },
     {
-      title: '状态', dataIndex: 'status', width: 84,
+      title: '状态', dataIndex: 'status', width: 76,
       render: (v: string) => <Tag color={NODE_RUN_STATUS_COLOR[v] || 'default'}>{NODE_RUN_STATUS_LABEL[v] || v}</Tag>,
     },
     {
@@ -256,9 +256,11 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
 
   /** 编排步骤表（新内核只读台账）：产出摘要直接看，全文/理由/错误展开看 */
   const stepCols: ColumnsType<StageStepRow> = [
-    { title: '#', dataIndex: 'seq', width: 44 },
+    // 固定列宽合计压到 336（右栏 tab 容器 ~480px）——固定列总和超容器会把表格撑出横向溢出，
+    // 状态列被裁一半（实测反馈）；步骤/产出两列不设 width，fixed 布局下平分剩余空间
+    { title: '#', dataIndex: 'seq', width: 40 },
     {
-      title: '步骤', dataIndex: 'name', width: 170,
+      title: '步骤', dataIndex: 'name',
       render: (v: string, r) => (
         <div style={{ minWidth: 0 }}>
           {/* 主控偶尔把长指令塞进 name——单行截断 + Tooltip 全文，防撑宽表格 */}
@@ -272,11 +274,11 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
       ),
     },
     {
-      title: '类型', dataIndex: 'stepType', width: 64,
+      title: '类型', dataIndex: 'stepType', width: 60,
       render: (v: string) => <Tag style={{ marginInlineEnd: 0 }}>{STEP_TYPE_LABEL[v] || v}</Tag>,
     },
     {
-      title: '执行者', dataIndex: 'agent', width: 110, ellipsis: true,
+      title: '执行者', dataIndex: 'agent', width: 96, ellipsis: true,
       render: (v?: string | null) => (v ? <Tooltip title={v}><span style={{ fontSize: 12 }}>{v}</span></Tooltip> : '—'),
     },
     {
@@ -297,7 +299,7 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
       },
     },
     {
-      title: '操作', width: 70,
+      title: '操作', width: 64,
       render: (_, r) => {
         // 未处理决策（DECISION 且未 DONE/SKIPPED）：项目区域直接答复——有未处理决策时对话输入被锁定，这里是唯一解锁通道
         if (r.stepType !== 'DECISION' || r.status === 'DONE' || r.status === 'SKIPPED') return null

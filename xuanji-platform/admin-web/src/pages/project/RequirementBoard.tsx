@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Empty, Spin, Tag, Typography, message } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { DownOutlined, ReloadOutlined, RightOutlined } from '@ant-design/icons'
 import { apiJson } from '../../api/client'
 
 /**
@@ -98,6 +98,17 @@ export function RequirementBoard({ projectId }: { projectId: string }) {
     }
     return { sorted, pos, width, height, edges }
   }, [items])
+
+  /** 讨论明细默认收起（同一会诊汇总会挂在多张关联卡片上，全部展开又长又重复——实测反馈）；点击展开 */
+  const [openActs, setOpenActs] = useState<Set<string>>(new Set())
+  const toggleActs = (code: string) => {
+    setOpenActs((prev) => {
+      const next = new Set(prev)
+      if (next.has(code)) next.delete(code)
+      else next.add(code)
+      return next
+    })
+  }
 
   if (loading && !items) {
     return <div style={{ padding: 32, textAlign: 'center' }}><Spin /></div>
@@ -219,8 +230,17 @@ export function RequirementBoard({ projectId }: { projectId: string }) {
               )}
               {(r.activities || []).length > 0 && (
                 <div style={{ marginTop: 4, borderTop: '1px dashed #f0f0f0', paddingTop: 4 }}>
-                  {r.activities!.map((a, i) => (
-                    <div key={i} style={{ fontSize: 11, color: '#595959', lineHeight: '18px' }}>
+                  <div
+                    onClick={() => toggleActs(r.code)}
+                    style={{ fontSize: 11, color: '#595959', cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 4 }}
+                  >
+                    {openActs.has(r.code) ? <DownOutlined style={{ fontSize: 10 }} /> : <RightOutlined style={{ fontSize: 10 }} />}
+                    <span>
+                      讨论/澄清 {r.activities!.length} 条{openActs.has(r.code) ? '（点击收起）' : '（点击展开）'}
+                    </span>
+                  </div>
+                  {openActs.has(r.code) && r.activities!.map((a, i) => (
+                    <div key={i} style={{ fontSize: 11, color: '#595959', lineHeight: '18px', marginTop: 2 }}>
                       <Tag
                         color={a.type === 'DISCUSS' ? 'purple' : 'cyan'}
                         style={{ marginRight: 4, fontSize: 10, lineHeight: '16px' }}

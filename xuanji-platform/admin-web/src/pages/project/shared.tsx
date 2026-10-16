@@ -48,7 +48,7 @@ export function MarkdownView({ text, json = false, scroll = true }: { text?: str
     }
   }
   return (
-    <div style={{ fontSize: 13, lineHeight: 1.7, wordBreak: 'break-word', ...boxStyle }}>
+    <div style={{ fontSize: 13, lineHeight: 1.7, wordBreak: 'break-word', overflowX: 'auto', ...boxStyle }}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{raw}</ReactMarkdown>
     </div>
   )
