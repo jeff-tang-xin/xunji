@@ -12,6 +12,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.Map;
 
 /**
  * 任务型小流程执行器：单 agent 后台执行，产出登记为交付物。
@@ -40,6 +41,7 @@ public class TaskRunner {
     private final RequirementRepository requirementRepo;
     private final StageDocStore docStore;
     private final StageOrchestrator orchestrator;
+    private final ProjectEventBus projectEvents;
 
     /** 双池防自等死锁：调度池跑 run（含限时等待），工作池跑阻塞的 invoke。
      * 工作池 4 线程：单线程时一个 8 分钟任务就把全平台任务型步骤串成队，多项目并发必排队。 */
@@ -58,7 +60,7 @@ public class TaskRunner {
     public TaskRunner(AgentInvoker invoker, AgentNodeExecutor agentNodes,
                       StageStepRepository stepRepo, ProjectRepository projectRepo,
                       PeerConsultService peerConsult, RequirementRepository requirementRepo,
-                      StageDocStore docStore,
+                      StageDocStore docStore, ProjectEventBus projectEvents,
                       @org.springframework.context.annotation.Lazy StageOrchestrator orchestrator) {
         this.invoker = invoker;
         this.agentNodes = agentNodes;
@@ -67,6 +69,7 @@ public class TaskRunner {
         this.peerConsult = peerConsult;
         this.requirementRepo = requirementRepo;
         this.docStore = docStore;
+        this.projectEvents = projectEvents;
         this.orchestrator = orchestrator;
     }
 
@@ -111,6 +114,10 @@ public class TaskRunner {
             }
             settleRequirements(step);
             log.info("任务执行完成: ws={} seq={} 产出 {} 字", step.workspaceId(), step.seq(), output.length());
+            // 项目状态实时推送：步骤落终态，在线前端收到即刷新台账（离线靠拉全量兜底）
+            projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
+                    "stage", step.stage(), "seq", step.seq(), "stepType", "TASK",
+                    "status", "DONE", "name", step.name()));
             // 批次收敛唤醒：任务落板后若无其他执行中步骤，后端直接唤醒主控继续推进
             // （后端是运行唯一真相，不依赖前端在线；主控承诺的「下一条汇报」由此兑现）
             orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
@@ -120,6 +127,10 @@ public class TaskRunner {
             String msg = rootMessage(e);
             stepRepo.updateStatus(step.withError(msg));
             log.warn("任务执行失败: ws={} seq={} -> {}", step.workspaceId(), step.seq(), msg);
+            // 项目状态实时推送：失败也是终态
+            projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
+                    "stage", step.stage(), "seq", step.seq(), "stepType", "TASK",
+                    "status", "FAILED", "name", step.name()));
             // 失败立即唤醒（不等批次）：主控要尽快评估重试或换路
             orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
                     "任务 #" + step.seq() + "「" + step.name() + "」执行失败（" + msg + "）。请评估后重试或调整方案。");

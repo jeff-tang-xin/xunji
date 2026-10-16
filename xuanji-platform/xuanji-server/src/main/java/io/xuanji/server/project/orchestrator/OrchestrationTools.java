@@ -53,6 +53,7 @@ public class OrchestrationTools {
     private final RequirementRepository requirementRepo;
     private final PeerConsultService peerConsult;
     private final DecisionSettleService decisionSettler;
+    private final ProjectEventBus projectEvents;
 
     /** 需求编号形态（REQ-001）：requirement_codes 漏传时从决策/任务文本兜底提取。 */
     private static final Pattern REQ_CODE = Pattern.compile("\\b(REQ-\\d+)\\b");
@@ -75,7 +76,7 @@ public class OrchestrationTools {
                               StageAdvancer advancer, io.xuanji.server.engine.AgentNodeExecutor agentNodes,
                               com.fasterxml.jackson.databind.ObjectMapper objectMapper,
                               RequirementRepository requirementRepo, PeerConsultService peerConsult,
-                              DecisionSettleService decisionSettler) {
+                              DecisionSettleService decisionSettler, ProjectEventBus projectEvents) {
         this.user = user;
         this.wsId = wsId;
         this.stage = stage;
@@ -92,6 +93,7 @@ public class OrchestrationTools {
         this.requirementRepo = requirementRepo;
         this.peerConsult = peerConsult;
         this.decisionSettler = decisionSettler;
+        this.projectEvents = projectEvents;
     }
 
     /** 主控可见的全部编排工具（BEAN 形态 ToolDef）。 */
@@ -294,6 +296,15 @@ public class OrchestrationTools {
                                 "message", "action 必须是 propose/confirm/update/drop"));
                     }
                 }
+            }
+            // 项目状态实时推送：需求落库/确认/状态推进，在线前端收到即刷新需求看板
+            // （对话轮结束无刷新回调，主控 confirm 后看板不推就停在旧状态）
+            List<String> touched = results.stream()
+                    .map(r -> r.substring(0, r.indexOf(' ')))
+                    .distinct().toList();
+            if (!touched.isEmpty()) {
+                projectEvents.publish(wsId, "requirement.updated", Map.of(
+                        "stage", stage, "codes", touched, "action", action));
             }
             return ToolResult.of(Map.of("ok", true, "message",
                     "需求已落档: " + String.join("；", results)

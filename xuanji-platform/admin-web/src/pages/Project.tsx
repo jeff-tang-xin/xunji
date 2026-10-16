@@ -142,8 +142,8 @@ const [rightTab, setRightTab] = useState('exec')
 //（答复内容进唤醒消息），前端经会话事件总线实时回显——与任务/讨论落板唤醒同一条后端链路。
   const [artifactDrawer, setArtifactDrawer] = useState(false)
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     setError(null)
     try {
       const d = await apiJson<ProjectDetailData>('/api/projects/' + id)
@@ -180,9 +180,23 @@ const [rightTab, setRightTab] = useState('exec')
   const execState = exec?.state
   useEffect(() => {
     if (!execState || !EXEC_LIVE_STATES.has(execState)) return
-    const t = setInterval(() => { void loadExec(true) }, 5000)
+    // 30s 兜底轮询：实时推送（下方事件订阅）为主通道，轮询只在断线/漏事件时自愈
+    const t = setInterval(() => { void loadExec(true) }, 30000)
     return () => clearInterval(t)
   }, [execState, loadExec])
+
+  // 项目状态实时推送（SSE）：步骤落终态/决策答复/需求确认 → 静默刷新对应视图。
+  // 后端在状态落定点 publish（TaskRunner/DiscussionEngine/DecisionSettleService/OrchestrationTools），
+  // 在线前端收到即刷新，不再「状态变了要手动点刷新」；离线时数据在库里，重开页面拉全量兜底。
+  const [reqTick, setReqTick] = useState(0)
+  useEffect(() => {
+    const es = new EventSource(`/api/projects/${id}/events`)
+    const refresh = () => { void loadExec(true); void load(true) }
+    es.addEventListener('step.updated', refresh)
+    es.addEventListener('decision.answered', refresh)
+    es.addEventListener('requirement.updated', () => { setReqTick((x) => x + 1); refresh() })
+    return () => es.close()
+  }, [id, load, loadExec])
 
   if (loading) {
     return <div style={{ padding: 80, textAlign: 'center' }}><Spin /></div>
@@ -227,6 +241,8 @@ const [rightTab, setRightTab] = useState('exec')
   /** 运维阶段发起新一轮迭代（后端 iterate 端点未建，暂复用 advance，由后端校验拒绝时提示） */
   const deliverables = detail.artifacts.filter((a) => a.kind === 'DELIVERABLE')
   const processes = detail.artifacts.filter((a) => a.kind === 'PROCESS')
+  /** 留档：过程性文档（讨论纪要/求助问答/决策记录/对话留档），与交付物分开浏览 */
+  const archives = detail.artifacts.filter((a) => a.kind === 'DOC' || a.kind === 'DECISION')
 
   return (
     <div>
@@ -329,7 +345,7 @@ const [rightTab, setRightTab] = useState('exec')
               {
                 key: 'requirements',
                 label: '需求',
-                children: tabBody(<RequirementBoard projectId={id} />),
+                children: tabBody(<RequirementBoard projectId={id} refreshKey={reqTick} />),
               },
               {
                 key: 'exec',
@@ -409,6 +425,35 @@ const [rightTab, setRightTab] = useState('exec')
                       </>
                     )}
                   </>
+                ),
+              },
+              {
+                key: 'archives',
+                label: `留档 ${archives.length}`,
+                children: tabBody(
+                  archives.length === 0
+                    ? <Empty description="暂无过程留档（讨论纪要/决策记录等自动归档于此）" />
+                    : [...archives].reverse().map((a) => (
+                      <Card key={a.id} size="small" style={{ marginBottom: 8, cursor: 'pointer' }}
+                        onClick={() => setViewArtifact(a)}>
+                        <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                          <Space wrap>
+                            <FileTextOutlined />
+                            <Typography.Text strong>{a.name}</Typography.Text>
+                            <Tag style={{ marginInlineEnd: 0 }} color={a.kind === 'DECISION' ? 'gold' : 'purple'}>
+                              {a.kind === 'DECISION' ? '决策' : '过程'}
+                            </Tag>
+                            {a.stage && <Tag style={{ marginInlineEnd: 0 }}>{stageLabel(a.stage)}</Tag>}
+                            {a.created_by && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{a.created_by}</Typography.Text>}
+                          </Space>
+                          {a.content_md && (
+                            <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }} ellipsis={{ rows: 2 }}>
+                              {a.content_md}
+                            </Typography.Paragraph>
+                          )}
+                        </Space>
+                      </Card>
+                    ))
                 ),
               },
               {

@@ -48,7 +48,7 @@ const GAP_X = 28
 const GAP_Y = 96
 const PAD = 16
 
-export function RequirementBoard({ projectId }: { projectId: string }) {
+export function RequirementBoard({ projectId, refreshKey = 0 }: { projectId: string; refreshKey?: number }) {
   const [items, setItems] = useState<RequirementItem[] | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -60,7 +60,8 @@ export function RequirementBoard({ projectId }: { projectId: string }) {
       .finally(() => setLoading(false))
   }, [projectId])
 
-  useEffect(() => { load() }, [load])
+  // refreshKey：父组件收到 requirement.updated 实时事件时 +1，看板即时刷新（不等手动）
+  useEffect(() => { load() }, [load, refreshKey])
 
   /** 依赖未满足：存在非 DONE 的依赖项 */
   const blocked = useCallback((r: RequirementItem, all: RequirementItem[]) =>

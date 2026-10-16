@@ -61,6 +61,7 @@ public class StageOrchestrator {
     private final StageDocStore docStore;
     private final StageChatEventBus eventBus;
     private final DecisionSettleService decisionSettler;
+    private final ProjectEventBus projectEvents;
 
     /** SSE 会话执行池：虚拟线程（JDK21），阻塞 IO 型任务不占平台线程，并发对话不再互相排队。 */
     private final ExecutorService chatExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -76,7 +77,8 @@ public class StageOrchestrator {
                              WorkspaceRepository workspaceRepo, StageAdvancer advancer,
                              ObjectMapper objectMapper, RequirementRepository requirementRepo,
                              PeerConsultService peerConsult, StageDocStore docStore,
-                             StageChatEventBus eventBus, DecisionSettleService decisionSettler) {
+                             StageChatEventBus eventBus, DecisionSettleService decisionSettler,
+                             ProjectEventBus projectEvents) {
         this.runtime = runtime;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
@@ -91,6 +93,7 @@ public class StageOrchestrator {
         this.docStore = docStore;
         this.eventBus = eventBus;
         this.decisionSettler = decisionSettler;
+        this.projectEvents = projectEvents;
     }
 
     /**
@@ -117,7 +120,7 @@ public class StageOrchestrator {
         OrchestrationTools tools = new OrchestrationTools(user, wsId, stage, iteration,
                 projectGoal, stageGoal, stepRepo, taskRunner, discussionEngine,
                 projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult,
-                decisionSettler);
+                decisionSettler, projectEvents);
 
         AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance, wsId);
         AgentSpec spec = withTools(base, tools.toolDefs());
@@ -262,7 +265,7 @@ public class StageOrchestrator {
             OrchestrationTools tools = new OrchestrationTools(system, wsId, stage, iteration,
                     projectGoal, stageGoal, stepRepo, taskRunner, discussionEngine,
                     projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult,
-                    decisionSettler);
+                    decisionSettler, projectEvents);
             AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance, wsId);
             AgentSpec spec = withTools(base, tools.toolDefs());
             String query = "[系统唤醒] " + reason + "\n请基于以上情况继续推进。";

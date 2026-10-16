@@ -35,13 +35,15 @@ public class ProjectController {
     private final io.xuanji.core.runtime.AgentRuntime agentRuntime;
     private final io.xuanji.server.engine.ToolApprovalStore toolApprovals;
     private final io.xuanji.server.project.orchestrator.StageChatEventBus chatEventBus;
+    private final io.xuanji.server.project.orchestrator.ProjectEventBus projectEventBus;
 
     public ProjectController(ProjectService projects, ProjectChatService projectChat,
                              ProjectTemplateService templates,
                              io.xuanji.server.project.orchestrator.StageOrchestrator orchestrator,
                              io.xuanji.core.runtime.AgentRuntime agentRuntime,
                              io.xuanji.server.engine.ToolApprovalStore toolApprovals,
-                             io.xuanji.server.project.orchestrator.StageChatEventBus chatEventBus) {
+                             io.xuanji.server.project.orchestrator.StageChatEventBus chatEventBus,
+                             io.xuanji.server.project.orchestrator.ProjectEventBus projectEventBus) {
         this.projects = projects;
         this.projectChat = projectChat;
         this.templates = templates;
@@ -49,6 +51,7 @@ public class ProjectController {
         this.agentRuntime = agentRuntime;
         this.toolApprovals = toolApprovals;
         this.chatEventBus = chatEventBus;
+        this.projectEventBus = projectEventBus;
     }
 
     /** 项目列表（数据权限过滤，仅 PROJECT 类型）。 */
@@ -319,6 +322,16 @@ public class ProjectController {
                                       @RequestParam String stage,
                                       @RequestParam int iteration) {
         return chatEventBus.subscribe(io.xuanji.server.project.orchestrator.StageChatEventBus.key(id, stage, iteration));
+    }
+
+    /**
+     * 项目状态事件总线订阅（SSE 常驻）：项目域状态变化（步骤落终态/决策答复/需求确认）
+     * 实时推给在线前端，替代「状态变了要手动刷新」。离线时数据在库里，重开页面拉全量兜底。
+     */
+    @GetMapping(value = "/{id}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter projectEvents(@RequestAttribute(LoginUser.ATTR) LoginUser user,
+                                    @PathVariable String id) {
+        return projectEventBus.subscribe(id);
     }
 
     /**

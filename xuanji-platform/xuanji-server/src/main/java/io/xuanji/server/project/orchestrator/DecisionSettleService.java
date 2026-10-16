@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Map;
 
 /**
  * 决策答复闭环服务：决策落定（用户答复）后的确定性联动，两条答复链路共用——
@@ -55,10 +56,13 @@ public class DecisionSettleService {
 
     private final RequirementRepository requirementRepo;
     private final StageDocStore docStore;
+    private final ProjectEventBus projectEvents;
 
-    public DecisionSettleService(RequirementRepository requirementRepo, StageDocStore docStore) {
+    public DecisionSettleService(RequirementRepository requirementRepo, StageDocStore docStore,
+                                 ProjectEventBus projectEvents) {
         this.requirementRepo = requirementRepo;
         this.docStore = docStore;
+        this.projectEvents = projectEvents;
     }
 
     /**
@@ -72,6 +76,19 @@ public class DecisionSettleService {
     public List<String> settle(StageStep decisionStep, String answer, String answeredBy) {
         List<String> confirmed = confirmRequirements(decisionStep);
         writeDecisionDoc(decisionStep, answer, answeredBy, confirmed);
+        // 项目状态实时推送：决策闭环 + 需求确认，在线前端收到即刷新台账与需求看板
+        try {
+            projectEvents.publish(decisionStep.workspaceId(), "decision.answered", Map.of(
+                    "stage", decisionStep.stage(), "seq", decisionStep.seq(),
+                    "name", decisionStep.name(), "confirmed", confirmed));
+            if (!confirmed.isEmpty()) {
+                projectEvents.publish(decisionStep.workspaceId(), "requirement.updated", Map.of(
+                        "stage", decisionStep.stage(), "codes", confirmed, "action", "CONFIRMED"));
+            }
+        } catch (Exception e) {
+            log.warn("决策闭环事件推送失败（不影响落库）: ws={} -> {}",
+                    decisionStep.workspaceId(), e.getMessage());
+        }
         return confirmed;
     }
 
