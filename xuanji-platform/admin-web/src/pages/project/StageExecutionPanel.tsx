@@ -27,12 +27,14 @@ import { EXEC_STATE_COLOR, EXEC_STATE_LABEL, NODE_RUN_STATUS_COLOR, NODE_RUN_STA
 import { OutputBlock, MarkdownView } from './shared'
 import { StageSettingsModal } from './StageSettingsModal'
 
-export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChanged }: {
+export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChanged, onDecisionAnswered }: {
   projectId: string
   exec: StageExecution | null
   busy: boolean
   onRefresh: () => void
   onChanged: () => void
+  /** 决策答复成功后回调（seq+答复文本）：左侧对话自动发起续跑，用户不用再手动说「继续」 */
+  onDecisionAnswered?: (seq: number, answer: string) => void
 }) {
   const [gate, setGate] = useState<WaitingDecision | null>(null)
   const [decision, setDecision] = useState<'APPROVE' | 'REJECT' | 'SKIP'>('APPROVE')
@@ -175,9 +177,12 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
         seq: decisionStep.seq,
         answer: decisionAnswer.trim(),
       })
-      message.success('决策已答复，对话输入已解锁')
+      message.success('决策已答复，主控正在继续推进')
+      const answered = decisionStep
       setDecisionStep(null)
       onRefresh()
+      // 自动续跑：答复即触发主控下一轮（否则主控静等用户再发消息，表现为「决策后没反应」）
+      onDecisionAnswered?.(answered.seq, decisionAnswer.trim())
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e))
     } finally {

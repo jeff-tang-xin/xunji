@@ -128,6 +128,8 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [execBusy, setExecBusy] = useState(false)
 // 右栏受控 tab：对话内决策黄卡「去处理」按钮跳转到「阶段执行」
 const [rightTab, setRightTab] = useState('exec')
+// 决策答复后自动续跑：答复成功即让左侧对话自动发一条续跑消息（ts 变化触发一次）
+const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(null)
   const [artifactDrawer, setArtifactDrawer] = useState(false)
 
   const load = useCallback(async () => {
@@ -304,7 +306,7 @@ const [rightTab, setRightTab] = useState('exec')
               </Typography.Text>
             }
           >
-            <StageChatPanel projectId={id} exec={exec} onJumpExec={() => setRightTab('exec')} />
+            <StageChatPanel projectId={id} exec={exec} onJumpExec={() => setRightTab('exec')} autoSend={autoChat} />
           </Card>
         </Col>
 
@@ -331,6 +333,9 @@ const [rightTab, setRightTab] = useState('exec')
                     busy={execBusy}
                     onRefresh={() => void loadExec()}
                     onChanged={() => { void loadExec(); void load() }}
+                    onDecisionAnswered={(seq, answer) => {
+                      setAutoChat({ text: `决策 #${seq} 我已答复：${answer}\n请基于以上答复继续推进。`, ts: Date.now() })
+                    }}
                   />
                 ),
               },

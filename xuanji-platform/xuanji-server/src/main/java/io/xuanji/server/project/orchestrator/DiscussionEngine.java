@@ -93,13 +93,23 @@ public class DiscussionEngine {
                 step.participants(), rounds);
         List<String> history = new ArrayList<>();
         try {
+            // 进度行：讨论全程 10-20 分钟（qwen 每人 2-5 分钟），第一条发言落地前界面不能静默——
+            // 先落一行预期说明，让用户知道系统活着、要等多久（AI 过程可见化）
+            stepRepo.appendSpeech(step.id(),
+                    "⏱ 讨论开始：" + step.participants().size() + " 人并行发言（每人约 2-5 分钟），"
+                            + "发言逐条显示在这里，全部完成后自动汇总纪要（预计 10-20 分钟）。\n\n");
             // 第一轮：并行独立发言（互不可见）
             List<CompletableFuture<String>> firstRound = step.participants().stream()
                     .map(p -> CompletableFuture.supplyAsync(() -> speak(p, brief, step, ""), speakerPool))
                     .toList();
             for (int i = 0; i < firstRound.size(); i++) {
-                String speech = firstRound.get(i).get(SPEECH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 String speaker = step.participants().get(i);
+                // 进度行：谁还在发言中（并行起跑，逐个等完成——未完成的人保持「发言中」状态可见）
+                long pending = firstRound.stream().filter(f -> !f.isDone()).count();
+                if (pending > 0) {
+                    stepRepo.appendSpeech(step.id(), "▶ " + pending + " 人发言中…\n\n");
+                }
+                String speech = firstRound.get(i).get(SPEECH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 history.add("【" + speaker + "】" + speech);
                 // 逐条落库：讨论全程可能数分钟，轮询方实时看到已收集的发言（AI 过程可见化）
                 stepRepo.appendSpeech(step.id(), "【" + speaker + "】" + speech + "\n\n");
@@ -108,6 +118,7 @@ public class DiscussionEngine {
             // 后续轮：串行互见讨论
             for (int r = 0; r < rounds; r++) {
                 for (String p : step.participants()) {
+                    stepRepo.appendSpeech(step.id(), "▶ " + p + " 发言中…\n\n");
                     String seen = String.join("\n\n", history);
                     String speech = speak(p, brief, step, seen);
                     history.add("【" + p + "】" + speech);
@@ -116,6 +127,8 @@ public class DiscussionEngine {
             }
 
             // 收敛：汇总人读全部发言（与发言同款超时——invoke 是同步阻塞，无超时则模型 hang 会把讨论永远挂在 EXECUTING）
+            stepRepo.appendSpeech(step.id(),
+                    "⏱ 发言收集完毕（" + history.size() + " 条），正在汇总纪要…\n\n");
             String transcript = String.join("\n\n", history);
             AgentSpec sumSpec = agentNodes.buildSpecByAgentName(summarizer, null);
             java.util.concurrent.Future<String> sumFuture = speakerPool.submit(() -> invoker.invoke(sumSpec,

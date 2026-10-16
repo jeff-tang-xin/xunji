@@ -91,7 +91,13 @@ async function readSse(res: Response, onEvent: (event: string, data: string) => 
     }
   }
 }
-export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: string; exec?: StageExecution | null; onJumpExec?: () => void }) {
+export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
+  projectId: string
+  exec?: StageExecution | null
+  onJumpExec?: () => void
+  /** 外部触发的自动发送（如决策答复后续跑）：ts 变化即发送一次，不经过输入框 */
+  autoSend?: { text: string; ts: number } | null
+}) {
   const [msgs, setMsgs] = useState<StageChatMsg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -232,6 +238,29 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
       // 求助问答完成：问答全文进对话流
       if (s.stepType === 'CONSULT' && s.status === 'DONE' && before.status !== 'DONE') {
         if (full.trim()) processMsgs.push({ title: `求助问答 #${s.seq} ${s.name}`, text: renderSpeech(full) })
+      }
+      // 讨论/求助完成 → 自动续跑：主控发起后台讨论后 reply 已结束，完成后若不触发一轮，
+      // 主控会静等用户手动说「继续」（实测表现为「讨论完了没下文」）。ref 防重，与手动消息同链路。
+      const bgDone = (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT')
+        && (s.status === 'DONE' || s.status === 'FAILED') && before.status !== s.status
+        && !autoContinuedRef.current.has(s.id)
+      if (bgDone) {
+        autoContinuedRef.current.add(s.id)
+        const label = s.stepType === 'DISCUSS' ? '讨论' : '求助'
+        const q = {
+          id: nextId(),
+          text: s.status === 'DONE'
+            ? `${label} #${s.seq}「${s.name}」已完成，结论已留档。请基于以上结果继续推进。`
+            : `${label} #${s.seq}「${s.name}」执行失败（${(s.error || '原因未知').slice(0, 120)}）。请评估后重试或调整方案。`,
+          attachments: undefined,
+        }
+        setMsgs((x) => [...x, { id: q.id, type: 'queued' as const, text: q.text }])
+        if (!busyRef.current) {
+          void sendMsg(q)
+        } else {
+          queueRef.current.push(q)
+          setQueueLen(queueRef.current.length)
+        }
       }
     }
     prevStepsRef.current = next
@@ -556,6 +585,23 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
 
   /** 停止接收当前流（后台 agent 会跑完并留档） */
   const stop = () => abortRef.current?.abort()
+
+  // 外部触发的自动发送（决策答复后续跑）：ts 变化即发一次；busy 时进队列，与手动消息同链路
+  const autoTsRef = useRef(0)
+  /** 已自动续跑过的步骤 id：讨论/求助 DONE 只触发一次续跑 */
+  const autoContinuedRef = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    if (!autoSend || autoSend.ts === 0 || autoSend.ts === autoTsRef.current) return
+    autoTsRef.current = autoSend.ts
+    const q = { id: nextId(), text: autoSend.text, attachments: undefined }
+    setMsgs((x) => [...x, { id: q.id, type: 'queued' as const, text: q.text }])
+    if (!busyRef.current) {
+      void sendMsg(q)
+    } else {
+      queueRef.current.push(q)
+      setQueueLen(queueRef.current.length)
+    }
+  }, [autoSend])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
