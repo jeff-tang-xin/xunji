@@ -239,18 +239,25 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
       if (s.stepType === 'CONSULT' && s.status === 'DONE' && before.status !== 'DONE') {
         if (full.trim()) processMsgs.push({ title: `求助问答 #${s.seq} ${s.name}`, text: renderSpeech(full) })
       }
-      // 讨论/求助完成 → 自动续跑：主控发起后台讨论后 reply 已结束，完成后若不触发一轮，
-      // 主控会静等用户手动说「继续」（实测表现为「讨论完了没下文」）。ref 防重，与手动消息同链路。
-      const bgDone = (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT')
+      // 讨论/求助/任务完成 → 自动续跑：主控发起后台动作后 reply 已结束，完成后若不触发一轮，
+      // 主控会静等用户手动说「继续」（实测表现为「讨论完了没下文」；任务步同病——
+      // 主控承诺「等 #16 落板后我下一条汇报」但任务完成不唤醒主控，实测反馈）。
+      // 任务完成采用「批次收敛」唤醒：并行任务全部落板（无 EXECUTING）才触发一次，
+      // 主控醒来一次统一汇报推进——逐个唤醒会让主控连续多轮空转（每轮 qwen 1-3 分钟）。
+      // 任务失败立即唤醒（主控要尽快评估重试/换路，不等批次）。
+      // ref 防重，与手动消息同链路。DECISION 不在此列（答复端点有自己的续跑链路）。
+      const taskWake = s.stepType === 'TASK'
+        && (s.status === 'FAILED' || !steps.some((x) => x.id !== s.id && x.status === 'EXECUTING'))
+      const bgDone = (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT' || taskWake)
         && (s.status === 'DONE' || s.status === 'FAILED') && before.status !== s.status
         && !autoContinuedRef.current.has(s.id)
       if (bgDone) {
         autoContinuedRef.current.add(s.id)
-        const label = s.stepType === 'DISCUSS' ? '讨论' : '求助'
+        const label = s.stepType === 'DISCUSS' ? '讨论' : s.stepType === 'CONSULT' ? '求助' : '任务'
         const q = {
           id: nextId(),
           text: s.status === 'DONE'
-            ? `${label} #${s.seq}「${s.name}」已完成，结论已留档。请基于以上结果继续推进。`
+            ? `${label} #${s.seq}「${s.name}」已完成${s.stepType === 'TASK' && s.outputSummary ? `，产出：${s.outputSummary.slice(0, 80)}` : '，结论已留档'}。请基于以上结果继续推进。`
             : `${label} #${s.seq}「${s.name}」执行失败（${(s.error || '原因未知').slice(0, 120)}）。请评估后重试或调整方案。`,
           attachments: undefined,
         }
