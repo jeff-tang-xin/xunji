@@ -138,8 +138,8 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [execBusy, setExecBusy] = useState(false)
 // 右栏受控 tab：对话内决策黄卡「去处理」按钮跳转到「阶段执行」
 const [rightTab, setRightTab] = useState('exec')
-// 决策答复后自动续跑：答复成功即让左侧对话自动发一条续跑消息（ts 变化触发一次）
-const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(null)
+// 决策答复的前端自动续跑已下线：answer 端点置 DONE 后由后端 wakeMaster 直接唤醒主控
+//（答复内容进唤醒消息），前端经会话事件总线实时回显——与任务/讨论落板唤醒同一条后端链路。
   const [artifactDrawer, setArtifactDrawer] = useState(false)
 
   const load = useCallback(async () => {
@@ -316,7 +316,7 @@ const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(nu
               </Typography.Text>
             }
           >
-            <StageChatPanel projectId={id} exec={exec} onJumpExec={() => setRightTab('exec')} autoSend={autoChat} />
+            <StageChatPanel projectId={id} exec={exec} onJumpExec={() => setRightTab('exec')} />
           </Card>
         </Col>
 
@@ -343,9 +343,6 @@ const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(nu
                     busy={execBusy}
                     onRefresh={() => void loadExec()}
                     onChanged={() => { void loadExec(); void load() }}
-                    onDecisionAnswered={(seq, answer) => {
-                      setAutoChat({ text: `决策 #${seq} 我已答复：${answer}\n请基于以上答复继续推进。`, ts: Date.now() })
-                    }}
                   />
                 )),
               },

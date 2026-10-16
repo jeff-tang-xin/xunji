@@ -66,6 +66,8 @@ export interface StageChatMsg {
   title?: string
   /** confirm 消息的授权数据 */
   confirmData?: ConfirmCardData
+  /** 系统唤醒轮的 agent 回复（后端自动续跑，非用户输入触发）——渲染带「系统唤醒」标识 */
+  systemWake?: boolean
 }
 
 async function readSse(res: Response, onEvent: (event: string, data: string) => void) {
@@ -91,12 +93,10 @@ async function readSse(res: Response, onEvent: (event: string, data: string) => 
     }
   }
 }
-export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
+export function StageChatPanel({ projectId, exec, onJumpExec }: {
   projectId: string
   exec?: StageExecution | null
   onJumpExec?: () => void
-  /** 外部触发的自动发送（如决策答复后续跑）：ts 变化即发送一次，不经过输入框 */
-  autoSend?: { text: string; ts: number } | null
 }) {
   const [msgs, setMsgs] = useState<StageChatMsg[]>([])
   const [input, setInput] = useState('')
@@ -171,6 +171,47 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
   // 过程内容可见化（讨论发言/求助问答）：跟踪 outputFull 长度增量，新发言/新问答以
   // process 卡片进对话流——用户在聊天框直接看到 agent 们在说什么、问了什么，不用切去执行 tab。
   const prevStepsRef = useRef<Map<number, { status: string; fullLen: number }>>(new Map())
+
+  // 打字机效果：流式 delta 先进缓冲，定时器逐字上屏——LLM 生成速度不均（有时一大段一起到），
+  // 直接 append 会一坨一坨地蹦；打字机让正文平滑输出。自适应步长：落后越多打字越快，保证追平不积压。
+  const typeQueueRef = useRef<Map<number, { full: string; shown: number; done: boolean }>>(new Map())
+  const typeTimerRef = useRef<number | null>(null)
+  const ensureTypeTimer = () => {
+    if (typeTimerRef.current != null) return
+    typeTimerRef.current = window.setInterval(() => {
+      const q = typeQueueRef.current
+      if (q.size === 0) {
+        window.clearInterval(typeTimerRef.current!)
+        typeTimerRef.current = null
+        return
+      }
+      for (const [id, e] of q) {
+        e.shown = Math.min(e.full.length, e.shown + Math.max(2, Math.ceil((e.full.length - e.shown) / 12)))
+        setMsgs((x) => x.map((m) => (m.id === id ? { ...m, text: e.full.slice(0, e.shown) } : m)))
+        if (e.done && e.shown >= e.full.length) q.delete(id)
+      }
+    }, 30)
+  }
+  /** delta 进缓冲（消息首次出现即建缓冲条目） */
+  const queueDelta = (id: number, delta: string) => {
+    const e = typeQueueRef.current.get(id)
+    if (e) e.full += delta
+    else typeQueueRef.current.set(id, { full: delta, shown: 0, done: false })
+    ensureTypeTimer()
+  }
+  /** 整段兜底（agent.result）：替换缓冲全文并标记完成——result 是权威全文，shown 保留进度不重打 */
+  const queueFull = (id: number, full: string) => {
+    const e = typeQueueRef.current.get(id)
+    if (e) { e.full = full; e.done = true }
+    else typeQueueRef.current.set(id, { full, shown: 0, done: true })
+    ensureTypeTimer()
+  }
+  /** 流结束：标记完成，定时器把剩余缓冲排空后自动清理 */
+  const finishQueue = (id: number) => {
+    const e = typeQueueRef.current.get(id)
+    if (e) e.done = true
+    ensureTypeTimer()
+  }
   /** process 卡片展开状态（默认收起，只显示开头一段） */
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const toggleExpanded = (id: number) => {
@@ -239,36 +280,9 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
       if (s.stepType === 'CONSULT' && s.status === 'DONE' && before.status !== 'DONE') {
         if (full.trim()) processMsgs.push({ title: `求助问答 #${s.seq} ${s.name}`, text: renderSpeech(full) })
       }
-      // 讨论/求助/任务完成 → 自动续跑：主控发起后台动作后 reply 已结束，完成后若不触发一轮，
-      // 主控会静等用户手动说「继续」（实测表现为「讨论完了没下文」；任务步同病——
-      // 主控承诺「等 #16 落板后我下一条汇报」但任务完成不唤醒主控，实测反馈）。
-      // 任务完成采用「批次收敛」唤醒：并行任务全部落板（无 EXECUTING）才触发一次，
-      // 主控醒来一次统一汇报推进——逐个唤醒会让主控连续多轮空转（每轮 qwen 1-3 分钟）。
-      // 任务失败立即唤醒（主控要尽快评估重试/换路，不等批次）。
-      // ref 防重，与手动消息同链路。DECISION 不在此列（答复端点有自己的续跑链路）。
-      const taskWake = s.stepType === 'TASK'
-        && (s.status === 'FAILED' || !steps.some((x) => x.id !== s.id && x.status === 'EXECUTING'))
-      const bgDone = (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT' || taskWake)
-        && (s.status === 'DONE' || s.status === 'FAILED') && before.status !== s.status
-        && !autoContinuedRef.current.has(s.id)
-      if (bgDone) {
-        autoContinuedRef.current.add(s.id)
-        const label = s.stepType === 'DISCUSS' ? '讨论' : s.stepType === 'CONSULT' ? '求助' : '任务'
-        const q = {
-          id: nextId(),
-          text: s.status === 'DONE'
-            ? `${label} #${s.seq}「${s.name}」已完成${s.stepType === 'TASK' && s.outputSummary ? `，产出：${s.outputSummary.slice(0, 80)}` : '，结论已留档'}。请基于以上结果继续推进。`
-            : `${label} #${s.seq}「${s.name}」执行失败（${(s.error || '原因未知').slice(0, 120)}）。请评估后重试或调整方案。`,
-          attachments: undefined,
-        }
-        setMsgs((x) => [...x, { id: q.id, type: 'queued' as const, text: q.text }])
-        if (!busyRef.current) {
-          void sendMsg(q)
-        } else {
-          queueRef.current.push(q)
-          setQueueLen(queueRef.current.length)
-        }
-      }
+      // 讨论/求助/任务完成的前端自动续跑已下线：后端统一唤醒（StageOrchestrator.wakeIfSettled，
+      // 批次收敛 + 系统身份无头轮）——后端是运行唯一真相，前端续跑依赖页面开着且与后端双触发。
+      // 前端经会话事件总线（下方 effect）实时回显后端唤醒轮。
     }
     prevStepsRef.current = next
     if (events.length > 0 || processMsgs.length > 0) {
@@ -303,11 +317,15 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
       if (!alive) return
       const hist = (r?.messages || [])
         .filter((m) => (m.text || '').trim())
-        .map((m) => ({
-          id: nextId(),
-          type: (m.role === 'USER' ? 'user' : 'agent') as 'user' | 'agent',
-          text: m.text || '',
-        }))
+        .map((m) => {
+          const raw = m.text || ''
+          // [系统唤醒] 前缀 = 后端自动续跑轮的触发消息（agent_state 里 role=USER）——
+          // 回放渲染成系统提示条，与用户手打输入区分
+          if (m.role === 'USER' && raw.startsWith('[系统唤醒]')) {
+            return { id: nextId(), type: 'system' as const, text: `⚙ 系统唤醒：${raw.replace(/^\[系统唤醒\]\s*/, '').split('\n')[0]}` }
+          }
+          return { id: nextId(), type: (m.role === 'USER' ? 'user' : 'agent') as 'user' | 'agent', text: raw }
+        })
       // 过程留档回放：讨论发言与求助问答落在 project_stage_step（不在 agent_state 会话），
       // 单独拉 stage-execution 补齐——刷新后聊天框仍能看到 agent 们讨论了什么、问了什么
       apiJson<{ steps?: StageStepRow[] }>(`/api/projects/${projectId}/stage-execution`)
@@ -348,6 +366,71 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
     }).catch(() => { /* 历史取不到不打断对话主流程 */ })
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, chatStage, chatIteration])
+
+  // 后端系统唤醒轮的实时回显：常驻订阅会话事件总线（fetch 流，token 走 Authorization header，
+  // EventSource 带不了）。后端是运行唯一真相——任务/讨论落板、决策答复后主控自动续跑（无头轮），
+  // 事件经总线推给在线前端；离线时落 agent_state，回放兜底。断线 3s 重连。
+  useEffect(() => {
+    if (!chatStage) return
+    let alive = true
+    let timer: number | null = null
+    const busAgent = { id: 0 }
+    const busProc = { id: 0 }
+    const busToolLines: string[] = []
+    const wait = (ms: number) => new Promise<void>((res) => { timer = window.setTimeout(res, ms) })
+    const connect = async () => {
+      while (alive) {
+        try {
+          const r = await apiFetch(`/api/projects/${projectId}/stage/chat/events?stage=${chatStage}&iteration=${chatIteration}`)
+          if (!r.ok || !r.body) { await wait(3000); continue }
+          await readSse(r, (event, data) => {
+            if (!alive) return
+            let payload: Record<string, unknown> = {}
+            try { payload = JSON.parse(data) } catch { /* 忽略非 JSON 帧 */ }
+            if (event === 'system.wake') {
+              // 系统唤醒提示条：告知用户这一轮是系统自动触发（区别于用户输入）
+              busAgent.id = 0
+              busProc.id = 0
+              busToolLines.length = 0
+              setMsgs((x) => [...x, { id: nextId(), type: 'system', text: `⚙ 系统唤醒：${String(payload.reason || '后台任务已落板，主控继续推进')}` }])
+            } else if (event === 'agent.start') {
+              const id = nextId()
+              busAgent.id = id
+              setMsgs((x) => [...x, { id, type: 'agent', text: '', streaming: true, systemWake: true, phaseText: '🤔 主控继续推进中…' }])
+            } else if (event === 'agent.delta' && busAgent.id && typeof payload.delta === 'string') {
+              queueDelta(busAgent.id, payload.delta)
+              setMsgs((x) => x.map((m) => (m.id === busAgent.id ? { ...m, phaseText: undefined } : m)))
+            } else if (event === 'agent.result' && busAgent.id && typeof payload.text === 'string') {
+              if (!typeQueueRef.current.has(busAgent.id)) queueFull(busAgent.id, payload.text)
+            } else if (event === 'tool.call' && busAgent.id) {
+              const tool = String(payload.tool || '')
+              busToolLines.push(`🔧 ${tool} 执行中…`)
+              if (!busProc.id) {
+                busProc.id = nextId()
+                setMsgs((x) => [...x, { id: busProc.id, type: 'process', title: '🔧 工具执行（系统唤醒轮）', text: busToolLines.join('\n') }])
+              } else {
+                setMsgs((x) => x.map((m) => (m.id === busProc.id ? { ...m, text: busToolLines.join('\n') } : m)))
+              }
+            } else if (event === 'tool.result' && busAgent.id) {
+              const tool = String(payload.tool || '')
+              const ok = payload.state !== 'ERROR'
+              const line = `${ok ? '✅' : '❌'} ${tool} ${ok ? '完成' : '失败'}`
+              const idx = busToolLines.lastIndexOf(`🔧 ${tool} 执行中…`)
+              if (idx >= 0) busToolLines[idx] = line
+              else busToolLines.push(line)
+              if (busProc.id) setMsgs((x) => x.map((m) => (m.id === busProc.id ? { ...m, text: busToolLines.join('\n') } : m)))
+            } else if (event === 'stage.finish' && busAgent.id) {
+              finishQueue(busAgent.id)
+              setMsgs((x) => x.map((m) => (m.id === busAgent.id ? { ...m, streaming: false, phaseText: undefined } : m)))
+            }
+          })
+        } catch { /* 断线重连 */ }
+        if (alive) await wait(3000)
+      }
+    }
+    void connect()
+    return () => { alive = false; if (timer != null) window.clearTimeout(timer) }
   }, [projectId, chatStage, chatIteration])
 
   // 新内容自动滚到底：流式回答时不滚的话用户要自己拖着看
@@ -478,9 +561,10 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
         let payload: Record<string, unknown> = {}
         try { payload = JSON.parse(data) } catch { /* 忽略非 JSON 帧 */ }
         if (event === 'agent.start') {
+          // 不设占位文本：正文完全由打字机队列驱动（占位与 delta 混排是旧瑕疵），等待期由 phaseText 提示
           const who = String(payload.agent || 'agent')
           setMsgs((x) => x.map((m) => (m.id === agentMsgId
-            ? { ...m, text: m.text || `（${who} 正在处理…）` } : m)))
+            ? { ...m, phaseText: `🤔 ${who} 处理中…` } : m)))
         } else if (event === 'llm.start') {
           // 每轮 LLM 调用开始（qwen 生成 tool_call 参数期间无文本 delta，靠这个让用户知道 AI 在思考）
           setMsgs((x) => x.map((m) => (m.id === agentMsgId
@@ -491,13 +575,13 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
             ? { ...m, thinking: (m.thinking || '') + th, phaseText: '🤔 思考中…' } : m)))
         } else if (event === 'agent.delta' && typeof payload.delta === 'string') {
           const delta = payload.delta
+          queueDelta(agentMsgId, delta)
           setMsgs((x) => x.map((m) => (m.id === agentMsgId
-            ? { ...m, text: (m.text || '') + delta, phaseText: undefined } : m)))
+            ? { ...m, phaseText: undefined } : m)))
         } else if (event === 'agent.result' && typeof payload.text === 'string') {
           // 只有还没流式出正文时才用整段结果兜底，否则会把已流出的内容重复一遍
           const full = payload.text
-          setMsgs((x) => x.map((m) => (m.id === agentMsgId && (!m.text || m.text.startsWith('（'))
-            ? { ...m, text: full } : m)))
+          if (!typeQueueRef.current.has(agentMsgId)) queueFull(agentMsgId, full)
         } else if (event === 'tool.call') {
           const tool = String(payload.tool || '')
           pushToolLine(`🔧 ${tool} 执行中…`)
@@ -532,6 +616,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
         } else if (event === 'agent.end' || event === 'stage.finish') {
           receivedEnd = true
           window.clearInterval(tickTimer)
+          finishQueue(agentMsgId)
           setMsgs((x) => x.map((m) => (m.id === agentMsgId ? { ...m, streaming: false, phaseText: undefined } : m)))
         } else if (event === 'error') {
           setMsgs((x) => [...x, {
@@ -542,9 +627,12 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
       if (!receivedEnd) {
         // 流结束但没收到 end 帧：SSE 超时/网络中断——后台任务会继续跑完并留档，别让占位永远挂着
         window.clearInterval(tickTimer)
+        finishQueue(agentMsgId)
         setMsgs((x) => x.map((m) => (m.id === agentMsgId
-          ? { ...m, streaming: false, phaseText: undefined,
-              text: (m.text || '') + '\n\n（⚠ 连接中断——后台任务会继续执行并留档，稍后刷新页面查看结果）' } : m)))
+          ? { ...m, streaming: false, phaseText: undefined } : m)))
+        // 中断提示延迟到打字机排空后追加（直接改 text 会和打字机队列互相覆盖）
+        window.setTimeout(() => setMsgs((x) => x.map((m) => (m.id === agentMsgId
+          ? { ...m, text: (m.text || '') + '\n\n（⚠ 连接中断——后台任务会继续执行并留档，稍后刷新页面查看结果）' } : m))), 600)
       }
     } catch (e) {
       if (ac.signal.aborted) {
@@ -611,22 +699,8 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
   /** 停止接收当前流（后台 agent 会跑完并留档） */
   const stop = () => abortRef.current?.abort()
 
-  // 外部触发的自动发送（决策答复后续跑）：ts 变化即发一次；busy 时进队列，与手动消息同链路
-  const autoTsRef = useRef(0)
-  /** 已自动续跑过的步骤 id：讨论/求助 DONE 只触发一次续跑 */
-  const autoContinuedRef = useRef<Set<number>>(new Set())
-  useEffect(() => {
-    if (!autoSend || autoSend.ts === 0 || autoSend.ts === autoTsRef.current) return
-    autoTsRef.current = autoSend.ts
-    const q = { id: nextId(), text: autoSend.text, attachments: undefined }
-    setMsgs((x) => [...x, { id: q.id, type: 'queued' as const, text: q.text }])
-    if (!busyRef.current) {
-      void sendMsg(q)
-    } else {
-      queueRef.current.push(q)
-      setQueueLen(queueRef.current.length)
-    }
-  }, [autoSend])
+  // 决策答复的前端自动续跑已下线：answer 端点置 DONE 后由后端 wakeMaster 直接唤醒主控
+  //（答复内容进唤醒消息），事件经总线回显——与任务/讨论落板唤醒同一条后端链路。
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -781,12 +855,17 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
                   whiteSpace: 'pre-wrap',
                   wordBreak: 'break-word',
                   textAlign: 'left',
-                  background: m.type === 'user' ? '#1677ff' : m.type === 'error' ? '#fff2f0' : m.type === 'queued' ? '#f6f6f6' : m.type === 'system' ? 'transparent' : '#fff',
+                  background: m.type === 'user' ? '#1677ff' : m.type === 'error' ? '#fff2f0' : m.type === 'queued' ? '#f6f6f6' : m.type === 'system' ? 'transparent' : m.systemWake ? '#f6f6f6' : '#fff',
                   color: m.type === 'user' ? '#fff' : m.type === 'system' ? '#8c8c8c' : undefined,
-                  border: m.type === 'user' ? 'none' : `1px solid ${m.type === 'error' ? '#ffccc7' : m.type === 'queued' ? '#e8e8e8' : '#f0f0f0'}`,
+                  border: m.type === 'user' ? 'none' : `1px solid ${m.type === 'error' ? '#ffccc7' : m.type === 'queued' ? '#e8e8e8' : m.systemWake ? '#d9d9d9' : '#f0f0f0'}`,
                   opacity: m.type === 'queued' ? 0.75 : 1,
                 }}
               >
+                {m.systemWake && (
+                  <div style={{ marginBottom: 2 }}>
+                    <Tag color="default" style={{ marginRight: 0, fontSize: 12, lineHeight: '16px' }}>⚙ 系统唤醒轮</Tag>
+                  </div>
+                )}
                 {m.type === 'queued' && (
                   <Space size={4} style={{ marginBottom: 2 }}>
                     <Tag color="default" style={{ marginRight: 0, fontSize: 12, lineHeight: '16px' }}>待发送</Tag>

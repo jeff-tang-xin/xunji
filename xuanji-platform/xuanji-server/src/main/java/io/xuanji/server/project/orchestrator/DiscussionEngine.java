@@ -51,6 +51,7 @@ public class DiscussionEngine {
     private final AgentNodeExecutor agentNodes;
     private final StageStepRepository stepRepo;
     private final StageDocStore docStore;
+    private final StageOrchestrator orchestrator;
 
     /** 发言线程池：第一轮并行度 = 参与者数（cached 池按需扩）。 */
     private final ExecutorService speakerPool = Executors.newCachedThreadPool(r -> {
@@ -67,11 +68,13 @@ public class DiscussionEngine {
     });
 
     public DiscussionEngine(AgentInvoker invoker, AgentNodeExecutor agentNodes,
-                            StageStepRepository stepRepo, StageDocStore docStore) {
+                            StageStepRepository stepRepo, StageDocStore docStore,
+                            @org.springframework.context.annotation.Lazy StageOrchestrator orchestrator) {
         this.invoker = invoker;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
         this.docStore = docStore;
+        this.orchestrator = orchestrator;
     }
 
     /**
@@ -173,6 +176,9 @@ public class DiscussionEngine {
             docStore.write(step.workspaceId(), step.stage(), step.iteration(), "DISCUSS",
                     step.seq(), step.name(), full, summarizer);
             log.info("讨论完成: ws={} seq={} 发言 {} 条", step.workspaceId(), step.seq(), history.size());
+            // 批次收敛唤醒：讨论落板后若无其他执行中步骤，后端直接唤醒主控消化纪要继续推进
+            orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
+                    "讨论 #" + step.seq() + "「" + step.name() + "」已完成，纪要已留档。请消化共识后继续推进。");
         } catch (Exception e) {
             String msg = TaskRunner.rootMessage(e);
             // withError 会用内存里的 outputFull(null) 覆盖库里的已收发言（appendSpeech 落的），
@@ -183,6 +189,9 @@ public class DiscussionEngine {
                         "===== 中断前已收到 " + history.size() + " 条发言 =====\n" + String.join("\n\n", history) + "\n");
             }
             log.warn("讨论失败: ws={} seq={} -> {}", step.workspaceId(), step.seq(), msg);
+            // 失败立即唤醒（不等批次）：主控要尽快评估重试或收窄议题
+            orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
+                    "讨论 #" + step.seq() + "「" + step.name() + "」执行失败（" + msg + "）。请评估后重试或收窄议题。");
         }
     }
 

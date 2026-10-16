@@ -59,9 +59,14 @@ public class StageOrchestrator {
     private final RequirementRepository requirementRepo;
     private final PeerConsultService peerConsult;
     private final StageDocStore docStore;
+    private final StageChatEventBus eventBus;
 
     /** SSE 会话执行池：虚拟线程（JDK21），阻塞 IO 型任务不占平台线程，并发对话不再互相排队。 */
     private final ExecutorService chatExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+    /** 系统唤醒防重闸：会话键 → 唤醒中。两个任务几乎同时落板时只放行一个唤醒（putIfAbsent 原子认领）。 */
+    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> wakeGuard =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public StageOrchestrator(AgentRuntime runtime, AgentNodeExecutor agentNodes,
                              StageStepRepository stepRepo, TaskRunner taskRunner,
@@ -69,7 +74,8 @@ public class StageOrchestrator {
                              io.xuanji.server.repository.ProjectRepository projectRepo,
                              WorkspaceRepository workspaceRepo, StageAdvancer advancer,
                              ObjectMapper objectMapper, RequirementRepository requirementRepo,
-                             PeerConsultService peerConsult, StageDocStore docStore) {
+                             PeerConsultService peerConsult, StageDocStore docStore,
+                             StageChatEventBus eventBus) {
         this.runtime = runtime;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
@@ -82,6 +88,7 @@ public class StageOrchestrator {
         this.requirementRepo = requirementRepo;
         this.peerConsult = peerConsult;
         this.docStore = docStore;
+        this.eventBus = eventBus;
     }
 
     /**
@@ -115,65 +122,158 @@ public class StageOrchestrator {
         // 15 分钟：qwen 长流程（规划+多工具+长回复）实测 165s~600s+，300s 会把还在跑的对话掐断，
         // 前端只看到流静默断开、占位永远挂着
         SseEmitter emitter = new SseEmitter(900_000L);
-        chatExecutor.submit(() -> {
-            // 过程留档累积：思考全文 / 工具调用序列 / 最终回复——流结束后落 docs/{stage}/iter{n}/，
-            // 历史回放可查（agent_state 只存对话正文，思考与工具轨迹只在这里有）
-            StringBuilder thinkingBuf = new StringBuilder();
-            StringBuilder replyBuf = new StringBuilder();
-            List<String[]> toolRows = new java.util.ArrayList<>(); // {tool, state}
-            String[] replyFromResult = {null};
-            try {
-                send(emitter, "agent.start", Map.of("agent", spec.name()));
-                runtime.stream(runtime.createAgent(spec), new AgentMessage(query, null, null), evt -> {
-                    Map<String, Object> payload = payloadOf(evt);
-                    String type = evt.type();
-                    if ("thinking.delta".equals(type)) {
-                        Object d = payload.get("delta");
-                        if (d != null) {
-                            thinkingBuf.append(d);
-                        }
-                    } else if ("agent.delta".equals(type)) {
-                        Object d = payload.get("delta");
-                        if (d != null) {
-                            replyBuf.append(d);
-                        }
-                    } else if ("agent.result".equals(type)) {
-                        Object txt = payload.get("text");
-                        if (txt != null && !String.valueOf(txt).isBlank()) {
-                            replyFromResult[0] = String.valueOf(txt);
-                        }
-                    } else if ("tool.call".equals(type)) {
-                        toolRows.add(new String[]{String.valueOf(payload.getOrDefault("tool", "?")), "执行中"});
-                    } else if ("tool.result".equals(type)) {
-                        String tool = String.valueOf(payload.getOrDefault("tool", "?"));
-                        String state = String.valueOf(payload.getOrDefault("state", "DONE"));
-                        for (int i = toolRows.size() - 1; i >= 0; i--) {
-                            if (toolRows.get(i)[0].equals(tool) && "执行中".equals(toolRows.get(i)[1])) {
-                                toolRows.get(i)[1] = state;
-                                break;
-                            }
+        chatExecutor.submit(() -> runMasterTurn(spec, wsId, stage, iteration, masterAgent, query, emitter, false, null));
+        return emitter;
+    }
+
+    /**
+     * 主控单轮执行核心（前端发起轮与系统唤醒轮共用）。
+     *
+     * @param direct     请求级 SSE（前端发起轮）；null=无头轮（系统唤醒）
+     * @param systemWake 无头轮标志：事件发会话总线（前端常驻订阅实时回显），并先发 system.wake
+     */
+    private void runMasterTurn(AgentSpec spec, String wsId, String stage, int iteration, String masterAgent,
+                               String query, SseEmitter direct, boolean systemWake, String wakeReason) {
+        String busKey = StageChatEventBus.key(wsId, stage, iteration);
+        // 过程留档累积：思考全文 / 工具调用序列 / 最终回复——流结束后落 docs/{stage}/iter{n}/，
+        // 历史回放可查（agent_state 只存对话正文，思考与工具轨迹只在这里有）
+        StringBuilder thinkingBuf = new StringBuilder();
+        StringBuilder replyBuf = new StringBuilder();
+        List<String[]> toolRows = new java.util.ArrayList<>(); // {tool, state}
+        String[] replyFromResult = {null};
+        try {
+            if (systemWake) {
+                eventBus.publish(busKey, "system.wake", Map.of("reason", String.valueOf(wakeReason)));
+            }
+            sendOrPublish(direct, busKey, systemWake, "agent.start", Map.of("agent", spec.name()));
+            runtime.stream(runtime.createAgent(spec), new AgentMessage(query, null, null), evt -> {
+                Map<String, Object> payload = payloadOf(evt);
+                String type = evt.type();
+                if ("thinking.delta".equals(type)) {
+                    Object d = payload.get("delta");
+                    if (d != null) {
+                        thinkingBuf.append(d);
+                    }
+                } else if ("agent.delta".equals(type)) {
+                    Object d = payload.get("delta");
+                    if (d != null) {
+                        replyBuf.append(d);
+                    }
+                } else if ("agent.result".equals(type)) {
+                    Object txt = payload.get("text");
+                    if (txt != null && !String.valueOf(txt).isBlank()) {
+                        replyFromResult[0] = String.valueOf(txt);
+                    }
+                } else if ("tool.call".equals(type)) {
+                    toolRows.add(new String[]{String.valueOf(payload.getOrDefault("tool", "?")), "执行中"});
+                } else if ("tool.result".equals(type)) {
+                    String tool = String.valueOf(payload.getOrDefault("tool", "?"));
+                    String state = String.valueOf(payload.getOrDefault("state", "DONE"));
+                    for (int i = toolRows.size() - 1; i >= 0; i--) {
+                        if (toolRows.get(i)[0].equals(tool) && "执行中".equals(toolRows.get(i)[1])) {
+                            toolRows.get(i)[1] = state;
+                            break;
                         }
                     }
-                    send(emitter, type, payload);
-                });
-                saveChatLog(wsId, stage, iteration, masterAgent, query, thinkingBuf.toString(),
-                        toolRows, replyFromResult[0] != null ? replyFromResult[0] : replyBuf.toString());
-                send(emitter, "stage.finish", Map.of("status", "SUCCESS"));
-                emitter.complete();
-                log.info("orchestrator chat finished: ws={} stage={} agent={}", wsId, stage, masterAgent);
-            } catch (Exception e) {
-                log.warn("orchestrator chat failed: ws={} stage={} -> {}", wsId, stage, e.getMessage());
-                saveChatLog(wsId, stage, iteration, masterAgent, query, thinkingBuf.toString(),
-                        toolRows, replyFromResult[0] != null ? replyFromResult[0] : replyBuf.toString());
-                try {
-                    send(emitter, "stage.finish", Map.of("status", "FAILED", "error", String.valueOf(e.getMessage())));
-                    emitter.complete();
-                } catch (Exception ignore) {
-                    emitter.completeWithError(e);
+                }
+                sendOrPublish(direct, busKey, systemWake, type, payload);
+            });
+            saveChatLog(wsId, stage, iteration, masterAgent, query, thinkingBuf.toString(),
+                    toolRows, replyFromResult[0] != null ? replyFromResult[0] : replyBuf.toString());
+            sendOrPublish(direct, busKey, systemWake, "stage.finish", Map.of("status", "SUCCESS"));
+            if (direct != null) {
+                direct.complete();
+            }
+            log.info("orchestrator chat finished: ws={} stage={} agent={} systemWake={}", wsId, stage, masterAgent, systemWake);
+        } catch (Exception e) {
+            log.warn("orchestrator chat failed: ws={} stage={} -> {}", wsId, stage, e.getMessage());
+            saveChatLog(wsId, stage, iteration, masterAgent, query, thinkingBuf.toString(),
+                    toolRows, replyFromResult[0] != null ? replyFromResult[0] : replyBuf.toString());
+            try {
+                sendOrPublish(direct, busKey, systemWake, "stage.finish",
+                        Map.of("status", "FAILED", "error", String.valueOf(e.getMessage())));
+                if (direct != null) {
+                    direct.complete();
+                }
+            } catch (Exception ignore) {
+                if (direct != null) {
+                    direct.completeWithError(e);
                 }
             }
-        });
-        return emitter;
+        }
+    }
+
+    /** 事件出口：前端发起轮走请求级 SSE（不进总线，避免同轮事件双路重复渲染）；系统唤醒轮走总线。 */
+    private void sendOrPublish(SseEmitter direct, String busKey, boolean systemWake, String event, Object payload) {
+        if (direct != null) {
+            send(direct, event, payload);
+        } else if (systemWake) {
+            eventBus.publish(busKey, event, payload);
+        }
+    }
+
+    /**
+     * 批次收敛唤醒：步骤落终态后由执行器（TaskRunner/DiscussionEngine）调用——
+     * 该会话已无 EXECUTING 步骤时唤醒主控继续推进。后端是运行唯一真相：
+     * 唤醒不依赖前端在线；回复落 agent_state，前端在线经总线实时回显，离线回放兜底。
+     */
+    public void wakeIfSettled(String wsId, String stage, int iteration, String reason) {
+        try {
+            boolean anyExecuting = stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .anyMatch(s -> s.status() == StepStatus.EXECUTING);
+            if (anyExecuting) {
+                log.info("唤醒跳过（仍有执行中步骤，等最后一个落板时唤醒）: ws={} {}#{} reason={}",
+                        wsId, stage, iteration, reason);
+                return;
+            }
+            wakeMaster(wsId, stage, iteration, reason);
+        } catch (Exception e) {
+            log.warn("系统唤醒检查失败: ws={} {}#{} -> {}", wsId, stage, iteration, e.getMessage());
+        }
+    }
+
+    /**
+     * 系统唤醒主控一轮（无头模式）：以项目创建人身份构造系统消息（[系统唤醒] 前缀，
+     * agent_state 回放可识别、前端渲染成系统样式区别用户输入）；事件发总线实时回显。
+     * wakeGuard 原子认领防双唤醒（两个任务几乎同时落板只放行一个）。
+     */
+    private void wakeMaster(String wsId, String stage, int iteration, String reason) {
+        String busKey = StageChatEventBus.key(wsId, stage, iteration);
+        if (wakeGuard.putIfAbsent(busKey, Boolean.TRUE) != null) {
+            log.info("唤醒去重（该会话已有唤醒在跑）: key={} reason={}", busKey, reason);
+            return;
+        }
+        try {
+            Map<String, Object> ws = workspaceRepo.findById(wsId).stream().findFirst()
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "项目不存在"));
+            String owner = ws.get("created_by") == null || String.valueOf(ws.get("created_by")).isBlank()
+                    ? "admin" : String.valueOf(ws.get("created_by"));
+            // 系统身份：OrchestrationTools 只消费 username（需求登记创建人），其余字段按无权限主体构造
+            LoginUser system = new LoginUser(null, owner, owner, null, false, false, "ALL", java.util.Set.of());
+            String masterAgent = masterAgentOf(wsId, stage);
+            String sessionId = io.xuanji.server.project.StageChatKeys.stageSession(wsId, stage, iteration);
+            String projectGoal = str(ws.get("description"));
+            String stageGoal = stageGoalOf(stage);
+            String guidance = guidance(stageGoal, wsId, stage, iteration);
+
+            OrchestrationTools tools = new OrchestrationTools(system, wsId, stage, iteration,
+                    projectGoal, stageGoal, stepRepo, taskRunner, discussionEngine,
+                    projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult);
+            AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance, wsId);
+            AgentSpec spec = withTools(base, tools.toolDefs());
+            String query = "[系统唤醒] " + reason + "\n请基于以上情况继续推进。";
+            chatExecutor.submit(() -> {
+                try {
+                    runMasterTurn(spec, wsId, stage, iteration, masterAgent, query, null, true, reason);
+                } finally {
+                    wakeGuard.remove(busKey);
+                }
+            });
+            log.info("系统唤醒已提交: ws={} {}#{} agent={} reason={}", wsId, stage, iteration, masterAgent, reason);
+        } catch (Exception e) {
+            wakeGuard.remove(busKey);
+            log.warn("系统唤醒组装失败: ws={} {}#{} -> {}", wsId, stage, iteration, e.getMessage());
+        }
     }
 
     /**
@@ -238,6 +338,11 @@ public class StageOrchestrator {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该决策已处理（" + found.status() + "），无需重复答复");
         }
         stepRepo.updateStatus(found.withAnswer(answer));
+        // 决策答复即唤醒：答复内容直接进唤醒消息（不依赖主控主动查台账），主控立即继续推进。
+        // 后端是运行唯一真相——唤醒不依赖前端在线，前端经总线实时回显。
+        String stage = currentStageOf(wsId);
+        wakeMaster(wsId, stage, currentIteration(wsId, stage),
+                "决策 #" + seq + "「" + found.name() + "」已答复：" + answer);
         return Map.of("ok", true, "seq", seq, "message", "决策已答复并留档");
     }
 

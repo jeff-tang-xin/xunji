@@ -34,18 +34,21 @@ public class ProjectController {
     private final io.xuanji.server.project.orchestrator.StageOrchestrator orchestrator;
     private final io.xuanji.core.runtime.AgentRuntime agentRuntime;
     private final io.xuanji.server.engine.ToolApprovalStore toolApprovals;
+    private final io.xuanji.server.project.orchestrator.StageChatEventBus chatEventBus;
 
     public ProjectController(ProjectService projects, ProjectChatService projectChat,
                              ProjectTemplateService templates,
                              io.xuanji.server.project.orchestrator.StageOrchestrator orchestrator,
                              io.xuanji.core.runtime.AgentRuntime agentRuntime,
-                             io.xuanji.server.engine.ToolApprovalStore toolApprovals) {
+                             io.xuanji.server.engine.ToolApprovalStore toolApprovals,
+                             io.xuanji.server.project.orchestrator.StageChatEventBus chatEventBus) {
         this.projects = projects;
         this.projectChat = projectChat;
         this.templates = templates;
         this.orchestrator = orchestrator;
         this.agentRuntime = agentRuntime;
         this.toolApprovals = toolApprovals;
+        this.chatEventBus = chatEventBus;
     }
 
     /** 项目列表（数据权限过滤，仅 PROJECT 类型）。 */
@@ -303,6 +306,19 @@ public class ProjectController {
                                @PathVariable String id,
                                @RequestBody(required = false) Map<String, Object> body) {
         return projectChat.chatByStage(user, id, body);
+    }
+
+    /**
+     * 阶段对话事件总线订阅（SSE 常驻）：后端系统唤醒的主控轮（任务/讨论落板、决策答复自动续跑）
+     * 没有请求级 SSE——事件发总线，前端订阅本端点实时回显。前端发起的对话轮不进总线（已有请求级流，
+     * 双路会重复渲染）。离线时事件已落 agent_state，回放兜底。
+     */
+    @GetMapping(value = "/{id}/stage/chat/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter stageChatEvents(@RequestAttribute(LoginUser.ATTR) LoginUser user,
+                                      @PathVariable String id,
+                                      @RequestParam String stage,
+                                      @RequestParam int iteration) {
+        return chatEventBus.subscribe(io.xuanji.server.project.orchestrator.StageChatEventBus.key(id, stage, iteration));
     }
 
     /**
