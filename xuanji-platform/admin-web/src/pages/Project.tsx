@@ -51,6 +51,7 @@ import { StageGroups } from './project/StageGroups'
 import { StageSessionsPanel } from './project/StageSessionsPanel'
 import { TemplateEditor } from './project/TemplateEditor'
 import { RequirementBoard } from './project/RequirementBoard'
+import { TracePanel } from './project/TracePanel'
 
 /** 右栏 tab 内容统一限高内部滚动：任何 tab 内容多都不再把整页撑出几屏长（实测反馈）。
  * 高度 = 视口 - 顶部导航/项目头/页签占位，窄屏矮屏自适应。 */
@@ -342,6 +343,11 @@ const [rightTab, setRightTab] = useState('exec')
             onChange={setRightTab}
             size="small"
             items={[
+              {
+                key: 'trace',
+                label: '追溯',
+                children: tabBody(<TracePanel projectId={id} refreshKey={reqTick} />),
+              },
               {
                 key: 'requirements',
                 label: '需求',

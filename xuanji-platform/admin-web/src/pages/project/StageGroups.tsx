@@ -189,7 +189,7 @@ export function StageGroups({ views, currentStage, exec, artifacts, onAdvance, a
               </Space>
             ) : v.status === 'DONE' ? (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                AI 已自动收口并推进{arts.length > 0 ? `；交付物 ${arts.length} 份见「交付物」页签` : ''}
+                AI 已自动收口并推进{arts.length > 0 ? `；留档 ${arts.length} 份见「留档」页签` : ''}
               </Typography.Text>
             ) : (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>

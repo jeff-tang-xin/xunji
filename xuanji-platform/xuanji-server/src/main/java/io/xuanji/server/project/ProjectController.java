@@ -171,6 +171,12 @@ public class ProjectController {
         return projects.requirements(user, id);
     }
 
+    /** 追溯链：需求 → 三阶段步骤 → 产出证据 的端到端关联（主视图，用户定调）。 */
+    @GetMapping("/{id}/trace")
+    public Object trace(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {
+        return projects.trace(user, id);
+    }
+
     /** 项目文件树：列出项目目录（root_path）下的文件与子目录——代码/文档产出直接可见。 */
     @GetMapping("/{id}/files")
     public Object files(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {

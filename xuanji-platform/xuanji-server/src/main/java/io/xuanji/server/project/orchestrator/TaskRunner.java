@@ -101,8 +101,13 @@ public class TaskRunner {
                 future.cancel(true);
                 throw te;
             }
-            projectRepo.insertArtifact(step.workspaceId(), "step-" + step.seq(),
-                    "DELIVERABLE", step.name(), "TEXT", null, output, 1, "ACTIVE", step.agent());
+            // nodeId 带阶段与迭代：跨阶段 seq 会重合（REQUIREMENT seq4 与 DEVELOP seq4），
+            // 裸 "step-{seq}" 会让追溯关联与 file_path 回填串阶段（trace 端点按全键匹配）
+            String stepNodeId = "step-" + step.stage() + "-" + step.iteration() + "-" + step.seq();
+            // 11 参重载带 stage：交付物必须标阶段归属，否则生命周期「交付物 N 份」按 stage 统计时
+            // 交付物全被漏掉、DOC 被误当交付物计数（测试003 实锤：交付物 tab 5 条 vs 生命周期报 24）
+            projectRepo.insertArtifact(step.workspaceId(), stepNodeId,
+                    "DELIVERABLE", step.name(), "TEXT", null, output, 1, "ACTIVE", step.stage(), step.agent());
             String summary = output.length() > 300 ? output.substring(0, 300) + "…" : output;
             stepRepo.updateStatus(step.withOutput(summary, output, null));
             // 文档双落：产出落项目目录（docs/{stage}/iter{n}/），相对路径回填 DELIVERABLE 索引
@@ -110,7 +115,7 @@ public class TaskRunner {
             String docPath = docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(),
                     "TASK", step.seq(), step.name(), output);
             if (docPath != null) {
-                projectRepo.updateArtifactFilePath(step.workspaceId(), "step-" + step.seq(), docPath);
+                projectRepo.updateArtifactFilePath(step.workspaceId(), stepNodeId, docPath);
             }
             settleRequirements(step);
             log.info("任务执行完成: ws={} seq={} 产出 {} 字", step.workspaceId(), step.seq(), output.length());

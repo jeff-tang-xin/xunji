@@ -1170,6 +1170,105 @@ public class ProjectService {
         return out;
     }
 
+    /**
+     * 追溯链（用户定调 2026-10-16：流程拓扑与链路可追溯性是唯一主视图，不是内容平铺）。
+     * 端到端关联：需求项 → 三阶段工作步骤（requirement_codes 声明）→ 产出证据（artifact），
+     * 外加阶段流水线状态与未挂链工作项（透明暴露，倒逼补链）。
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> trace(LoginUser user, String wsId) {
+        Map ws = this.requireProject(user, wsId);
+        String currentStage = String.valueOf(ws.get("current_stage"));
+        List<String> order = STAGE_ORDER;
+        int curIdx = order.indexOf(currentStage);
+        // 阶段流水线：当前阶段之前=已完成，当前=进行中，之后=未开始；锚取各阶段最新迭代
+        java.util.ArrayList<Map<String, Object>> stages = new java.util.ArrayList<>();
+        for (int i = 0; i < order.size(); i++) {
+            String st = order.get(i);
+            int iter = this.currentIteration(wsId, st);
+            java.util.LinkedHashMap<String, Object> sm = new java.util.LinkedHashMap<>();
+            sm.put("stage", st);
+            sm.put("label", stageLabel(st));
+            sm.put("iteration", iter);
+            sm.put("status", i < curIdx ? "DONE" : i == curIdx ? "ACTIVE" : "PENDING");
+            sm.put("anchor", this.stepRepo.findAnchorText(wsId, st, iter));
+            stages.add(sm);
+        }
+        List<io.xuanji.server.project.orchestrator.StageStep> steps = this.stepRepo.findByWorkspace(wsId);
+        List<Map<String, Object>> artifacts = this.repo.findArtifactsByWorkspace(wsId);
+        // 步骤 → 产出证据：node_id 新规则 step-{stage}-{iter}-{seq}；存量 step-{seq} 以 file_path 含 /{stage}/ 兜底
+        java.util.LinkedHashMap<String, Object> stepArts = new java.util.LinkedHashMap<>();
+        for (Map<String, Object> a : artifacts) {
+            String nodeId = String.valueOf(a.get("node_id"));
+            String fp = a.get("file_path") == null ? "" : String.valueOf(a.get("file_path"));
+            for (io.xuanji.server.project.orchestrator.StageStep s : steps) {
+                String full = "step-" + s.stage() + "-" + s.iteration() + "-" + s.seq();
+                String legacy = "step-" + s.seq();
+                boolean match = nodeId.equals(full) || (nodeId.equals(legacy) && fp.contains("/" + s.stage() + "/"));
+                if (match && !stepArts.containsKey(full)) {
+                    java.util.LinkedHashMap<String, Object> am = new java.util.LinkedHashMap<>();
+                    am.put("name", a.get("name"));
+                    am.put("file_path", a.get("file_path"));
+                    am.put("kind", a.get("kind"));
+                    stepArts.put(full, am);
+                }
+            }
+        }
+        // 需求 → 步骤链（requirement_codes 声明关联；DECISION/CONSULT 步天然不挂，不进 unlinked）
+        List<io.xuanji.server.project.orchestrator.RequirementRepository.Requirement> rows = requirementRepo.findByWorkspace(wsId);
+        Map<String, Integer> depth = new java.util.HashMap<>();
+        for (io.xuanji.server.project.orchestrator.RequirementRepository.Requirement r : rows) {
+            depth.put(r.code(), depthOf(r.code(), rows, depth, rows.size()));
+        }
+        java.util.ArrayList<Map<String, Object>> reqItems = new java.util.ArrayList<>();
+        java.util.ArrayList<Map<String, Object>> unlinked = new java.util.ArrayList<>();
+        for (io.xuanji.server.project.orchestrator.RequirementRepository.Requirement r : rows) {
+            java.util.LinkedHashMap<String, Object> item = new java.util.LinkedHashMap<>();
+            item.put("code", r.code());
+            item.put("title", r.title());
+            item.put("status", r.status());
+            item.put("depends_on", jsonStringList(r.dependsOn()));
+            item.put("depth", depth.getOrDefault(r.code(), 0));
+            item.put("chain", new java.util.ArrayList<>());
+            reqItems.add(item);
+        }
+        java.util.Map<String, Map<String, Object>> byCode = new java.util.LinkedHashMap<>();
+        for (Map<String, Object> item : reqItems) {
+            byCode.put(String.valueOf(item.get("code")), item);
+        }
+        for (io.xuanji.server.project.orchestrator.StageStep s : steps) {
+            java.util.LinkedHashMap<String, Object> node = new java.util.LinkedHashMap<>();
+            node.put("stage", s.stage());
+            node.put("iteration", s.iteration());
+            node.put("seq", s.seq());
+            node.put("name", s.name());
+            node.put("step_type", s.stepType().name());
+            node.put("status", s.status().name());
+            node.put("verified_by", s.verifiedBy());
+            node.put("error", s.error());
+            node.put("output_summary", s.outputSummary());
+            node.put("artifact", stepArts.get("step-" + s.stage() + "-" + s.iteration() + "-" + s.seq()));
+            boolean linked = false;
+            for (String code : s.requirementCodes()) {
+                Map<String, Object> item = byCode.get(code);
+                if (item != null) {
+                    ((List<Object>) item.get("chain")).add(node);
+                    linked = true;
+                }
+            }
+            if (!linked && (s.stepType() == io.xuanji.server.project.orchestrator.StepType.TASK
+                    || s.stepType() == io.xuanji.server.project.orchestrator.StepType.DISCUSS)) {
+                unlinked.add(node);
+            }
+        }
+        java.util.LinkedHashMap<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("current_stage", currentStage);
+        out.put("stages", stages);
+        out.put("requirements", reqItems);
+        out.put("unlinked", unlinked);
+        return out;
+    }
+
     /** 依赖深度递归（记忆化）；环防御：递归深度超过需求总数按 0 处理。 */
     private int depthOf(String code, List<io.xuanji.server.project.orchestrator.RequirementRepository.Requirement> rows,
                         Map<String, Integer> memo, int total) {
