@@ -429,11 +429,13 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
 
       {orchestrated ? (
         steps.length > 0 ? (
+          // 倒序展示：最新步骤在最上面，不用拉到底部才能看到新进展（待处理决策也天然置顶）；
+          // 高度限制由外层 tabBody 统一管理（Project.tsx），这里不再嵌套滚动容器
           <Table
             size="small"
             tableLayout="fixed"
             rowKey={(r) => String(r.id)}
-            dataSource={steps}
+            dataSource={[...steps].reverse()}
             columns={stepCols}
             pagination={false}
             locale={{ emptyText: '本阶段还没有步骤——在左侧对话里说一句话即可启动' }}

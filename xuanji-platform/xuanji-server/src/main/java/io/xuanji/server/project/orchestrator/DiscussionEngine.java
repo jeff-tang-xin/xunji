@@ -109,7 +109,15 @@ public class DiscussionEngine {
                 if (pending > 0) {
                     stepRepo.appendSpeech(step.id(), "▶ " + pending + " 人发言中…\n\n");
                 }
-                String speech = firstRound.get(i).get(SPEECH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                String speech;
+                try {
+                    speech = firstRound.get(i).get(SPEECH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (java.util.concurrent.TimeoutException te) {
+                    firstRound.get(i).cancel(true);
+                    // 裸 TimeoutException 用户看不懂（实测 seq=7 失败只显示类名）——转成可行动的提示
+                    throw new IllegalStateException("发言超时（" + SPEECH_TIMEOUT_SECONDS + "s，" + speaker
+                            + " 单次生成过慢）——可收窄议题后重试");
+                }
                 history.add("【" + speaker + "】" + speech);
                 // 逐条落库：讨论全程可能数分钟，轮询方实时看到已收集的发言（AI 过程可见化）
                 stepRepo.appendSpeech(step.id(), "【" + speaker + "】" + speech + "\n\n");
@@ -121,7 +129,18 @@ public class DiscussionEngine {
                 for (String p : step.participants()) {
                     stepRepo.appendSpeech(step.id(), "▶ " + p + " 发言中…\n\n");
                     String seen = latestSpeech(step.id());
-                    String speech = speak(p, brief, step, seen);
+                    // 后续轮同样包 Future.get 超时——speak 是同步阻塞调用，模型 hang 会让讨论永远挂在 EXECUTING
+                    // （汇总当初就因无超时永久挂起修过，后续轮发言是同款风险）
+                    String speech;
+                    java.util.concurrent.Future<String> speechFuture =
+                            speakerPool.submit(() -> speak(p, brief, step, seen));
+                    try {
+                        speech = speechFuture.get(SPEECH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    } catch (java.util.concurrent.TimeoutException te) {
+                        speechFuture.cancel(true);
+                        throw new IllegalStateException("发言超时（" + SPEECH_TIMEOUT_SECONDS + "s，" + p
+                                + " 单次生成过慢）——可收窄议题后重试");
+                    }
                     history.add("【" + p + "】" + speech);
                     stepRepo.appendSpeech(step.id(), "【" + p + "】" + speech + "\n\n");
                 }

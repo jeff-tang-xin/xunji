@@ -193,7 +193,8 @@ export function RequirementBoard({ projectId }: { projectId: string }) {
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {items.map((r) => {
+        {/* 倒序：最新登记的需求（编号最大）在最上面；拓扑图保持 depth 分层语义不动 */}
+        {[...items].reverse().map((r) => {
           const meta = STATUS_META[r.status] || { label: r.status, color: 'default' }
           const dim = blocked(r, items) && r.status !== 'DONE'
           return (

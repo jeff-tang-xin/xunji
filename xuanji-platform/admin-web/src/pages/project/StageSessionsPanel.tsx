@@ -65,7 +65,7 @@ export function StageSessionsPanel({ projectId }: { projectId: string }) {
       {!loading && sessions.length === 0 ? (
         <Empty description="还没有阶段对话" image={Empty.PRESENTED_IMAGE_SIMPLE} />
       ) : (
-        sessions.map((s) => (
+        [...sessions].reverse().map((s) => (
           <Card
             key={s.session_id}
             size="small"

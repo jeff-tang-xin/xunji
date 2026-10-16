@@ -52,6 +52,16 @@ import { StageSessionsPanel } from './project/StageSessionsPanel'
 import { TemplateEditor } from './project/TemplateEditor'
 import { RequirementBoard } from './project/RequirementBoard'
 
+/** 右栏 tab 内容统一限高内部滚动：任何 tab 内容多都不再把整页撑出几屏长（实测反馈）。
+ * 高度 = 视口 - 顶部导航/项目头/页签占位，窄屏矮屏自适应。 */
+function tabBody(node: React.ReactNode) {
+  return (
+    <div style={{ maxHeight: 'calc(100vh - 230px)', overflowY: 'auto', overflowX: 'hidden', paddingRight: 2 }}>
+      {node}
+    </div>
+  )
+}
+
 function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [detail, setDetail] = useState<ProjectDetailData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -319,12 +329,12 @@ const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(nu
               {
                 key: 'requirements',
                 label: '需求',
-                children: <RequirementBoard projectId={id} />,
+                children: tabBody(<RequirementBoard projectId={id} />),
               },
               {
                 key: 'exec',
                 label: '阶段执行',
-                children: execBusy && !exec ? (
+                children: tabBody(execBusy && !exec ? (
                   <div style={{ padding: 32, textAlign: 'center' }}><Spin /></div>
                 ) : (
                   <StageExecutionPanel
@@ -337,12 +347,12 @@ const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(nu
                       setAutoChat({ text: `决策 #${seq} 我已答复：${answer}\n请基于以上答复继续推进。`, ts: Date.now() })
                     }}
                   />
-                ),
+                )),
               },
               {
                 key: 'stages',
                 label: '生命周期',
-                children: (
+                children: tabBody(
                   <StageGroups
                     views={views}
                     currentStage={currentStage}
@@ -356,7 +366,7 @@ const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(nu
               {
                 key: 'files',
                 label: '文件',
-                children: <ProjectFiles projectId={id} />,
+                children: tabBody(<ProjectFiles projectId={id} />),
               },
               {
                 key: 'artifacts',
@@ -368,7 +378,7 @@ const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(nu
                     </div>
                     {deliverables.length === 0
                       ? <Empty description="暂无交付留档" />
-                      : deliverables.map((a) => (
+                      : [...deliverables].reverse().map((a) => (
                         <Card key={a.id} size="small" style={{ marginBottom: 8, cursor: 'pointer' }}
                           onClick={() => setViewArtifact(a)}>
                           <Space direction="vertical" size={2} style={{ width: '100%' }}>
@@ -407,7 +417,7 @@ const [autoChat, setAutoChat] = useState<{ text: string; ts: number } | null>(nu
               {
                 key: 'sessions',
                 label: '会话',
-                children: <StageSessionsPanel projectId={id} />,
+                children: tabBody(<StageSessionsPanel projectId={id} />),
               },
             ]}
           />
