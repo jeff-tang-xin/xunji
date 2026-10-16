@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import type { ColumnsType } from 'antd/es/table'
 import {
   Alert,
@@ -25,6 +25,12 @@ import {
 import { apiJson } from '../../api/client'
 import { EXEC_STATE_COLOR, EXEC_STATE_LABEL, NODE_RUN_STATUS_COLOR, NODE_RUN_STATUS_LABEL, NodeRunRow, STEP_STATUS_COLOR, STEP_STATUS_LABEL, STEP_TYPE_LABEL, StageExecution, StageStepRow, WaitingDecision, isOrchestrated } from './types'
 import { OutputBlock, MarkdownView } from './shared'
+
+/** 决策指令解析后的行：决策标题 / 可点击选项 / 普通文本 */
+type DecLine =
+  | { kind: 'decision'; label: string; text: string }
+  | { kind: 'option'; code: string; text: string; recommended: boolean }
+  | { kind: 'plain'; text: string }
 import { StageSettingsModal } from './StageSettingsModal'
 
 export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChanged, onDecisionAnswered }: {
@@ -43,6 +49,25 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
   const [decisionStep, setDecisionStep] = useState<StageStepRow | null>(null)
   const [decisionAnswer, setDecisionAnswer] = useState('')
   const [decisionSubmitting, setDecisionSubmitting] = useState(false)
+
+  // 决策指令按行防御性解析（LLM 自由文本格式会漂，识别不了就按普通段落渲染）：
+  // 选项行「- A1. xxx」→ 可点击；决策标题行「A. xxx」/「决策 N」→ 加粗分块；【推荐】→ 高亮
+  const decisionLines = useMemo(() => {
+    const inst = decisionStep?.instruction || ''
+    return inst.split('\n').map((line): DecLine => {
+      const opt = line.match(/^\s*[-•]?\s*([A-Z]\d{1,2})\s*[.、．:：]\s*(.*)$/)
+      if (opt) return { kind: 'option', code: opt[1], text: opt[2].replace(/【推荐】|（推荐）|\(推荐\)/g, '').trim(), recommended: line.includes('推荐') }
+      const dec = line.match(/^\s*([A-Z])\s*[.、．:：]\s*(.+)$/)
+      if (dec) return { kind: 'decision', label: dec[1], text: dec[2] }
+      const dec2 = line.match(/^\s*决策\s*(\d+)\s*[.、．:：]?\s*(.*)$/)
+      if (dec2) return { kind: 'decision', label: `决策 ${dec2[1]}`, text: dec2[2] }
+      return { kind: 'plain', text: line }
+    })
+  }, [decisionStep])
+  const recommendedCodes = useMemo(
+    () => decisionLines.filter((l) => l.kind === 'option' && l.recommended).map((l) => (l as { code: string }).code),
+    [decisionLines],
+  )
   const [submitting, setSubmitting] = useState(false)
   const [gateErr, setGateErr] = useState<string | null>(null)
   const [approving, setApproving] = useState(false)
@@ -535,22 +560,69 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
       </Modal>
 
       {/* 新内核决策答复：项目区域直接处理（有未处理决策时左侧对话输入被锁定） */}
+      {/* 指令是 LLM 自由文本，按行防御性解析：决策标题行加粗、选项行变可点击（点击填编号）、推荐高亮——
+          千字指令一坨纯文本 + 只给一个 textarea 的形态没有交互感（实测反馈） */}
       <Modal
         open={!!decisionStep}
-        title={`答复决策 #${decisionStep?.seq ?? ''}：${decisionStep?.name || ''}`}
+        title={`答复决策 #${decisionStep?.seq ?? ''}`}
         okText="提交答复"
         okButtonProps={{ loading: decisionSubmitting, disabled: !decisionAnswer.trim() }}
         onOk={() => void submitDecisionAnswer()}
         onCancel={() => setDecisionStep(null)}
+        width={640}
       >
-        <Typography.Paragraph style={{ fontSize: 13 }}>
-          {decisionStep?.instruction}
-        </Typography.Paragraph>
+        <Tooltip title={decisionStep?.name}>
+          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {decisionStep?.name}
+          </Typography.Text>
+        </Tooltip>
+        {recommendedCodes.length > 0 && (
+          <Button
+            size="small"
+            type="link"
+            style={{ padding: 0, marginBottom: 4 }}
+            onClick={() => setDecisionAnswer(recommendedCodes.join(' '))}
+          >
+            采纳全部推荐（{recommendedCodes.join(' ')}）
+          </Button>
+        )}
+        <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 10px', marginBottom: 12 }}>
+          {decisionLines.map((ln, i) => {
+            if (ln.kind === 'decision') {
+              return (
+                <div key={i} style={{ fontWeight: 600, fontSize: 13, marginTop: i === 0 ? 0 : 10 }}>
+                  {ln.label}. {ln.text}
+                </div>
+              )
+            }
+            if (ln.kind === 'option') {
+              return (
+                <Button
+                  key={i}
+                  block
+                  type="text"
+                  size="small"
+                  style={{ textAlign: 'left', padding: '3px 8px', height: 'auto', whiteSpace: 'normal' }}
+                  title={`点击填入 ${ln.code}`}
+                  onClick={() => setDecisionAnswer((prev) => (prev.trim() ? `${prev.trim()} ${ln.code}` : ln.code))}
+                >
+                  <Tag style={{ marginInlineEnd: 6 }}>{ln.code}</Tag>
+                  <span style={{ fontSize: 12 }}>{ln.text}</span>
+                  {ln.recommended && <Tag color="orange" style={{ marginInlineStart: 6 }}>推荐</Tag>}
+                </Button>
+              )
+            }
+            if (!ln.text.trim()) return null
+            return (
+              <div key={i} style={{ fontSize: 13, lineHeight: 1.7 }}>{ln.text}</div>
+            )
+          })}
+        </div>
         <Input.TextArea
-          rows={4}
+          rows={3}
           value={decisionAnswer}
           onChange={(e) => setDecisionAnswer(e.target.value)}
-          placeholder="你的答复（必填）——主控会按答复继续推进，答复留档可追溯"
+          placeholder="点上方选项快速填入编号（如 A1 B1 C1 D1），也可直接输入文字；全部采纳推荐可点「采纳全部推荐」。主控会按答复继续推进，答复留档可追溯"
         />
       </Modal>
     </>

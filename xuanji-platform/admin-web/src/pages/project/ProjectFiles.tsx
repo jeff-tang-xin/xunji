@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Button, Empty, Input, Spin, Tag, Tooltip, Tree, Typography, message } from 'antd'
+import { Button, Empty, Input, Segmented, Spin, Tag, Tooltip, Tree, Typography, message } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import {
   CopyOutlined,
@@ -12,6 +12,7 @@ import {
   SearchOutlined,
 } from '@ant-design/icons'
 import { apiJson } from '../../api/client'
+import { MarkdownView } from './shared'
 
 /**
  * 项目文件（产出可见）：项目目录（root_path）文件树 + 文件内容在线查看。
@@ -88,6 +89,8 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
   const [content, setContent] = useState<string>('')
   const [fileLoading, setFileLoading] = useState(false)
   const [search, setSearch] = useState('')
+  /** md 文件默认渲染预览，可切原文 */
+  const [rawMode, setRawMode] = useState(false)
   /** 受控展开：默认展开第一层（与 AI-Claw 一致，根层目录+文件一目了然）；搜索时全展开 */
   const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([])
 
@@ -109,6 +112,7 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
 
   const openFile = async (path: string) => {
     setSelected(path)
+    setRawMode(false)
     setFileLoading(true)
     try {
       const data = await apiJson<{ content: string }>(
@@ -208,10 +212,12 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
         : entries.length === 0
           ? <Empty description="项目目录为空——项目产出（代码/文档）会自动落盘到这里" />
           : (
-            <div style={{ display: 'flex', gap: 12, alignItems: 'stretch' }}>
-              {/* 文件树：antd Tree 自带 hover/选中/展开动效；目录点击 = 切换展开 */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'stretch' }}>
+              {/* 文件树：antd Tree 自带 hover/选中/展开动效；目录点击 = 切换展开。
+                  窄容器（右栏 tab）时内容区 flex-basis 320 换行到下方占满全宽——
+                  固定左右分栏在 480px 容器里内容区只剩 180px，每行五六个字（实测反馈） */}
               <div style={{
-                width: 280, flexShrink: 0, maxHeight: 520, overflow: 'auto',
+                flex: '0 1 280px', minWidth: 220, maxHeight: 520, overflow: 'auto',
                 border: '1px solid #f0f0f0', borderRadius: 8, padding: '8px 4px', background: '#fff',
               }}>
                 {treeData.length === 0
@@ -255,7 +261,7 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
 
               {/* 内容区：文件头（路径面包屑 + 大小 + 复制）+ 内容 */}
               <div style={{
-                flex: 1, minWidth: 0, border: '1px solid #f0f0f0', borderRadius: 8, background: '#fff',
+                flex: '1 1 320px', minWidth: 0, border: '1px solid #f0f0f0', borderRadius: 8, background: '#fff',
                 display: 'flex', flexDirection: 'column',
               }}>
                 {selected == null
@@ -290,22 +296,36 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
                           </Tooltip>
                         )}
                         <span style={{ flex: 1 }} />
+                        {selected.toLowerCase().endsWith('.md') && (
+                          <Segmented
+                            size="small"
+                            options={['渲染', '原文']}
+                            value={rawMode ? '原文' : '渲染'}
+                            onChange={(v) => setRawMode(v === '原文')}
+                          />
+                        )}
                         <Tooltip title="复制全文">
                           <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => void copyContent()} />
                         </Tooltip>
                       </div>
-                      <div style={{ flex: 1, minHeight: 0, maxHeight: 480, overflow: 'auto' }}>
+                      <div style={{ flex: 1, minHeight: 0, maxHeight: 520, overflow: 'auto' }}>
                         {fileLoading
                           ? <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
-                          : (
-                            <pre style={{
-                              margin: 0, fontSize: 12, lineHeight: 1.6,
-                              background: '#fff', padding: 12,
-                              whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                            }}>
-                              {content || '（空文件）'}
-                            </pre>
-                          )}
+                          : selected.toLowerCase().endsWith('.md') && !rawMode
+                            ? (
+                              <div style={{ padding: '4px 12px 12px' }}>
+                                <MarkdownView scroll={false} text={content} />
+                              </div>
+                            )
+                            : (
+                              <pre style={{
+                                margin: 0, fontSize: 12, lineHeight: 1.6,
+                                background: '#fff', padding: 12,
+                                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                              }}>
+                                {content || '（空文件）'}
+                              </pre>
+                            )}
                       </div>
                     </>
                   )}
