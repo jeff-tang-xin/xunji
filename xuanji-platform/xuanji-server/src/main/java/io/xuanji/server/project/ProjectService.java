@@ -465,25 +465,34 @@ public class ProjectService {
         int iteration = this.currentIteration(wsId, current);
         Map stagePlan = this.repo.findCurrentStagePlan(wsId, current, iteration).stream().findFirst().orElse(null);
         if (stagePlan == null) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段还没有规划，无法推进：先让 PM 出规划并经人批准");
-        }
-        if (!"APPROVED".equals(String.valueOf(stagePlan.get("status")))) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段规划当前是 " + String.valueOf(stagePlan.get("status")) + "，需人批准并开始执行后才能推进");
-        }
-        if (stagePlan.get("exec_run_id") == null) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段规划已批准但没有生成执行体（exec_run_id 为空），请驳回该规划后重发，或检查服务端日志中的编译失败原因");
-        }
-        String stageRunId = String.valueOf(stagePlan.get("exec_run_id"));
-        Map<String, Object> stageRun = this.runService.getRun(stageRunId);
-        String runStatus = String.valueOf(stageRun.get("status"));
-        if (!"SUCCESS".equals(runStatus)) {
-            ArrayList<String> open = new ArrayList<String>();
-            for (Map<String, Object> nr : mapList(objectMapper, stageRun.get("nodes"))) {
-                String st = String.valueOf(nr.get("status"));
-                if ("SUCCESS".equals(st)) continue;
-                open.add(strOr(nr.get("node_name"), String.valueOf(nr.get("node_id"))) + "（" + st + "）");
+            // 对话驱动模式（plan_steps 台账）：本阶段没有 LiteFlow 规划头与 run，收口按执行台账判定——
+            // 无活跃步骤（EXECUTING/WAITING/PLANNED）即视为实质完成放行。此前这里直接 400「还没有规划」，
+            // 而重规划又因已销账行占住 seq 撞唯一键，形成「收口要规划头、规划头建不了」的死锁（测试003 实锤）。
+            if (this.stepRepo.hasActiveStep(wsId, current, iteration)) {
+                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST,
+                        stageLabel(current) + "阶段仍有执行中/等待中的小流程，不能收口；先等它们完成或处理掉");
             }
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段流程尚未跑完（run " + stageRunId + " 状态 " + runStatus + "）" + (String)(open.isEmpty() ? "" : "，未走完的节点：" + String.join("、", open)) + "；若停在决策门，请先在待决策中完成审批");
+        } else {
+            if (!"APPROVED".equals(String.valueOf(stagePlan.get("status")))) {
+                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段规划当前是 " + String.valueOf(stagePlan.get("status")) + "，需人批准并开始执行后才能推进");
+            }
+            if (stagePlan.get("exec_run_id") == null) {
+                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段规划已批准但没有生成执行体（exec_run_id 为空），请驳回该规划后重发，或检查服务端日志中的编译失败原因");
+            }
+        }
+        String stageRunId = stagePlan == null ? null : String.valueOf(stagePlan.get("exec_run_id"));
+        if (stageRunId != null) {
+            Map<String, Object> stageRun = this.runService.getRun(stageRunId);
+            String runStatus = String.valueOf(stageRun.get("status"));
+            if (!"SUCCESS".equals(runStatus)) {
+                ArrayList<String> open = new ArrayList<String>();
+                for (Map<String, Object> nr : mapList(objectMapper, stageRun.get("nodes"))) {
+                    String st = String.valueOf(nr.get("status"));
+                    if ("SUCCESS".equals(st)) continue;
+                    open.add(strOr(nr.get("node_name"), String.valueOf(nr.get("node_id"))) + "（" + st + "）");
+                }
+                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段流程尚未跑完（run " + stageRunId + " 状态 " + runStatus + "）" + (String)(open.isEmpty() ? "" : "，未走完的节点：" + String.join("、", open)) + "；若停在决策门，请先在待决策中完成审批");
+            }
         }
         Map summary = (Map)this.repo.findCurrentStageSummary(wsId, current, iteration).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "请先由 PM 产出「" + stageLabel(current) + "阶段收口总结」并经人批准，再推进阶段"));
         if (!"APPROVED".equals(String.valueOf(summary.get("status")))) {

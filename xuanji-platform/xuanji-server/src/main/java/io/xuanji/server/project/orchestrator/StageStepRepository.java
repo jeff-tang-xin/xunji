@@ -92,6 +92,14 @@ public class StageStepRepository {
         return Boolean.TRUE.equals(has);
     }
 
+    /** 本阶段本迭代已占用的最大 seq（含已销账行）——重规划时新步骤从 maxSeq+1 顺延，避免撞 uk_pss_ws_stage_iter_seq。 */
+    public int maxSeq(String workspaceId, String stage, int iteration) {
+        Integer max = jdbc.queryForObject(
+                "SELECT COALESCE(MAX(seq), 0) FROM project_stage_step WHERE workspace_id = ? AND stage = ? AND iteration = ?",
+                Integer.class, workspaceId, stage, iteration);
+        return max == null ? 0 : max;
+    }
+
     /** 规划落库：替换本阶段本迭代的全部 PLANNED 行（重规划语义），已产出行保留。 */
     public void replacePlanned(String workspaceId, String stage, int iteration, List<StageStep> steps) {
         jdbc.update("DELETE FROM project_stage_step WHERE workspace_id = ? AND stage = ? AND iteration = ? AND status = 'PLANNED'",

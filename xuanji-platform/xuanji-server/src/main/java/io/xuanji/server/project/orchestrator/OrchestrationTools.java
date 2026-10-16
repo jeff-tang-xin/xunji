@@ -137,7 +137,9 @@ public class OrchestrationTools {
                         "intent_anchor 不能为空：用一段话锁定本阶段的全局意图与总体验收口径，后续每步执行都会对照它防走偏"));
             }
             List<StageStep> rows = new ArrayList<>();
-            int seq = 1;
+            // seq 从已占用最大值顺延：已销账行（DONE/FAILED/SKIPPED）占住的 seq 不能复用，
+            // 否则重规划撞 uk_pss_ws_stage_iter_seq 唯一键（收口死锁事故的帮凶之一）
+            int seq = stepRepo.maxSeq(wsId, stage, iteration) + 1;
             for (Object o : steps) {
                 if (!(o instanceof Map<?, ?> m)) {
                     continue;
