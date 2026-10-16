@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
   Button,
+  Checkbox,
   Empty,
   Input,
   Modal,
@@ -16,6 +17,8 @@ import {
   ThunderboltOutlined,
   PaperClipOutlined,
   SendOutlined,
+  LockOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons'
 import { apiFetch, apiJson } from '../../api/client'
 import { STEP_STATUS_COLOR, STEP_STATUS_LABEL, StageExecution, StageStepRow } from './types'
@@ -59,7 +62,7 @@ export interface StageChatMsg {
   thinking?: string
   /** 流开始时间戳（秒），状态行显示已耗时 */
   startedAt?: number
-  /** process 消息的标题（如「💬 #3 讨论·发言」「❓ #5 求助·architect」） */
+  /** process 消息的标题（如「讨论 #3·发言」「求助问答 #5·architect」） */
   title?: string
   /** confirm 消息的授权数据 */
   confirmData?: ConfirmCardData
@@ -197,9 +200,9 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
         // 首次见到的步骤：内容由历史回放负责，但「进行中」要即时提示——
         // 讨论刚发起时发言还没落库（qwen 单次 2-3 分钟），不提示的话聊天框毫无动静
         if (s.status === 'EXECUTING' && s.stepType === 'DISCUSS') {
-          events.push(`💬 #${s.seq} ${s.name} 讨论进行中${(s.participants || []).length ? `（${(s.participants || []).join('、')}）` : ''}，发言将实时显示在这里`)
+          events.push(`讨论 #${s.seq} ${s.name} 进行中${(s.participants || []).length ? `（${(s.participants || []).join('、')}）` : ''}，发言将实时显示在这里`)
         } else if (s.status === 'EXECUTING' && s.stepType === 'CONSULT') {
-          events.push(`❓ #${s.seq} ${s.name} 求助进行中，答复后将显示在这里`)
+          events.push(`求助 #${s.seq} ${s.name} 进行中，答复后将显示在这里`)
         }
         continue
       }
@@ -219,16 +222,16 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
       // 讨论进行中：新落库的发言增量进对话流
       if (s.stepType === 'DISCUSS' && full.length > before.fullLen) {
         const delta = full.slice(before.fullLen, full.length)
-        if (delta.trim()) processMsgs.push({ title: `💬 #${s.seq} ${s.name}·新发言`, text: renderSpeech(delta) })
+        if (delta.trim()) processMsgs.push({ title: `讨论 #${s.seq} ${s.name}·新发言`, text: renderSpeech(delta) })
       }
       // 讨论完成：汇总进对话流（发言已按增量推过，只推汇总段）
       if (s.stepType === 'DISCUSS' && s.status === 'DONE' && before.status !== 'DONE') {
         const sum = summaryPart(full)
-        if (sum) processMsgs.push({ title: `📋 #${s.seq} ${s.name}·汇总`, text: renderSpeech(sum) })
+        if (sum) processMsgs.push({ title: `讨论汇总 #${s.seq} ${s.name}`, text: renderSpeech(sum) })
       }
       // 求助问答完成：问答全文进对话流
       if (s.stepType === 'CONSULT' && s.status === 'DONE' && before.status !== 'DONE') {
-        if (full.trim()) processMsgs.push({ title: `❓ #${s.seq} ${s.name}`, text: renderSpeech(full) })
+        if (full.trim()) processMsgs.push({ title: `求助问答 #${s.seq} ${s.name}`, text: renderSpeech(full) })
       }
     }
     prevStepsRef.current = next
@@ -279,8 +282,8 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
             .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
             .flatMap((s) => {
               const label = s.stepType === 'DISCUSS'
-                ? `📋 #${s.seq} ${s.name}（讨论纪要${s.status === 'FAILED' ? '·中断' : ''}）`
-                : `❓ #${s.seq} ${s.name}`
+                ? `讨论纪要 #${s.seq} ${s.name}${s.status === 'FAILED' ? '·中断' : ''}`
+                : `求助问答 #${s.seq} ${s.name}`
               return [{ id: nextId(), type: 'process' as const, title: label, text: renderSpeech(s.outputFull || '') }]
             })
           const divider = proc.length > 0
@@ -563,11 +566,6 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <Space wrap size={6}>
-        {msgs.length > 0 && (
-          <Button size="small" type="text" onClick={() => setMsgs([])}>清空显示</Button>
-        )}
-      </Space>
 
       {/* 活跃步骤条：后台执行中的小流程实时可见（讨论已收集多少发言/任务跑多久），不再空等 */}
       {(() => {
@@ -582,12 +580,12 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
                 </Tag>
                 <Typography.Text style={{ fontSize: 12 }}>#{s.seq} {s.name}</Typography.Text>
                 {(s.participants || []).length > 0 && (
-                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     {' '}（{(s.participants || []).join('、')}）
                   </Typography.Text>
                 )}
                 {s.outputFull && (
-                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     {' '}· 已收集 {s.outputFull.length} 字
                   </Typography.Text>
                 )}
@@ -597,13 +595,23 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
         )
       })()}
 
-      <div
-        ref={listRef}
-        style={{
-          maxHeight: 'calc(100vh - 340px)', minHeight: 320, overflowY: 'auto', padding: '10px 12px',
-          background: '#fafafa', borderRadius: 6, border: '1px solid #f0f0f0',
-        }}
-      >
+      <div style={{ position: 'relative' }}>
+        {msgs.length > 0 && (
+          <Button
+            size="small" type="text"
+            style={{ position: 'absolute', top: 4, right: 8, zIndex: 1, fontSize: 12, color: 'rgba(0,0,0,0.45)' }}
+            onClick={() => setMsgs([])}
+          >
+            清空显示
+          </Button>
+        )}
+        <div
+          ref={listRef}
+          style={{
+            maxHeight: 'calc(100vh - 340px)', minHeight: 320, overflowY: 'auto', padding: '10px 12px',
+            background: '#fafafa', borderRadius: 6, border: '1px solid #f0f0f0',
+          }}
+        >
         {msgs.length === 0 ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -622,7 +630,8 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
                   background: '#fffbe6', border: '1px solid #ffe58f',
                 }}>
                   <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                    🔐 AI 请求使用工具：{m.confirmData.toolCalls.map((tc) => tc.tool).join('、')}
+                    <LockOutlined style={{ marginInlineEnd: 6 }} />
+                    AI 请求使用工具：{m.confirmData.toolCalls.map((tc) => tc.tool).join('、')}
                   </div>
                   {m.confirmData.toolCalls.map((tc) => (
                     <div key={tc.toolCallId} style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 4 }}>
@@ -643,11 +652,13 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
                           拒绝
                         </Button>
                       </Space>
-                      <label style={{ marginLeft: 10, fontSize: 12, color: '#595959', cursor: 'pointer' }}>
-                        <input type="checkbox" checked={rememberRef.current}
-                          onChange={(e) => { rememberRef.current = e.target.checked }} />
-                        {' '}本会话记住（该项目会话内不再询问）
-                      </label>
+                      <Checkbox
+                        style={{ marginLeft: 10, fontSize: 12 }}
+                        checked={rememberRef.current}
+                        onChange={(e) => { rememberRef.current = e.target.checked }}
+                      >
+                        本会话记住（该项目会话内不再询问）
+                      </Checkbox>
                     </>
                   )}
                 </div>
@@ -660,7 +671,8 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
                   }}
                   onClick={() => openChatLog(m.text)}
                 >
-                  📋 对话过程留档 · {m.text.split('/').pop()?.replace(/^\d+-CHATLOG-/, '').replace(/\.md$/, '')}（点击查看思考与工具轨迹）
+                  <FileTextOutlined style={{ marginInlineEnd: 6 }} />
+                  对话过程留档 · {m.text.split('/').pop()?.replace(/^\d+-CHATLOG-/, '').replace(/\.md$/, '')}（点击查看思考与工具轨迹）
                 </div>
               ) : m.type === 'process' ? (
                 <div style={{
@@ -706,9 +718,9 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
               >
                 {m.type === 'queued' && (
                   <Space size={4} style={{ marginBottom: 2 }}>
-                    <Tag color="default" style={{ marginRight: 0, fontSize: 11, lineHeight: '16px' }}>待发送</Tag>
+                    <Tag color="default" style={{ marginRight: 0, fontSize: 12, lineHeight: '16px' }}>待发送</Tag>
                     <Button
-                      type="text" size="small" style={{ height: 16, padding: '0 2px', fontSize: 11 }}
+                      type="text" size="small" style={{ height: 16, padding: '0 2px', fontSize: 12 }}
                       onClick={() => revoke(m.id)}
                     >
                       撤回
@@ -744,6 +756,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
             </div>
           ))
         )}
+        </div>
       </div>
 
       <div>

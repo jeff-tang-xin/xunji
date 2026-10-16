@@ -200,7 +200,7 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
       render: (v: string, r) => (
         <div>
           <div>{v || r.node_id}</div>
-          <Typography.Text type="secondary" style={{ fontSize: 11 }}>{r.node_id}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.node_id}</Typography.Text>
         </div>
       ),
     },
@@ -233,7 +233,7 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
         <div>
           <div>{v || `步骤 ${r.seq}`}</div>
           {(r.participants || []).length > 0 && (
-            <Typography.Text type="secondary" style={{ fontSize: 11 }}>{(r.participants || []).join('、')}</Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{(r.participants || []).join('、')}</Typography.Text>
           )}
         </div>
       ),
@@ -295,11 +295,6 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
             阶段设置
           </Button>
         )}
-        {!orchestrated && exec.state === 'EXECUTING' && exec.run_status === 'FAILED' && (
-          <Button danger size="small" icon={<SyncOutlined />} loading={rerunning} onClick={() => void rerunStage()}>
-            重跑当前阶段
-          </Button>
-        )}
       </Space>
 
       {/* 阶段设置：绑定工作流 / 阶段智能体；保存后刷新执行视图（绑定影响下一次批准起跑） */}
@@ -314,7 +309,20 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
       )}
 
       {exec.error && (
-        <Alert type="error" showIcon message="执行报错" description={exec.error} style={{ marginBottom: 12 }} />
+        <Alert
+          type="error"
+          showIcon
+          message="执行报错"
+          description={exec.error}
+          style={{ marginBottom: 12 }}
+          action={
+            !orchestrated && exec.state === 'EXECUTING' && exec.run_status === 'FAILED' ? (
+              <Button danger size="small" icon={<SyncOutlined />} loading={rerunning} onClick={() => void rerunStage()}>
+                重跑当前阶段
+              </Button>
+            ) : undefined
+          }
+        />
       )}
 
       {exec.state === 'PENDING_APPROVAL' && (
@@ -404,6 +412,7 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
             dataSource={steps}
             columns={stepCols}
             pagination={false}
+            locale={{ emptyText: '本阶段还没有步骤——在左侧对话里说一句话即可启动' }}
             expandable={{
               expandedRowRender: (r) => (
                 <Space direction="vertical" size={6} style={{ width: '100%' }}>

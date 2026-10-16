@@ -218,17 +218,24 @@ const [rightTab, setRightTab] = useState('exec')
 
   return (
     <div>
-      <Space style={{ marginBottom: 16 }} align="center">
-        <Button icon={<ArrowLeftOutlined />} onClick={onBack}>返回</Button>
-        <Typography.Title level={4} style={{ margin: 0 }}>{detail.name}</Typography.Title>
-        <Tag color={projectStatusColor(detail.status)}>{detail.status === 'ARCHIVED' ? '已归档' : '进行中'}</Tag>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {detail.root_path}
-        </Typography.Text>
-        <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>
-        <Button size="small" icon={<EditOutlined />} onClick={openEdit}>编辑</Button>
-        <Button size="small" danger icon={<DeleteOutlined />} onClick={deleteProject}>删除</Button>
-      </Space>
+      {/* 头部：左=标识组（返回/标题/状态/路径），右=操作组——信息与动作分组，路径不夹在中间 */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
+        <Space align="center" wrap>
+          <Button icon={<ArrowLeftOutlined />} onClick={onBack}>返回</Button>
+          <Typography.Title level={4} style={{ margin: 0 }}>{detail.name}</Typography.Title>
+          <Tag color={projectStatusColor(detail.status)} style={{ marginInlineEnd: 0 }}>
+            {detail.status === 'ARCHIVED' ? '已归档' : '进行中'}
+          </Tag>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }} copyable={{ text: detail.root_path }}>
+            {detail.root_path}
+          </Typography.Text>
+        </Space>
+        <Space align="center">
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>
+          <Button size="small" icon={<EditOutlined />} onClick={openEdit}>编辑</Button>
+          <Button size="small" danger icon={<DeleteOutlined />} onClick={deleteProject}>删除</Button>
+        </Space>
+      </div>
 
       <Modal
         title="编辑项目"
@@ -363,8 +370,7 @@ const [rightTab, setRightTab] = useState('exec')
                             <Space>
                               <FileTextOutlined />
                               <Typography.Text strong>{a.name}</Typography.Text>
-                              {a.version != null && <Tag>v{a.version}</Tag>}
-                              <Tag color="green">交付</Tag>
+                              {a.version != null && <Tag style={{ marginInlineEnd: 0 }}>v{a.version}</Tag>}
                             </Space>
                             {a.content_md && (
                               <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }} ellipsis={{ rows: 2 }}>
