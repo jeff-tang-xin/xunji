@@ -52,6 +52,12 @@ export interface StageChatMsg {
   attachments?: ChatAttachment[]
   /** agent 回复流式生成中 */
   streaming?: boolean
+  /** 实时阶段提示（🤔 思考中… / 🔧 xxx 执行中…），流式正文开始后清空 */
+  phaseText?: string
+  /** 思考文本流（thinking.delta 实时追加，灰色小字展示） */
+  thinking?: string
+  /** 流开始时间戳（秒），状态行显示已耗时 */
+  startedAt?: number
   /** process 消息的标题（如「💬 #3 讨论·发言」「❓ #5 求助·architect」） */
   title?: string
   /** confirm 消息的授权数据 */
@@ -85,6 +91,8 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
   const [msgs, setMsgs] = useState<StageChatMsg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  // 流式期间的秒级重渲染驱动：状态行「已 Ns」靠它每秒刷新
+  const [, setTick] = useState(0)
   const idRef = useRef(0)
   const nextId = () => ++idRef.current
   const listRef = useRef<HTMLDivElement>(null)
@@ -352,12 +360,14 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
   /** 发送一条（q 已在 msgs 里以 queued 形态占位）：SSE 流式回填，停止走 AbortController */
   const sendMsg = async (q: { id: number; text: string; attachments?: ChatAttachment[] }) => {
     const agentMsgId = nextId()
+    const startedAt = Math.floor(Date.now() / 1000)
     setMsgs((x) => [
       ...x.map((m) => (m.id === q.id ? { ...m, type: 'user' as const } : m)),
-      { id: agentMsgId, type: 'agent', text: '', streaming: true },
+      { id: agentMsgId, type: 'agent', text: '', streaming: true, startedAt, phaseText: '🤔 思考与规划中…' },
     ])
     busyRef.current = true
     setBusy(true)
+    const tickTimer = window.setInterval(() => setTick((v) => v + 1), 1000)
     const ac = new AbortController()
     abortRef.current = ac
     // 工具执行过程实时卡片：PM 对话要跑 plan_steps/declare_requirements 等编排工具，
@@ -390,6 +400,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
         const data = await r.json().catch(() => ({})) as { message?: string; error?: string }
         throw new Error(data.message || data.error || `请求失败 (${r.status})`)
       }
+      let receivedEnd = false
       await readSse(r, (event, data) => {
         let payload: Record<string, unknown> = {}
         try { payload = JSON.parse(data) } catch { /* 忽略非 JSON 帧 */ }
@@ -397,16 +408,27 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
           const who = String(payload.agent || 'agent')
           setMsgs((x) => x.map((m) => (m.id === agentMsgId
             ? { ...m, text: m.text || `（${who} 正在处理…）` } : m)))
+        } else if (event === 'llm.start') {
+          // 每轮 LLM 调用开始（qwen 生成 tool_call 参数期间无文本 delta，靠这个让用户知道 AI 在思考）
+          setMsgs((x) => x.map((m) => (m.id === agentMsgId
+            ? { ...m, phaseText: '🤔 思考与规划中…' } : m)))
+        } else if (event === 'thinking.delta' && typeof payload.delta === 'string') {
+          const th = payload.delta
+          setMsgs((x) => x.map((m) => (m.id === agentMsgId
+            ? { ...m, thinking: (m.thinking || '') + th, phaseText: '🤔 思考中…' } : m)))
         } else if (event === 'agent.delta' && typeof payload.delta === 'string') {
           const delta = payload.delta
-          setMsgs((x) => x.map((m) => (m.id === agentMsgId ? { ...m, text: (m.text || '') + delta } : m)))
+          setMsgs((x) => x.map((m) => (m.id === agentMsgId
+            ? { ...m, text: (m.text || '') + delta, phaseText: undefined } : m)))
         } else if (event === 'agent.result' && typeof payload.text === 'string') {
           // 只有还没流式出正文时才用整段结果兜底，否则会把已流出的内容重复一遍
           const full = payload.text
           setMsgs((x) => x.map((m) => (m.id === agentMsgId && (!m.text || m.text.startsWith('（'))
             ? { ...m, text: full } : m)))
         } else if (event === 'tool.call') {
-          pushToolLine(`🔧 ${String(payload.tool || '')} 执行中…`)
+          const tool = String(payload.tool || '')
+          pushToolLine(`🔧 ${tool} 执行中…`)
+          setMsgs((x) => x.map((m) => (m.id === agentMsgId ? { ...m, phaseText: `🔧 ${tool} 执行中…` } : m)))
         } else if (event === 'tool.result') {
           const tool = String(payload.tool || '')
           const line = `✅ ${tool} ${payload.state === 'ERROR' ? '失败' : '完成'}`
@@ -419,6 +441,8 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
             procMsgId = nextId()
             setMsgs((x) => [...x, { id: procMsgId, type: 'process', title: '🔧 工具执行', text: toolLines.join('\n') }])
           }
+          setMsgs((x) => x.map((m) => (m.id === agentMsgId
+            ? { ...m, phaseText: `✅ ${tool} ${payload.state === 'ERROR' ? '失败' : '完成'}，继续…` } : m)))
         } else if (event === 'agent.confirm' && Array.isArray(payload.toolCalls)) {
           // 工具授权请求：流到此结束，实例挂起等待用户决定——推授权卡
           const calls = (payload.toolCalls as Array<Record<string, unknown>>).map((tc) => ({
@@ -431,13 +455,22 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
             confirmData: { sessionId: String(payload.sessionId || ''), toolCalls: calls },
           }])
         } else if (event === 'agent.end' || event === 'stage.finish') {
-          setMsgs((x) => x.map((m) => (m.id === agentMsgId ? { ...m, streaming: false } : m)))
+          receivedEnd = true
+          window.clearInterval(tickTimer)
+          setMsgs((x) => x.map((m) => (m.id === agentMsgId ? { ...m, streaming: false, phaseText: undefined } : m)))
         } else if (event === 'error') {
           setMsgs((x) => [...x, {
             id: nextId(), type: 'error', text: String(payload.message || '执行出错'),
           }])
         }
       })
+      if (!receivedEnd) {
+        // 流结束但没收到 end 帧：SSE 超时/网络中断——后台任务会继续跑完并留档，别让占位永远挂着
+        window.clearInterval(tickTimer)
+        setMsgs((x) => x.map((m) => (m.id === agentMsgId
+          ? { ...m, streaming: false, phaseText: undefined,
+              text: (m.text || '') + '\n\n（⚠ 连接中断——后台任务会继续执行并留档，稍后刷新页面查看结果）' } : m)))
+      }
     } catch (e) {
       if (ac.signal.aborted) {
         // 用户主动停止：不是错误。后台 agent 会跑完并照常留档，只是前端不再接收
@@ -643,9 +676,26 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
                 {m.attachments?.map((a, i) => (a.dataUrl
                   ? <img key={i} src={a.dataUrl} alt={a.name} style={{ maxWidth: 260, maxHeight: 180, borderRadius: 6, display: 'block', marginBottom: 4 }} />
                   : <div key={i} style={{ marginBottom: 4 }}><PaperClipOutlined /> {a.name}</div>))}
+                {m.thinking && (
+                  <div style={{
+                    marginBottom: m.text ? 6 : 0, padding: '4px 8px', fontSize: 12, color: '#8c8c8c',
+                    background: '#fafafa', borderLeft: '2px solid #d9d9d9', borderRadius: 4,
+                    maxHeight: 140, overflowY: 'auto', whiteSpace: 'pre-wrap',
+                  }}>{m.thinking}</div>
+                )}
                 {m.type === 'user' || m.type === 'queued'
                   ? m.text
                   : <MarkdownView scroll={false} text={m.text} />}
+                {m.streaming && m.phaseText && (
+                  <div style={{ marginTop: 4, fontSize: 12, color: '#531dab' }}>
+                    {m.phaseText}
+                    {m.startedAt && (
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {' '}· 已 {Math.floor(Date.now() / 1000) - m.startedAt}s
+                      </Typography.Text>
+                    )}
+                  </div>
+                )}
                 {m.streaming && <Typography.Text type="secondary"> ▍</Typography.Text>}
               </div>
               )}

@@ -309,6 +309,13 @@ public class AgentScopeRuntime implements AgentRuntime {
                                 sink.accept(AgentStreamEvent.of("agent.start", Map.of(
                                         "sessionId", str(e.getSessionId()), "replyId", str(e.getReplyId()),
                                         "name", str(e.getName()))));
+                            } else if (evt instanceof io.agentscope.core.event.ModelCallStartEvent) {
+                                // 每轮 LLM 调用开始：qwen 生成 tool_call 参数期间没有任何文本 delta，
+                                // 不发这个事件前端会干等 1-3 分钟不知道 AI 在干嘛（实测反馈）
+                                sink.accept(AgentStreamEvent.of("llm.start", Map.of()));
+                            } else if (evt instanceof io.agentscope.core.event.ThinkingBlockDeltaEvent e) {
+                                // 思考文本流（thinking 模型才有）：思考过程可视化
+                                sink.accept(AgentStreamEvent.of("thinking.delta", Map.of("delta", str(e.getDelta()))));
                             } else if (evt instanceof io.agentscope.core.event.TextBlockDeltaEvent e) {
                                 sink.accept(AgentStreamEvent.delta(e.getDelta()));
                             } else if (evt instanceof io.agentscope.core.event.AgentResultEvent e) {

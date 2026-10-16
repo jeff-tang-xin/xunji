@@ -110,7 +110,9 @@ public class StageOrchestrator {
         AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance, wsId);
         AgentSpec spec = withTools(base, tools.toolDefs());
 
-        SseEmitter emitter = new SseEmitter(300_000L);
+        // 15 分钟：qwen 长流程（规划+多工具+长回复）实测 165s~600s+，300s 会把还在跑的对话掐断，
+        // 前端只看到流静默断开、占位永远挂着
+        SseEmitter emitter = new SseEmitter(900_000L);
         chatExecutor.submit(() -> {
             try {
                 send(emitter, "agent.start", Map.of("agent", spec.name()));
