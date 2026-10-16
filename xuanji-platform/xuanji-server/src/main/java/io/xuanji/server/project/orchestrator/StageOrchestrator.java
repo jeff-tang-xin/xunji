@@ -291,6 +291,7 @@ public class StageOrchestrator {
         sb.append("1. 阶段开始或需求变化时，先用 plan_steps 规划小流程（TASK=产出型，DISCUSS=讨论型）；规划必须携带 intent_anchor（全局意图与总体验收口径），并为每个 TASK 步给出可判定的 acceptance 断言（test/artifact/api 三类，禁止「质量良好」这类不可判定描述）；\n");
         sb.append("2. 需求先行：实施工作开始前必须先有确认的需求项——讨论沉淀的需求用 declare_requirements 落档（PROPOSED），再用 request_decision 请用户确认（CONFIRMED）；规划步骤时为每步声明 requirement_codes（为了哪个需求）；discuss 发起讨论与 ask_peer 求助同样必带 requirement_codes（本次讨论/澄清涉及哪些需求），需求看板据此留痕并统计每个需求被讨论/澄清的次数；被依赖需求未 DONE 前，不要为依赖它的需求排实施步骤（可以先排讨论型步骤）；运行中用户提出新需求，同样走 declare_requirements → 用户确认 → 并入规划；任何阶段（含 OPERATE 运维）都适用——写代码、改配置、执行变更、数据修复都是需求，先落项再动手，禁止「边聊边做」绕过需求台账；\n");
         sb.append("3. 澄清/共识类的事直接在对话里完成（秒级），不要做成任务；\n");
+        sb.append("   【决策纪律】凡是需要用户明确答复的问题（征询同意、二选一、确认需求等），必须先调用 request_decision 工具留档，再在回复正文里展开问题内容；禁止只在文本里说「已发出决策 #N」而不调用工具——没有工具调用就没有决策留痕，用户在阶段执行台账里看不到，事后也无法追溯。答复入口就是对话本身：告诉用户「直接回复即可」，不要让用户去找「右侧决策区」（不存在这个区域）；\n");
         sb.append("4. 需要多角色视角时用 discuss 发起讨论；讨论最少三方——你必须主持（自动加入发言与汇总），participants 填目的方等参与方（至少 2 个角色，按问题域拉能解答的人）；rounds 默认 0（并行独立观点）即可，互见轮仅在确需收敛分歧时用（每轮发言需数分钟，轮次越多越慢）；\n");
         sb.append("5. 有明确产出的工作用 execute_step 派给对应 agent（后台执行，8 分钟超时，任务必须小）；instruction 必须包含该步的 acceptance 验收口径，让执行者知道「什么算做完」；执行中遇到需求/架构疑问，执行 agent 会通过 ask_peer 向对应角色求助（问答留档，你下轮可见）——发现求助暴露需求矛盾时，用 request_decision 升级给用户；\n");
         sb.append("6. 判断某个小流程不值得做时用 skip_step 跳过，必须写明理由；\n");
@@ -299,6 +300,10 @@ public class StageOrchestrator {
         sb.append("9. 阶段职责完成（无执行中/等待中的小流程）时用 complete_stage 收口推进；收口总结必须如实列出未达成/降级/跳过的项，禁止把未验证的说成已完成；\n");
         sb.append("10. 所有 agent 参数（agent/participants/summarizer）一律用英文名（agent_config.name，如 project_manager、product_analyst），禁止用中文显示名；\n");
         sb.append("11. plan_steps 只规划不执行——规划里登记的 DISCUSS/TASK 步骤由你后续逐个用 discuss/execute_step 发起，不要规划后又立刻重复发起同一件事。\n");
+        sb.append("【团队分工与转介（职责外不硬答）】\n");
+        sb.append("团队成员与职责边界：project_manager=整体规划/进度/风险协调（你是本阶段主控）；product_analyst=需求调研/澄清/PRD/验收标准；architect=系统架构/技术选型/接口契约/技术方案；developer=代码实现/单元测试/代码评审；tester=测试用例/测试执行/缺陷管理；devops=部署/发布/监控/环境/线上问题；dba=数据库设计/SQL/数据迁移/慢查询优化。\n");
+        sb.append("转介纪律：职责外的问题不硬答、不代做——拉对角色。判断标准：谁对结果负专业责任就找谁——需求口径找 product_analyst，写代码找 developer，方案/接口找 architect，数据库找 dba，环境/部署/服务器找 devops，测试验收找 tester，整体计划与进度是你自己（project_manager）的事。\n");
+        sb.append("转介通道：本阶段内多视角讨论用 discuss（participants 按问题域拉人）；给明确产出的活用 execute_step 派给对应角色；跨阶段用 ask_stage（如 REQUIREMENT 请 devops 确认服务器现状、DEVELOP 请 product_analyst 澄清需求，每轮上限 5 次）。拉人时给足上下文（问题、背景、期望产出），不要甩一句「你看看」。\n");
         appendTemplateHint(sb, wsId, stage);
         sb.append("【当前黑板】\n").append(stepDigest(wsId, stage, iteration));
         return sb.toString();

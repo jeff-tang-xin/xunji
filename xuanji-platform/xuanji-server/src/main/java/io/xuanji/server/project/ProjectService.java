@@ -13,6 +13,7 @@ import io.xuanji.server.project.StagePlanCompiler;
 import io.xuanji.server.project.orchestrator.StageStep;
 import io.xuanji.server.project.orchestrator.StageStepRepository;
 import io.xuanji.server.project.orchestrator.StepStatus;
+import io.xuanji.server.project.orchestrator.StepType;
 import io.xuanji.server.repository.ProjectRepository;
 import io.xuanji.server.repository.WorkspaceRepository;
 import java.io.IOException;
@@ -1265,7 +1266,12 @@ public class ProjectService {
         out.put("node_runs", List.of());
         ArrayList waitingList = new ArrayList();
         for (StageStep s2 : steps) {
-            if (s2.status() != StepStatus.WAITING) continue;
+            // WAITING 的任何步 + 未答复的 DECISION 步（request_decision 创建即 PLANNED，答复后置 DONE）——
+            // 否则决策在「阶段执行」tab 永远不可见，用户不知道 AI 在等什么
+            if (s2.status() != StepStatus.WAITING
+                    && !(s2.stepType() == StepType.DECISION && s2.status() == StepStatus.PLANNED)) {
+                continue;
+            }
             LinkedHashMap<String, Object> w = new LinkedHashMap<String, Object>();
             w.put("node_run_id", s2.id());
             w.put("node_id", String.valueOf(s2.seq()));

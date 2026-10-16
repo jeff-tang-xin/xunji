@@ -350,7 +350,16 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
               type="inner"
               title={<Space><LockOutlined /><span>待决策：{w.node_name || w.node_id}</span></Space>}
               extra={orchestrated ? (
-                <Tag color="gold" style={{ marginInlineEnd: 0 }}>在左侧对话中答复</Tag>
+                <Button type="primary" size="small" onClick={() => {
+                  // waiting_decisions 里的 DECISION 步（后端 orchestrationView：node_id=seq / node_name / output=instruction）
+                  setDecisionStep({
+                    id: 0, seq: Number(w.node_id) || 0, name: w.node_name || '',
+                    stepType: 'DECISION', status: 'PLANNED', instruction: w.output || '',
+                  })
+                  setDecisionAnswer('')
+                }}>
+                  处理
+                </Button>
               ) : (
                 <Space>
                   <Button type="primary" size="small" icon={<CheckCircleOutlined />} onClick={() => openGate(w, 'APPROVE')}>
@@ -363,7 +372,7 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
             >
               <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
                 {orchestrated
-                  ? '主控 AI 在等待你的决定——直接在左侧对话里回复即可（例如「同意，按方案二执行」），主控会记录答复并继续推进。'
+                  ? '主控 AI 在等待你的决定——点右上「处理」直接答复（左侧对话输入在决策处理前会锁定）。答复后主控继续推进。'
                   : '该节点已产出并挂起等待人工决策。通过后继续执行后续节点（后台跑，页面会自动刷新）；驳回必须写批注。'}
               </Typography.Paragraph>
               {stageNotes.length > 0 && (

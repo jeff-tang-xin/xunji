@@ -101,7 +101,7 @@ public class OrchestrationTools {
                 declareDeviationSchema(), List.of("seq", "reason", "fallback")));
         defs.add(def("declare_requirements", "需求先行：把讨论沉淀的需求项落库（PROPOSED），或在用户明确同意后置为 CONFIRMED。需求项是所有实施工作的锚定物——规划步骤前必须先有确认的需求；运行中新增需求也走这里（先 propose 再请用户确认）。confirm 动作必须先有用户明确同意（用 request_decision 征询并留档），禁止未经用户确认直接置 CONFIRMED。",
                 declareRequirementsSchema(), List.of("action", "requirements")));
-        defs.add(def("request_decision", "向用户提出决策请求（问题会显示在右侧决策区，用户答复后你在对话里收到）。",
+        defs.add(def("request_decision", "向用户提出决策请求（必须调用本工具留档，禁止只在回复文本里说已发出决策而不调用——没有工具调用就没有决策留痕，用户无处看到。调用后直接在回复正文里展开问题内容，并告诉用户：直接在对话输入框回复即可，答复入口就是对话本身）。",
                 requestDecisionSchema(), List.of("question")));
         defs.add(def("record_answer", "把用户在对话里给出的答复落到对应决策上（决策闭环）。",
                 recordAnswerSchema(), List.of("seq", "answer")));

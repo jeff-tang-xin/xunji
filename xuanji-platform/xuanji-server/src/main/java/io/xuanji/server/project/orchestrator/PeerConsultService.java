@@ -89,9 +89,10 @@ public class PeerConsultService {
             }
         };
         return new ToolDef("ask_peer",
-                "向能解答的同事求助：执行中遇到需求不清楚、架构疑问、技术难题时，直接问对应角色"
-                        + "（需求问题→product_analyst，架构/技术选型→architect，数据库→dba），拿到答案再继续，禁止靠猜。"
-                        + "问答会留档，主控可见。",
+                "向能解答的同事求助：执行中遇到职责外的问题，直接问对应角色，拿到答案再继续，禁止靠猜。"
+                        + "路由表：需求口径/验收标准→product_analyst，架构/技术选型/接口契约→architect，"
+                        + "代码实现→developer，测试用例/验收→tester，环境/部署/服务器→devops，数据库/SQL→dba。"
+                        + "提问给足上下文（问题、背景、期望产出）。问答会留档，主控可见。",
                 askPeerSchema(), "BEAN", null, tool);
     }
 
