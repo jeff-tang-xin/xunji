@@ -4,6 +4,7 @@ import {
   Button,
   Empty,
   Input,
+  Modal,
   Space,
   Tag,
   Typography,
@@ -47,7 +48,7 @@ interface ConfirmCardData {
 /** 阶段对话消息（user 右侧蓝底，agent 左侧白底，error 红底，queued 灰底待发送，process 过程留档卡片，confirm 工具授权卡） */
 export interface StageChatMsg {
   id: number
-  type: 'user' | 'agent' | 'error' | 'queued' | 'system' | 'process' | 'confirm'
+  type: 'user' | 'agent' | 'error' | 'queued' | 'system' | 'process' | 'confirm' | 'chatlog'
   text: string
   attachments?: ChatAttachment[]
   /** agent 回复流式生成中 */
@@ -285,7 +286,24 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
           const divider = proc.length > 0
             ? [{ id: nextId(), type: 'system' as const, text: '── 以下为讨论与求助留档 ──' }]
             : []
-          if (hist.length || divider.length) setMsgs([...hist, ...divider, ...proc])
+          // 对话过程留档（docs/{stage}/iter{n}/*-CHATLOG-*.md）：思考与工具轨迹的历史回放通道
+          apiJson<{ files?: { path: string; type: string }[] }>(`/api/projects/${projectId}/files`)
+            .then((fl) => {
+              if (!alive) return
+              const prefix = `docs/${chatStage}/iter${chatIteration}/`
+              const logs = (fl?.files || [])
+                .filter((f) => f.type === 'file' && f.path.startsWith(prefix) && f.path.includes('-CHATLOG-'))
+                .map((f) => f.path)
+                .sort()
+              const logMsgs = logs.map((path) => ({ id: nextId(), type: 'chatlog' as const, text: path }))
+              const logDivider = logMsgs.length > 0
+                ? [{ id: nextId(), type: 'system' as const, text: '── 以下为对话过程留档（含思考与工具轨迹） ──' }]
+                : []
+              if (hist.length || divider.length || logMsgs.length) {
+                setMsgs([...hist, ...divider, ...proc, ...logDivider, ...logMsgs])
+              }
+            })
+            .catch(() => { if (hist.length || divider.length) setMsgs([...hist, ...divider, ...proc]) })
         })
         .catch(() => { if (hist.length) setMsgs(hist) })
     }).catch(() => { /* 历史取不到不打断对话主流程 */ })
@@ -298,6 +316,19 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [msgs])
+
+  /** 过程留档查看：拉文件内容弹 Modal（≤200KB 文本，轨迹文件远小于此） */
+  const [chatLogView, setChatLogView] = useState<{ path: string; content: string } | null>(null)
+  const openChatLog = async (relPath: string) => {
+    try {
+      const r = await apiJson<{ content?: string }>(
+        `/api/projects/${projectId}/files/content?path=${encodeURIComponent(relPath)}`,
+      )
+      setChatLogView({ path: relPath, content: r?.content || '（空）' })
+    } catch {
+      message.error('读取过程留档失败')
+    }
+  }
 
   /** 工具授权决定：批准/拒绝（可勾选本会话记住）→ 恢复执行 → 渲染恢复期间事件 */
   const handleConfirm = async (msgId: number, approved: boolean, remember: boolean) => {
@@ -620,6 +651,17 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
                     </>
                   )}
                 </div>
+              ) : m.type === 'chatlog' ? (
+                <div
+                  style={{
+                    maxWidth: '94%', padding: '6px 12px', borderRadius: 8, textAlign: 'left',
+                    background: '#e6f4ff', border: '1px solid #91caff', cursor: 'pointer',
+                    fontSize: 13, color: '#0958d9',
+                  }}
+                  onClick={() => openChatLog(m.text)}
+                >
+                  📋 对话过程留档 · {m.text.split('/').pop()?.replace(/^\d+-CHATLOG-/, '').replace(/\.md$/, '')}（点击查看思考与工具轨迹）
+                </div>
               ) : m.type === 'process' ? (
                 <div style={{
                   maxWidth: '94%', padding: '8px 12px', borderRadius: 8, textAlign: 'left',
@@ -775,6 +817,16 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: str
           </Button>
         </div>
       </div>
+      <Modal
+        open={!!chatLogView}
+        title={`对话过程留档 · ${chatLogView?.path.split('/').pop() || ''}`}
+        onCancel={() => setChatLogView(null)}
+        footer={null}
+        width={860}
+        styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
+      >
+        {chatLogView && <MarkdownView scroll={false} text={chatLogView.content} />}
+      </Modal>
     </div>
   )
 }

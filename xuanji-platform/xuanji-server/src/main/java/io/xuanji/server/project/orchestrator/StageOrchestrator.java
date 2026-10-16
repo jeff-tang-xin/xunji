@@ -58,6 +58,7 @@ public class StageOrchestrator {
     private final ObjectMapper objectMapper;
     private final RequirementRepository requirementRepo;
     private final PeerConsultService peerConsult;
+    private final StageDocStore docStore;
 
     /** SSE 会话执行池：虚拟线程（JDK21），阻塞 IO 型任务不占平台线程，并发对话不再互相排队。 */
     private final ExecutorService chatExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -68,7 +69,7 @@ public class StageOrchestrator {
                              io.xuanji.server.repository.ProjectRepository projectRepo,
                              WorkspaceRepository workspaceRepo, StageAdvancer advancer,
                              ObjectMapper objectMapper, RequirementRepository requirementRepo,
-                             PeerConsultService peerConsult) {
+                             PeerConsultService peerConsult, StageDocStore docStore) {
         this.runtime = runtime;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
@@ -80,6 +81,7 @@ public class StageOrchestrator {
         this.objectMapper = objectMapper;
         this.requirementRepo = requirementRepo;
         this.peerConsult = peerConsult;
+        this.docStore = docStore;
     }
 
     /**
@@ -114,16 +116,55 @@ public class StageOrchestrator {
         // 前端只看到流静默断开、占位永远挂着
         SseEmitter emitter = new SseEmitter(900_000L);
         chatExecutor.submit(() -> {
+            // 过程留档累积：思考全文 / 工具调用序列 / 最终回复——流结束后落 docs/{stage}/iter{n}/，
+            // 历史回放可查（agent_state 只存对话正文，思考与工具轨迹只在这里有）
+            StringBuilder thinkingBuf = new StringBuilder();
+            StringBuilder replyBuf = new StringBuilder();
+            List<String[]> toolRows = new java.util.ArrayList<>(); // {tool, state}
+            String[] replyFromResult = {null};
             try {
                 send(emitter, "agent.start", Map.of("agent", spec.name()));
                 runtime.stream(runtime.createAgent(spec), new AgentMessage(query, null, null), evt -> {
-                    send(emitter, evt.type(), payloadOf(evt));
+                    Map<String, Object> payload = payloadOf(evt);
+                    String type = evt.type();
+                    if ("thinking.delta".equals(type)) {
+                        Object d = payload.get("delta");
+                        if (d != null) {
+                            thinkingBuf.append(d);
+                        }
+                    } else if ("agent.delta".equals(type)) {
+                        Object d = payload.get("delta");
+                        if (d != null) {
+                            replyBuf.append(d);
+                        }
+                    } else if ("agent.result".equals(type)) {
+                        Object txt = payload.get("text");
+                        if (txt != null && !String.valueOf(txt).isBlank()) {
+                            replyFromResult[0] = String.valueOf(txt);
+                        }
+                    } else if ("tool.call".equals(type)) {
+                        toolRows.add(new String[]{String.valueOf(payload.getOrDefault("tool", "?")), "执行中"});
+                    } else if ("tool.result".equals(type)) {
+                        String tool = String.valueOf(payload.getOrDefault("tool", "?"));
+                        String state = String.valueOf(payload.getOrDefault("state", "DONE"));
+                        for (int i = toolRows.size() - 1; i >= 0; i--) {
+                            if (toolRows.get(i)[0].equals(tool) && "执行中".equals(toolRows.get(i)[1])) {
+                                toolRows.get(i)[1] = state;
+                                break;
+                            }
+                        }
+                    }
+                    send(emitter, type, payload);
                 });
+                saveChatLog(wsId, stage, iteration, masterAgent, query, thinkingBuf.toString(),
+                        toolRows, replyFromResult[0] != null ? replyFromResult[0] : replyBuf.toString());
                 send(emitter, "stage.finish", Map.of("status", "SUCCESS"));
                 emitter.complete();
                 log.info("orchestrator chat finished: ws={} stage={} agent={}", wsId, stage, masterAgent);
             } catch (Exception e) {
                 log.warn("orchestrator chat failed: ws={} stage={} -> {}", wsId, stage, e.getMessage());
+                saveChatLog(wsId, stage, iteration, masterAgent, query, thinkingBuf.toString(),
+                        toolRows, replyFromResult[0] != null ? replyFromResult[0] : replyBuf.toString());
                 try {
                     send(emitter, "stage.finish", Map.of("status", "FAILED", "error", String.valueOf(e.getMessage())));
                     emitter.complete();
@@ -133,6 +174,44 @@ public class StageOrchestrator {
             }
         });
         return emitter;
+    }
+
+    /**
+     * 对话过程留档（双落：docs/{stage}/iter{n}/{seq}-CHATLOG-{title}.md + DOC 索引）。
+     * 思考与工具轨迹只存在于事件流，不落盘则历史回放永远看不到——留档失败只记日志不阻塞对话。
+     */
+    private void saveChatLog(String wsId, String stage, int iteration, String masterAgent,
+                             String query, String thinking, List<String[]> toolRows, String reply) {
+        try {
+            if ((query == null || query.isBlank())
+                    && thinking.isBlank() && toolRows.isEmpty() && (reply == null || reply.isBlank())) {
+                return;
+            }
+            String ts = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss"));
+            StringBuilder md = new StringBuilder();
+            md.append("# 对话过程留档 · ").append(stage).append(" 第 ").append(iteration).append(" 轮\n\n");
+            md.append("- 时间：").append(java.time.LocalDateTime.now()
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))).append("\n");
+            md.append("- 主控：").append(masterAgent).append("\n");
+            md.append("- 用户：").append(query == null ? "" : query.replace("\n", " ")).append("\n\n");
+            if (!thinking.isBlank()) {
+                md.append("## 思考过程\n\n").append(thinking.strip()).append("\n\n");
+            }
+            if (!toolRows.isEmpty()) {
+                md.append("## 工具调用\n\n| # | 工具 | 结果 |\n|---|------|------|\n");
+                for (int i = 0; i < toolRows.size(); i++) {
+                    md.append("| ").append(i + 1).append(" | ").append(toolRows.get(i)[0])
+                            .append(" | ").append(toolRows.get(i)[1]).append(" |\n");
+                }
+                md.append("\n");
+            }
+            if (reply != null && !reply.isBlank()) {
+                md.append("## 最终回复\n\n").append(reply.strip()).append("\n");
+            }
+            docStore.write(wsId, stage, iteration, "CHATLOG", Integer.parseInt(ts), "对话" + ts, md.toString(), masterAgent);
+        } catch (Exception e) {
+            log.warn("对话过程留档失败（不阻塞）: ws={} stage={} -> {}", wsId, stage, e.getMessage());
+        }
     }
 
     /**
