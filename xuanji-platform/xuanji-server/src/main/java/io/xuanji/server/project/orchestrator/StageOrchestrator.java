@@ -241,6 +241,39 @@ public class StageOrchestrator {
         return Map.of("ok", true, "seq", seq, "message", "决策已答复并留档");
     }
 
+    /**
+     * 讨论进行中用户插话（用户可参与讨论）：发言以【用户】前缀追加进讨论流，
+     * 后续轮发言者与汇总人从台账读到（汇总 prompt 已注明用户意见优先采纳）。
+     * 仅 EXECUTING 的 DISCUSS/CONSULT 步可插话——讨论结束后走正常对话。
+     */
+    public Map<String, Object> discussSpeech(LoginUser user, String wsId, Map<String, Object> body) {
+        workspaceRepo.findById(wsId).stream().findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "项目不存在"));
+        long seq = body.get("seq") == null ? -1
+                : (body.get("seq") instanceof Number n ? n.longValue()
+                        : Long.parseLong(String.valueOf(body.get("seq")).trim()));
+        String text = body.get("text") == null ? "" : String.valueOf(body.get("text")).trim();
+        if (seq <= 0 || text.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "seq 与 text 必填");
+        }
+        if (text.length() > 2000) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "发言过长（上限 2000 字）");
+        }
+        StageStep found = stepRepo.findByStage(wsId, currentStageOf(wsId), currentIteration(wsId, currentStageOf(wsId)))
+                .stream()
+                .filter(s -> s.seq() == seq)
+                .findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "步骤序号不存在: " + seq));
+        if (found.stepType() != StepType.DISCUSS && found.stepType() != StepType.CONSULT) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "该步骤不是讨论/求助，无法插话");
+        }
+        if (found.status() != StepStatus.EXECUTING) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "讨论已结束（" + found.status() + "），请直接在对话里说");
+        }
+        stepRepo.appendSpeech(found.id(), "【用户】" + text + "\n\n");
+        return Map.of("ok", true, "seq", seq, "message", "发言已加入讨论");
+    }
+
     /** 当前阶段（决策答复按当前阶段台账找 DECISION 步）。 */
     private String currentStageOf(String wsId) {
         Map<String, Object> ws = workspaceRepo.findById(wsId).stream().findFirst()

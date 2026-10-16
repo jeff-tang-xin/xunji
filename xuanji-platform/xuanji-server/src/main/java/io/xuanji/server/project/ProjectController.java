@@ -362,6 +362,17 @@ public class ProjectController {
         return orchestrator.answerDecision(user, id, body);
     }
 
+    /**
+     * 讨论进行中用户插话（{@code {seq, text}}）：发言以【用户】前缀进讨论流，
+     * 后续轮发言者与汇总人可见——用户参与讨论，而不是旁观后台黑盒。
+     */
+    @PostMapping("/{id}/stage/discuss/speech")
+    public Object discussSpeech(@RequestAttribute(LoginUser.ATTR) LoginUser user,
+                                @PathVariable String id,
+                                @RequestBody Map<String, Object> body) {
+        return orchestrator.discussSpeech(user, id, body);
+    }
+
     /** 项目内全部阶段会话列表：会话粒度=阶段，供右侧栏「会话」tab 展示与切换。 */
     @GetMapping("/{id}/stage/chat/sessions")
     public List<Map<String, Object>> stageChatSessions(@RequestAttribute(LoginUser.ATTR) LoginUser user,

@@ -176,4 +176,10 @@ public class StageStepRepository {
         jdbc.update("UPDATE project_stage_step SET output_full = COALESCE(output_full, '') || ? WHERE id = ?",
                 text, id);
     }
+
+    /** 讨论当前已落库全文（AI 发言 + 用户插话 + 进度行）：后续轮发言者与汇总人的输入源。 */
+    public java.util.Optional<String> findOutputFull(long id) {
+        return jdbc.query("SELECT output_full FROM project_stage_step WHERE id = ?",
+                (rs, i) -> rs.getString(1), id).stream().findFirst();
+    }
 }

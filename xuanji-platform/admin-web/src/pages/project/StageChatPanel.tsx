@@ -560,6 +560,19 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
   const submit = (jump: boolean) => {
     const query = input.trim()
     if (!query && files.length === 0) return
+    // 讨论进行中：用户发言直接插进讨论流（【用户】前缀落库，后续发言者与汇总可见）——
+    // 用户可参与讨论，而不是旁观后台黑盒；不走主控对话（主控正在等讨论结果）
+    const bg = (exec?.steps || []).find((s) => (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT') && s.status === 'EXECUTING')
+    if (bg) {
+      const text = query
+      const seq = bg.seq
+      setInput('')
+      setFiles([])
+      void apiJson(`/api/projects/${projectId}/stage/discuss/speech`, 'POST', { seq, text })
+        .then(() => message.success(`发言已加入${bg.stepType === 'DISCUSS' ? '讨论' : '求助'} #${seq}，AI 发言者会看到`))
+        .catch((e) => message.error(e instanceof Error ? e.message : String(e)))
+      return
+    }
     const atts = files.length ? [...files] : undefined
     const q = { id: nextId(), text: query || '（见附件）', attachments: atts }
     setInput('')
@@ -829,7 +842,9 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
           disabled={inputLocked}
           placeholder={inputLocked
             ? '有未处理的决策——请先在右侧「阶段执行」的决策卡上答复，答复后这里自动解锁'
-            : `说明你要在${stageText}做什么（Enter 发送，Shift+Enter 换行，可直接粘贴截图）`}
+            : (exec?.steps || []).some((s) => (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT') && s.status === 'EXECUTING')
+              ? '讨论进行中：在这里发言会直接进入讨论，AI 发言者与汇总都会看到（Enter 发送）'
+              : `说明你要在${stageText}做什么（Enter 发送，Shift+Enter 换行，可直接粘贴截图）`}
           autoSize={{ minRows: 2, maxRows: 5 }}
         />
         {inputLocked && (

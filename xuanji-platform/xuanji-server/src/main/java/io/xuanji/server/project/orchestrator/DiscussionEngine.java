@@ -115,11 +115,12 @@ public class DiscussionEngine {
                 stepRepo.appendSpeech(step.id(), "【" + speaker + "】" + speech + "\n\n");
             }
 
-            // 后续轮：串行互见讨论
+            // 后续轮：串行互见讨论。seenHistory 从 DB 读而非内存 history——
+            // 用户插话（【用户】前缀）实时落库，后续发言者能看到并回应（用户可参与讨论）
             for (int r = 0; r < rounds; r++) {
                 for (String p : step.participants()) {
                     stepRepo.appendSpeech(step.id(), "▶ " + p + " 发言中…\n\n");
-                    String seen = String.join("\n\n", history);
+                    String seen = latestSpeech(step.id());
                     String speech = speak(p, brief, step, seen);
                     history.add("【" + p + "】" + speech);
                     stepRepo.appendSpeech(step.id(), "【" + p + "】" + speech + "\n\n");
@@ -129,11 +130,14 @@ public class DiscussionEngine {
             // 收敛：汇总人读全部发言（与发言同款超时——invoke 是同步阻塞，无超时则模型 hang 会把讨论永远挂在 EXECUTING）
             stepRepo.appendSpeech(step.id(),
                     "⏱ 发言收集完毕（" + history.size() + " 条），正在汇总纪要…\n\n");
-            String transcript = String.join("\n\n", history);
+            // transcript 从 DB 读：含用户插话（【用户】）——用户参与讨论的意见必须进纪要；
+            // 进度行（⏱/▶）也在库里，prompt 里让汇总人忽略
+            String transcript = latestSpeech(step.id());
             AgentSpec sumSpec = agentNodes.buildSpecByAgentName(summarizer, null);
             java.util.concurrent.Future<String> sumFuture = speakerPool.submit(() -> invoker.invoke(sumSpec,
                     brief.render(step.name(),
-                            "以下是本次讨论的全部发言，请汇总（控制在 500 字内）：1) 达成的共识（分点）；2) 仍存的分歧；"
+                            "以下是本次讨论的全部发言（⏱/▶ 开头的是进度提示，忽略；【用户】开头的是用户本人意见，优先采纳），"
+                                    + "请汇总（控制在 500 字内）：1) 达成的共识（分点）；2) 仍存的分歧；"
                                     + "3) 需要用户澄清的问题（OPEN_QUESTION，没有则写「无」）。\n\n" + transcript)));
             String consensus;
             try {
@@ -161,6 +165,11 @@ public class DiscussionEngine {
             }
             log.warn("讨论失败: ws={} seq={} -> {}", step.workspaceId(), step.seq(), msg);
         }
+    }
+
+    /** 当前已落库的讨论全文（含 AI 发言与用户插话）：后续轮与汇总的输入源。 */
+    private String latestSpeech(long stepId) {
+        return stepRepo.findOutputFull(stepId).orElse("");
     }
 
     /** 单人发言：读议题包（+已有历史）以角色视角发言。 */
