@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  Alert,
   Button,
   Empty,
   Input,
@@ -28,16 +29,33 @@ interface ChatAttachment {
   dataUrl?: string
 }
 
-/** 阶段对话消息（user 右侧蓝底，agent 左侧白底，error 红底，queued 灰底待发送，process 过程留档卡片） */
+/** 工具授权请求里的单个工具调用（agent.confirm 事件 toolCalls 元素） */
+interface ConfirmToolCall {
+  toolCallId: string
+  tool: string
+  input?: Record<string, unknown>
+}
+
+/** 工具授权卡数据（sessionId 用于恢复执行；done/approved 标记用户已处理） */
+interface ConfirmCardData {
+  sessionId: string
+  toolCalls: ConfirmToolCall[]
+  done?: boolean
+  approved?: boolean
+}
+
+/** 阶段对话消息（user 右侧蓝底，agent 左侧白底，error 红底，queued 灰底待发送，process 过程留档卡片，confirm 工具授权卡） */
 export interface StageChatMsg {
   id: number
-  type: 'user' | 'agent' | 'error' | 'queued' | 'system' | 'process'
+  type: 'user' | 'agent' | 'error' | 'queued' | 'system' | 'process' | 'confirm'
   text: string
   attachments?: ChatAttachment[]
   /** agent 回复流式生成中 */
   streaming?: boolean
   /** process 消息的标题（如「💬 #3 讨论·发言」「❓ #5 求助·architect」） */
   title?: string
+  /** confirm 消息的授权数据 */
+  confirmData?: ConfirmCardData
 }
 
 async function readSse(res: Response, onEvent: (event: string, data: string) => void) {
@@ -76,6 +94,14 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
   const [queueLen, setQueueLen] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
   const busyRef = useRef(false)
+  // 授权卡「本会话记住」勾选状态（ref 即时读写，渲染时读当前值）
+  const rememberRef = useRef(false)
+  // 决策门禁：有未处理的 DECISION 步（未 DONE/SKIPPED）时锁定对话输入——
+  // 决策必须在项目区域（右侧）处理，答复是唯一解锁通道，避免对话答复与决策卡两张皮
+  const pendingDecisions = (exec?.steps || []).filter(
+    (s) => s.stepType === 'DECISION' && s.status !== 'DONE' && s.status !== 'SKIPPED'
+  )
+  const inputLocked = pendingDecisions.length > 0
   // 对话附件（V29）：图片走多模态、文本文件走内容拼接；截图可直接 Ctrl+V 粘贴
   const [files, setFiles] = useState<ChatAttachment[]>([])
 
@@ -265,6 +291,64 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
     if (el) el.scrollTop = el.scrollHeight
   }, [msgs])
 
+  /** 工具授权决定：批准/拒绝（可勾选本会话记住）→ 恢复执行 → 渲染恢复期间事件 */
+  const handleConfirm = async (msgId: number, approved: boolean, remember: boolean) => {
+    const card = msgs.find((m) => m.id === msgId)
+    if (!card?.confirmData || card.confirmData.done) return
+    const { sessionId, toolCalls } = card.confirmData
+    setMsgs((x) => x.map((m) => (m.id === msgId
+      ? { ...m, confirmData: { ...m.confirmData!, done: true, approved } } : m)))
+    try {
+      const r = await apiFetch(`/api/projects/${projectId}/stage/chat/confirm`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId,
+          decisions: toolCalls.map((tc) => ({
+            toolCallId: tc.toolCallId, tool: tc.tool, approved, rememberSession: remember,
+          })),
+        }),
+      })
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({})) as { message?: string; error?: string }
+        throw new Error(data.message || data.error || `请求失败 (${r.status})`)
+      }
+      const data = await r.json() as { events?: Array<{ type: string; delta?: string; text?: string; meta?: Record<string, unknown> }> }
+      // 恢复执行期间的事件：delta/result 拼一条 agent 消息，tool.call/result 记过程行
+      const agentId = nextId()
+      let buf = ''
+      let sawText = false
+      const procLines: string[] = []
+      for (const evt of data.events || []) {
+        if (evt.type === 'agent.delta' && typeof evt.delta === 'string') {
+          buf += evt.delta
+          sawText = true
+        } else if (evt.type === 'agent.result' && typeof evt.text === 'string') {
+          if (!sawText && evt.text) buf = evt.text
+        } else if (evt.type === 'tool.call') {
+          procLines.push(`🔧 ${String(evt.meta?.tool || '')} 执行中…`)
+        } else if (evt.type === 'tool.result') {
+          procLines.push(`🔧 ${String(evt.meta?.tool || '')} 完成`)
+        } else if (evt.type === 'error') {
+          procLines.push(`⚠️ ${evt.text || '执行出错'}`)
+        }
+      }
+      setMsgs((x) => {
+        const extra: StageChatMsg[] = []
+        if (procLines.length) {
+          extra.push({ id: nextId(), type: 'process', title: '🔧 工具执行', text: procLines.join('\n') })
+        }
+        if (buf.trim()) {
+          extra.push({ id: agentId, type: 'agent', text: buf })
+        }
+        return [...x, ...extra]
+      })
+    } catch (e) {
+      setMsgs((x) => [...x, {
+        id: nextId(), type: 'error', text: e instanceof Error ? e.message : String(e),
+      }])
+    }
+  }
+
   /** 发送一条（q 已在 msgs 里以 queued 形态占位）：SSE 流式回填，停止走 AbortController */
   const sendMsg = async (q: { id: number; text: string; attachments?: ChatAttachment[] }) => {
     const agentMsgId = nextId()
@@ -308,6 +392,17 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
           const full = payload.text
           setMsgs((x) => x.map((m) => (m.id === agentMsgId && (!m.text || m.text.startsWith('（'))
             ? { ...m, text: full } : m)))
+        } else if (event === 'agent.confirm' && Array.isArray(payload.toolCalls)) {
+          // 工具授权请求：流到此结束，实例挂起等待用户决定——推授权卡
+          const calls = (payload.toolCalls as Array<Record<string, unknown>>).map((tc) => ({
+            toolCallId: String(tc.toolCallId || ''),
+            tool: String(tc.tool || ''),
+            input: (tc.input || {}) as Record<string, unknown>,
+          }))
+          setMsgs((x) => [...x, {
+            id: nextId(), type: 'confirm', text: '',
+            confirmData: { sessionId: String(payload.sessionId || ''), toolCalls: calls },
+          }])
         } else if (event === 'agent.end' || event === 'stage.finish') {
           setMsgs((x) => x.map((m) => (m.id === agentMsgId ? { ...m, streaming: false } : m)))
         } else if (event === 'error') {
@@ -430,7 +525,42 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
               marginBottom: 10,
               textAlign: m.type === 'user' ? 'right' : m.type === 'system' ? 'center' : 'left',
             }}>
-              {m.type === 'process' ? (
+              {m.type === 'confirm' && m.confirmData ? (
+                <div style={{
+                  maxWidth: '94%', padding: '10px 14px', borderRadius: 8, textAlign: 'left',
+                  background: '#fffbe6', border: '1px solid #ffe58f',
+                }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                    🔐 AI 请求使用工具：{m.confirmData.toolCalls.map((tc) => tc.tool).join('、')}
+                  </div>
+                  {m.confirmData.toolCalls.map((tc) => (
+                    <div key={tc.toolCallId} style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 4 }}>
+                      <code style={{ wordBreak: 'break-all' }}>{JSON.stringify(tc.input || {}).slice(0, 200)}</code>
+                    </div>
+                  ))}
+                  {m.confirmData.done ? (
+                    <Tag color={m.confirmData.approved ? 'green' : 'red'}>
+                      {m.confirmData.approved ? '已批准' : '已拒绝'}
+                    </Tag>
+                  ) : (
+                    <>
+                      <Space size={8} style={{ marginTop: 4 }}>
+                        <Button type="primary" size="small" onClick={() => void handleConfirm(m.id, true, rememberRef.current)}>
+                          批准执行
+                        </Button>
+                        <Button size="small" danger onClick={() => void handleConfirm(m.id, false, false)}>
+                          拒绝
+                        </Button>
+                      </Space>
+                      <label style={{ marginLeft: 10, fontSize: 12, color: '#595959', cursor: 'pointer' }}>
+                        <input type="checkbox" checked={rememberRef.current}
+                          onChange={(e) => { rememberRef.current = e.target.checked }} />
+                        {' '}本会话记住（该项目会话内不再询问）
+                      </label>
+                    </>
+                  )}
+                </div>
+              ) : m.type === 'process' ? (
                 <div style={{
                   maxWidth: '94%', padding: '8px 12px', borderRadius: 8, textAlign: 'left',
                   background: '#f9f0ff', border: '1px solid #d3adf7',
@@ -518,9 +648,21 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={`说明你要在${stageText}做什么（Enter 发送，Shift+Enter 换行，可直接粘贴截图）`}
+          disabled={inputLocked}
+          placeholder={inputLocked
+            ? '有未处理的决策——请先在右侧「阶段执行」的决策卡上答复，答复后这里自动解锁'
+            : `说明你要在${stageText}做什么（Enter 发送，Shift+Enter 换行，可直接粘贴截图）`}
           autoSize={{ minRows: 2, maxRows: 5 }}
         />
+        {inputLocked && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginTop: 6 }}
+            message={`待处理决策 ${pendingDecisions.length} 项：${pendingDecisions.map((d) => `#${d.seq} ${d.name}`).join('、')}`}
+            description="决策需要在右侧「阶段执行」面板处理（点决策行的「处理」按钮答复）。答复后对话自动解锁。"
+          />
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
           <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>
             {busy
@@ -547,7 +689,7 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
           </Upload>
           <Button
             type="primary" icon={<SendOutlined />}
-            disabled={busy && !input.trim() && files.length === 0} onClick={() => submit(false)}
+            disabled={inputLocked || (busy && !input.trim() && files.length === 0)} onClick={() => submit(false)}
           >
             {busy ? `入队${queueLen ? ` (${queueLen})` : ''}` : '发送'}
           </Button>

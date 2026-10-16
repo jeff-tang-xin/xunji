@@ -37,6 +37,10 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
   const [gate, setGate] = useState<WaitingDecision | null>(null)
   const [decision, setDecision] = useState<'APPROVE' | 'REJECT' | 'SKIP'>('APPROVE')
   const [comment, setComment] = useState('')
+  /** 新内核 DECISION 步的项目区域答复：处理中状态 + Modal 输入 */
+  const [decisionStep, setDecisionStep] = useState<StageStepRow | null>(null)
+  const [decisionAnswer, setDecisionAnswer] = useState('')
+  const [decisionSubmitting, setDecisionSubmitting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [gateErr, setGateErr] = useState<string | null>(null)
   const [approving, setApproving] = useState(false)
@@ -161,6 +165,26 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
   if (!exec) {
     return <Empty description="未取到执行信息" image={Empty.PRESENTED_IMAGE_SIMPLE} />
   }
+
+  /** 提交决策答复：POST /stage/decision/answer，成功后刷新（解锁对话输入） */
+  const submitDecisionAnswer = async () => {
+    if (!decisionStep || !decisionAnswer.trim()) return
+    setDecisionSubmitting(true)
+    try {
+      await apiJson(`/api/projects/${projectId}/stage/decision/answer`, 'POST', {
+        seq: decisionStep.seq,
+        answer: decisionAnswer.trim(),
+      })
+      message.success('决策已答复，对话输入已解锁')
+      setDecisionStep(null)
+      onRefresh()
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDecisionSubmitting(false)
+    }
+  }
+
   const nodes = exec.node_runs || []
   const waiting = exec.waiting_decisions || []
   const planId = exec.plan?.id
@@ -236,6 +260,19 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
               {txt}
             </Typography.Text>
           </Tooltip>
+        )
+      },
+    },
+    {
+      title: '操作', width: 70,
+      render: (_, r) => {
+        // 未处理决策（DECISION 且未 DONE/SKIPPED）：项目区域直接答复——有未处理决策时对话输入被锁定，这里是唯一解锁通道
+        if (r.stepType !== 'DECISION' || r.status === 'DONE' || r.status === 'SKIPPED') return null
+        return (
+          <Button size="small" type="link" style={{ padding: 0 }}
+            onClick={() => { setDecisionStep(r); setDecisionAnswer('') }}>
+            处理
+          </Button>
         )
       },
     },
@@ -456,6 +493,26 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
           placeholder="例如：子任务缺少数据迁移与回滚方案，补齐后再排开发"
         />
         {planErr && <Alert type="error" showIcon message={planErr} style={{ marginTop: 12 }} />}
+      </Modal>
+
+      {/* 新内核决策答复：项目区域直接处理（有未处理决策时左侧对话输入被锁定） */}
+      <Modal
+        open={!!decisionStep}
+        title={`答复决策 #${decisionStep?.seq ?? ''}：${decisionStep?.name || ''}`}
+        okText="提交答复"
+        okButtonProps={{ loading: decisionSubmitting, disabled: !decisionAnswer.trim() }}
+        onOk={() => void submitDecisionAnswer()}
+        onCancel={() => setDecisionStep(null)}
+      >
+        <Typography.Paragraph style={{ fontSize: 13 }}>
+          {decisionStep?.instruction}
+        </Typography.Paragraph>
+        <Input.TextArea
+          rows={4}
+          value={decisionAnswer}
+          onChange={(e) => setDecisionAnswer(e.target.value)}
+          placeholder="你的答复（必填）——主控会按答复继续推进，答复留档可追溯"
+        />
       </Modal>
     </>
   )

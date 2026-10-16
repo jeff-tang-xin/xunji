@@ -31,12 +31,21 @@ public class ProjectController {
     private final ProjectService projects;
     private final ProjectChatService projectChat;
     private final ProjectTemplateService templates;
+    private final io.xuanji.server.project.orchestrator.StageOrchestrator orchestrator;
+    private final io.xuanji.core.runtime.AgentRuntime agentRuntime;
+    private final io.xuanji.server.engine.ToolApprovalStore toolApprovals;
 
     public ProjectController(ProjectService projects, ProjectChatService projectChat,
-                             ProjectTemplateService templates) {
+                             ProjectTemplateService templates,
+                             io.xuanji.server.project.orchestrator.StageOrchestrator orchestrator,
+                             io.xuanji.core.runtime.AgentRuntime agentRuntime,
+                             io.xuanji.server.engine.ToolApprovalStore toolApprovals) {
         this.projects = projects;
         this.projectChat = projectChat;
         this.templates = templates;
+        this.orchestrator = orchestrator;
+        this.agentRuntime = agentRuntime;
+        this.toolApprovals = toolApprovals;
     }
 
     /** 项目列表（数据权限过滤，仅 PROJECT 类型）。 */
@@ -294,6 +303,63 @@ public class ProjectController {
                                @PathVariable String id,
                                @RequestBody(required = false) Map<String, Object> body) {
         return projectChat.chatByStage(user, id, body);
+    }
+
+    /**
+     * 工具授权确认（HITL）：对话流以 agent.confirm 事件结束后，用户在授权卡上批准/拒绝，
+     * 前端调本端点恢复执行。body = {sessionId, decisions:[{toolCallId, tool, approved, rememberSession}]}。
+     * rememberSession=true 且 approved 时记入会话级授权（本项目会话内该工具后续调用不再询问，
+     * 重启失效）；返回恢复执行期间的全部事件（result 文本前端追加进聊天框）。
+     */
+    @PostMapping("/{id}/stage/chat/confirm")
+    public Object confirmTool(@RequestAttribute(LoginUser.ATTR) LoginUser user,
+                              @PathVariable String id,
+                              @RequestBody Map<String, Object> body) {
+        String sessionId = body.get("sessionId") == null ? "" : body.get("sessionId").toString();
+        if (sessionId.isBlank()) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.BAD_REQUEST, "sessionId 必填");
+        }
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> decisions = body.get("decisions") instanceof List ? (List<Map<String, Object>>) body.get("decisions") : List.of();
+        List<io.xuanji.core.runtime.AgentConfirm> confirms = new java.util.ArrayList<>();
+        for (Map<String, Object> d : decisions) {
+            String toolCallId = d.get("toolCallId") == null ? null : d.get("toolCallId").toString();
+            if (toolCallId == null) {
+                continue;
+            }
+            boolean approved = Boolean.TRUE.equals(d.get("approved"));
+            boolean remember = Boolean.TRUE.equals(d.get("rememberSession"));
+            if (approved && remember) {
+                String tool = d.get("tool") == null ? null : d.get("tool").toString();
+                if (tool != null && !tool.isBlank()) {
+                    toolApprovals.grant(id, tool);
+                }
+            }
+            confirms.add(new io.xuanji.core.runtime.AgentConfirm(toolCallId, approved, remember));
+        }
+        if (confirms.isEmpty()) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.BAD_REQUEST, "decisions 为空");
+        }
+        List<Object> events = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        agentRuntime.confirmBySession(sessionId, confirms, evt -> events.add(java.util.Map.of(
+                "type", evt.type() == null ? "" : evt.type(),
+                "delta", evt.delta() == null ? "" : evt.delta(),
+                "text", evt.text() == null ? "" : evt.text(),
+                "meta", evt.meta() == null ? java.util.Map.of() : evt.meta())));
+        return Map.of("events", events);
+    }
+
+    /**
+     * 项目区域直接答复决策（{@code {seq, answer}}）：DECISION 步置 DONE + 答复留档。
+     * 有未处理决策时前端锁定对话输入——这里是唯一解锁通道；主控下一轮从步骤台账看到答复。
+     */
+    @PostMapping("/{id}/stage/decision/answer")
+    public Object answerDecision(@RequestAttribute(LoginUser.ATTR) LoginUser user,
+                                 @PathVariable String id,
+                                 @RequestBody Map<String, Object> body) {
+        return orchestrator.answerDecision(user, id, body);
     }
 
     /** 项目内全部阶段会话列表：会话粒度=阶段，供右侧栏「会话」tab 展示与切换。 */

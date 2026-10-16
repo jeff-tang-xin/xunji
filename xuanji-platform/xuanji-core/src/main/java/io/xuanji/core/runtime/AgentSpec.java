@@ -22,6 +22,12 @@ import java.util.Map;
  * @param skills        解析后的技能内容（AgentNodeExecutor 按 agent 级 skills_json +
  *                      节点级 capabilityBinding 合并查 skill_repo 装配；运行时注入
  *                      system prompt——Anthropic Agent Skills 形态的 P0 落地）
+ * @param builtinTools  内置工具白名单（AgentScope 2.0.4 自带：fs.read/fs.write/shell，
+ *                      来自 agent_config.builtin_tools_json；"shell:always"=永久放行，
+ *                      "shell"=每次调用 ASK 用户确认；空=不注册内置工具）
+ * @param workspaceRoot 项目工作区绝对路径（内置文件工具 baseDir 硬边界——所有工具都
+ *                      不能超过项目目录；null=无项目上下文，不注册文件类工具）
+ * @param workspaceId   项目 id（shell 会话级授权按项目维度检查与记忆）
  */
 public record AgentSpec(
         String agentConfigId,
@@ -33,7 +39,10 @@ public record AgentSpec(
         Map<String, Object> runtime,
         String sessionId,
         List<ToolDef> resolvedTools,
-        List<SkillDef> skills) {
+        List<SkillDef> skills,
+        List<String> builtinTools,
+        String workspaceRoot,
+        String workspaceId) {
 
     public AgentSpec {
         tools = tools == null ? List.of() : List.copyOf(tools);
@@ -41,5 +50,14 @@ public record AgentSpec(
         runtime = runtime == null ? Map.of() : Map.copyOf(runtime);
         resolvedTools = resolvedTools == null ? List.of() : List.copyOf(resolvedTools);
         skills = skills == null ? List.of() : List.copyOf(skills);
+        builtinTools = builtinTools == null ? List.of() : List.copyOf(builtinTools);
+    }
+
+    /** 旧形态兼容构造器（无内置工具上下文：工作台对话等非项目场景）。 */
+    public AgentSpec(String agentConfigId, String name, String systemPrompt, ModelConfig model,
+                     List<ToolRef> tools, PermissionPolicy permission, Map<String, Object> runtime,
+                     String sessionId, List<ToolDef> resolvedTools, List<SkillDef> skills) {
+        this(agentConfigId, name, systemPrompt, model, tools, permission, runtime,
+                sessionId, resolvedTools, skills, List.of(), null, null);
     }
 }

@@ -13,6 +13,7 @@ interface AgentRow extends AssetRow {
   system_prompt?: string | null
   tools_json?: ToolRef[] | null
   skills_json?: string[] | null
+  builtin_tools_json?: string[] | null
   params_json?: Record<string, unknown> | null
 }
 
@@ -44,6 +45,7 @@ interface AgentFormValues {
   toolRefs?: string[]
   mcpRefs?: string[]
   skills_json?: string[]
+  builtin_tools_json?: string[]
   temperature?: number | null
   maxTokens?: number | null
   topP?: number | null
@@ -136,6 +138,16 @@ function AgentForm({ initialValues, models, skills, tools, mcps, published, onSa
       <Form.Item label="技能" name="skills_json" extra="技能的操作指引会在执行时并入系统提示词">
         <Select mode="multiple" allowClear placeholder="选择技能（可多选）" options={toOptions(skills, 'skill')} />
       </Form.Item>
+      <Form.Item label="内置工具" name="builtin_tools_json"
+        extra="AgentScope 自带工具，仅在项目对话中生效且严格限定项目目录内；shell 每次调用需用户确认，勾选「永久放行」后免确认">
+        <Select mode="multiple" allowClear placeholder="选择内置工具（可多选）"
+          options={[
+            { value: 'fs.read', label: 'fs.read — 读文件/列目录' },
+            { value: 'fs.write', label: 'fs.write — 写文件' },
+            { value: 'shell', label: 'shell — 执行命令（每次确认）' },
+            { value: 'shell:always', label: 'shell（永久放行）' },
+          ]} />
+      </Form.Item>
 
       <Divider orientation="left" plain>生成参数</Divider>
       <Row gutter={12}>
@@ -200,6 +212,7 @@ export default function AgentAdmin() {
         ...(values.mcpRefs || []).map((ref) => ({ type: 'MCP', ref })),
       ],
       skills_json: values.skills_json || [],
+      builtin_tools_json: values.builtin_tools_json || [],
       params_json: params,
     }
     const isNew = !editing?.id
@@ -287,6 +300,8 @@ export default function AgentAdmin() {
                 ))}</span>
               <span>技能：{(r.skills_json || []).length === 0 ? <Tag>未绑定</Tag> :
                 (r.skills_json || []).map((s, i) => <Tag key={i} color="purple">{refName(s, refPools)}</Tag>)}</span>
+              <span>内置工具：{(r.builtin_tools_json || []).length === 0 ? <Tag>未启用</Tag> :
+                (r.builtin_tools_json || []).map((b, i) => <Tag key={i} color="orange">{b}</Tag>)}</span>
             </Space>
           ),
         }}
@@ -303,6 +318,7 @@ export default function AgentAdmin() {
               toolRefs: (editing.tools_json || []).filter((t) => t.type === 'TOOL').map((t) => t.ref as string),
               mcpRefs: (editing.tools_json || []).filter((t) => t.type === 'MCP').map((t) => t.ref as string),
               skills_json: editing.skills_json || [],
+              builtin_tools_json: editing.builtin_tools_json || [],
               temperature: numOf(editing.params_json, 'temperature'),
               maxTokens: numOf(editing.params_json, 'maxTokens'),
               topP: numOf(editing.params_json, 'topP'),

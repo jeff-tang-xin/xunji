@@ -24,6 +24,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
+import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -186,6 +187,15 @@ public class AgentNodeExecutor {
      * @param stageGuidance 已组装好的阶段指导文本，null/空白则不注入
      */
     public AgentSpec buildSpecByAgentName(String agentName, String sessionId, String stageGuidance) {
+        return buildSpecByAgentName(agentName, sessionId, stageGuidance, null);
+    }
+
+    /**
+     * 带「项目上下文」的重载：wsId 非空时启用内置工具（AgentScope 自带 fs/shell）——
+     * 按 agent_config.builtin_tools_json 白名单注册，baseDir 硬限项目目录（workspace.root_path）。
+     * wsId 为空（讨论/求助/汇总等后台无人值守路径）不启用——shell ASK 无人批准会挂死。
+     */
+    public AgentSpec buildSpecByAgentName(String agentName, String sessionId, String stageGuidance, String wsId) {
         Map<String, Object> agentRow = loadAgentConfigByName(agentName);
         ModelConfig model = loadModelConfig(agentRow);
         Map<String, Object> params = jsonMap(agentRow.get("params_json"));
@@ -194,6 +204,14 @@ public class AgentNodeExecutor {
         List<AssetRef> agentSkills = parseSkillRefs(agentRow.get("skills_json"));
         List<SkillDef> skills = resolveSkills(agentSkills);
         String systemPrompt = composeStagePrompt((String) agentRow.get("system_prompt"), stageGuidance);
+        List<String> builtin = List.of();
+        String rootPath = null;
+        if (wsId != null && !wsId.isBlank()) {
+            builtin = parseBuiltinTools(agentRow.get("builtin_tools_json"));
+            if (!builtin.isEmpty()) {
+                rootPath = workspaceRoot(wsId);
+            }
+        }
         return new AgentSpec(
                 agentRow.get("id") + "@" + agentRow.get("version"),
                 (String) agentRow.getOrDefault("name", agentName),
@@ -204,7 +222,48 @@ public class AgentNodeExecutor {
                 params,
                 sessionId,
                 resolved,
-                skills);
+                skills,
+                builtin,
+                rootPath,
+                wsId);
+    }
+
+    /** builtin_tools_json（JSONB 字符串数组）→ 白名单过滤后的内置工具清单。 */
+    private List<String> parseBuiltinTools(Object json) {
+        if (json == null) {
+            return List.of();
+        }
+        Set<String> allowed = Set.of("fs.read", "fs.write", "shell", "shell:always");
+        try {
+            List<?> items = objectMapper.readValue(json.toString(), List.class);
+            List<String> out = new ArrayList<>();
+            for (Object item : items) {
+                String s = item == null ? null : item.toString().trim();
+                if (s != null && allowed.contains(s) && !out.contains(s)) {
+                    out.add(s);
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            log.warn("builtin_tools_json parse failed, ignored: {}", e.toString());
+            return List.of();
+        }
+    }
+
+    /** 项目工作区绝对路径（内置文件工具 baseDir 硬边界）。 */
+    private String workspaceRoot(String wsId) {
+        try {
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    "SELECT root_path FROM workspace WHERE id = ?", wsId);
+            if (rows.isEmpty() || rows.get(0).get("root_path") == null) {
+                log.warn("workspace root_path missing, builtin tools disabled: {}", wsId);
+                return null;
+            }
+            return rows.get(0).get("root_path").toString();
+        } catch (Exception e) {
+            log.warn("workspace root query failed, builtin tools disabled: {} ({})", wsId, e.toString());
+            return null;
+        }
     }
 
     /** 拼接角色基座 prompt 与阶段指导；无阶段指导时原样返回。 */
@@ -221,7 +280,8 @@ public class AgentNodeExecutor {
     private Map<String, Object> loadAgentConfigByName(String agentName) {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT id, name, system_prompt, model_provider_id, tools_json::text AS tools_json, "
-                        + "params_json::text AS params_json, skills_json::text AS skills_json, version "
+                        + "params_json::text AS params_json, skills_json::text AS skills_json, "
+                        + "builtin_tools_json::text AS builtin_tools_json, version "
                         + "FROM agent_config WHERE name = ? ORDER BY version DESC LIMIT 1",
                 agentName);
         if (rows.isEmpty()) {

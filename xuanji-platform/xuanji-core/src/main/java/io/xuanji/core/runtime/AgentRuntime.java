@@ -31,4 +31,25 @@ public interface AgentRuntime {
 
     /** run 结束释放实例（无状态 Agent 池化为 P3 评估项） */
     void close(AgentHandle agent);
+
+    /**
+     * HITL 确认回填（AgentScope ask 机制）：工具调用被权限引擎判为 ASK 时流以
+     * agent.confirm 事件结束、实例挂起缓存；用户批准/拒绝后经本方法恢复执行，
+     * 事件继续经 sink 推送（与 stream 同一事件语义）。approved+rememberSession=true
+     * 时实现方应把该工具记入会话级授权（本项目会话内后续调用不再 ASK）。
+     * default 实现抛不支持（仅 AgentScope 实现覆写）。
+     */
+    default void confirm(AgentHandle agent, java.util.List<AgentConfirm> confirms,
+                         java.util.function.Consumer<AgentStreamEvent> sink) {
+        throw new UnsupportedOperationException("confirm not supported by this runtime");
+    }
+
+    /**
+     * 按会话恢复（平台 confirm API 入口）：确认请求是独立 HTTP 请求，平台拿不到原
+     * AgentHandle，按 sessionId 从实现方挂起缓存取回。无挂起实例时实现方抛状态错。
+     */
+    default void confirmBySession(String sessionId, java.util.List<AgentConfirm> confirms,
+                                  java.util.function.Consumer<AgentStreamEvent> sink) {
+        throw new UnsupportedOperationException("confirm not supported by this runtime");
+    }
 }

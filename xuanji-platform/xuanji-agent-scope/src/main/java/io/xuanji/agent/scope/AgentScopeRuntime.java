@@ -25,6 +25,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Set;
 import java.util.Map;
 
 /**
@@ -64,8 +65,32 @@ public class AgentScopeRuntime implements AgentRuntime {
     /** 代码工具（Tool SPI bean）提供者——全局注册为 Agent 可调用能力（平台级，P0 简化） */
     private final ObjectProvider<Tool> toolProvider;
 
-    public AgentScopeRuntime(ObjectProvider<Tool> toolProvider, JdbcTemplate jdbcTemplate) {
+    /**
+     * 会话级授权检查（server 实现 ToolApprovalStore，依赖倒置）：shell 两级授权的
+     * 「项目内当前 session 授权」侧。可空（纯 agent-scope 测试环境无实现）。
+     */
+    private final ObjectProvider<ToolApprovalChecker> approvalChecker;
+
+    /** shell 命令白名单（逗号分隔，application.yml xuanji.agent.shell-allowed 可覆盖） */
+    @org.springframework.beans.factory.annotation.Value("${xuanji.agent.shell-allowed:git,mvn,java,ls,cat,pwd,echo,tail,head,grep,find,docker,systemctl}")
+    private String shellAllowed;
+
+    /**
+     * ASK 挂起实例缓存：sessionId → 等待用户确认的 agent + 本次 ASKING 的工具调用块。
+     * 工具调用被权限引擎判 ASK 时流以 agent.confirm 事件结束，实例不能销毁
+     * （pending ASKING 状态在实例内存里）；用户批准后 confirm() 取出恢复执行。
+     * 会话粒度串行假设（同会话不并发对话）。
+     */
+    private record Suspended(AgentScopeHandle handle,
+                             List<io.agentscope.core.message.ToolUseBlock> askingCalls) {
+    }
+
+    private final Map<String, Suspended> suspended = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public AgentScopeRuntime(ObjectProvider<Tool> toolProvider, JdbcTemplate jdbcTemplate,
+                             ObjectProvider<ToolApprovalChecker> approvalChecker) {
         this.toolProvider = toolProvider;
+        this.approvalChecker = approvalChecker;
         this.stateStore = new PostgresAgentStateStore(jdbcTemplate);
     }
 
@@ -91,15 +116,18 @@ public class AgentScopeRuntime implements AgentRuntime {
             // 多轮记忆：状态外置——实例无状态化，记忆跨实例持久于 stateStore
             builder.stateStore(stateStore).defaultSessionId(spec.sessionId());
         }
-        // 工具装配（docs/detail/04 §1）：① 数据工具 OPENAPI → HttpAgentTool；② 代码工具 SPI → ToolAgentAdapter
+        // 工具装配（docs/detail/04 §1）：① 数据工具 OPENAPI → HttpAgentTool；② 代码工具 SPI → ToolAgentAdapter；
+        // ③ 内置工具（AgentScope 自带 fs/shell，按 agent_config 白名单启用，baseDir 硬限项目目录）
         List<io.agentscope.core.tool.AgentTool> agentTools = collectAgentTools(spec);
-        if (!agentTools.isEmpty()) {
-            io.agentscope.core.tool.Toolkit toolkit = new io.agentscope.core.tool.Toolkit();
-            for (io.agentscope.core.tool.AgentTool at : agentTools) {
-                toolkit.registerAgentTool(at);
-            }
-            builder.toolkit(toolkit);
+        io.agentscope.core.tool.Toolkit toolkit = new io.agentscope.core.tool.Toolkit();
+        for (io.agentscope.core.tool.AgentTool at : agentTools) {
+            toolkit.registerAgentTool(at);
         }
+        registerBuiltinTools(toolkit, spec);
+        builder.toolkit(toolkit);
+        // 权限上下文（HITL ask 机制）：永久授权（白名单）与 session 授权 → ALLOW 规则；
+        // 无规则匹配（如未授权的 shell）→ DEFAULT mode 默认 ASK → RequireUserConfirmEvent 单次授权
+        builder.permissionContext(permissionContext(spec));
         ReActAgent agent = builder.build();
         log.info("agent created: config={} model={}/{} session={}", spec.agentConfigId(),
                 spec.model().protocol(), spec.model().model(),
@@ -113,9 +141,11 @@ public class AgentScopeRuntime implements AgentRuntime {
      */
     private String composeSystemPrompt(AgentSpec spec) {
         String base = spec.systemPrompt() == null ? "" : spec.systemPrompt();
+        String withTools = appendToolSection(spec, base);
         if (spec.skills().isEmpty()) {
-            return base;
+            return withTools;
         }
+        base = withTools;
         StringBuilder sb = new StringBuilder(base);
         sb.append("\n\n## 可用技能（Skills）\n")
                 .append("当任务匹配以下技能的适用场景时，严格遵循其操作指引完成任务。\n");
@@ -129,6 +159,59 @@ public class AgentScopeRuntime implements AgentRuntime {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * 系统提示词追加「可用工具」段：平台工具（resolvedTools）+ 内置工具（白名单启用的
+     * fs/shell）逐个列 name + 说明，并写明授权纪律——LLM 只有看到工具说明才会用、
+     * 只有知道「未授权会询问用户」才不会把 DENIED 当故障。
+     */
+    private String appendToolSection(AgentSpec spec, String base) {
+        List<ToolDef> tools = spec.resolvedTools();
+        boolean hasBuiltin = !spec.builtinTools().isEmpty();
+        if (tools.isEmpty() && !hasBuiltin) {
+            return base;
+        }
+        StringBuilder sb = new StringBuilder(base);
+        sb.append("\n\n## 可用工具（Tools）\n");
+        sb.append("除对话外，你可以调用以下工具完成任务。工具由系统执行，参数按定义传入。\n");
+        for (ToolDef t : tools) {
+            sb.append("- ").append(t.name());
+            if (t.description() != null && !t.description().isBlank()) {
+                sb.append("：").append(truncateLine(t.description()));
+            }
+            sb.append("\n");
+        }
+        if (hasBuiltin) {
+            sb.append("\n### 内置工具\n");
+            for (String b : spec.builtinTools()) {
+                String bare = b.endsWith(":always") ? b.substring(0, b.length() - 7) : b;
+                switch (bare) {
+                    case "fs.read" -> sb.append("- view_text_file / list_directory：查看项目目录内的文件内容与目录结构（含行号范围）\n");
+                    case "fs.write" -> sb.append("- write_text_file / insert_text_file：在项目目录内写入/插入文件内容\n");
+                    case "shell" -> sb.append("- execute_shell_command：在项目目录内执行 shell 命令（白名单命令）\n");
+                    default -> { }
+                }
+            }
+            sb.append("\n【工具纪律】\n");
+            // 提示里必须给绝对路径（与内置工具 baseDir 的 toAbsolutePath 口径一致）：
+            // DB 落库的 root_path 是相对路径，LLM 照抄会拼出 ./workspaces/... 传参，
+            // 而工具按 baseDir.resolve 相对解析成不存在的嵌套路径（实测踩坑）
+            String absRoot = spec.workspaceRoot() == null ? null
+                    : java.nio.file.Path.of(spec.workspaceRoot()).toAbsolutePath().normalize().toString();
+            sb.append("1. 所有文件操作严格限定在项目目录内").append(
+                    absRoot == null ? "" : "（" + absRoot + "）").append("，越界会被拒绝；\n");
+            sb.append("2. shell 命令执行前系统会向用户请求确认——你发起调用后若收到等待确认的提示，请告知用户「已在界面上发起授权请求」，不要重复调用同一命令；\n");
+            sb.append("3. 用户拒绝或未授权时，不要绕过（如用其他工具拼等效操作），改为向用户说明需要该操作的原因；\n");
+            sb.append("4. 文件写入前先读原文件确认现状，产出文件放项目目录内的规范路径；\n");
+            sb.append("5. 文件/目录路径参数一律相对于项目根目录：列根目录本身传 \".\"，子路径直接写相对路径（如 \"docs/PRD.md\"），不要带 \"./workspaces/...\" 前缀。\n");
+        }
+        return sb.toString();
+    }
+
+    private String truncateLine(String s) {
+        String one = s.replaceAll("\\s+", " ").trim();
+        return one.length() > 80 ? one.substring(0, 80) + "…" : one;
     }
 
     /**
@@ -174,6 +257,14 @@ public class AgentScopeRuntime implements AgentRuntime {
     @Override
     public void close(AgentHandle handle) {
         if (handle instanceof AgentScopeHandle h) {
+            // ASK 挂起中的实例不销毁——pending ASKING 状态在实例内存里，confirm() 恢复要用
+            String sid = h.spec().sessionId();
+            boolean awaiting = sid != null && suspended.values().stream()
+                    .anyMatch(s -> s.handle() == h);
+            if (awaiting) {
+                log.info("skip close, agent suspended awaiting confirm: session={}", sid);
+                return;
+            }
             h.agent().close();
         }
     }
@@ -191,10 +282,29 @@ public class AgentScopeRuntime implements AgentRuntime {
         if (!(handle instanceof AgentScopeHandle h)) {
             throw new IllegalArgumentException("unknown handle type: " + handle.getClass());
         }
+        boolean[] confirmFlag = new boolean[1];
+        java.util.List<io.agentscope.core.message.ToolUseBlock>[] confirmCalls =
+                new java.util.List[1];
         try {
             h.agent().streamEvents(List.of(toUserMessage(msg)))
                     .doOnNext(evt -> {
                         try {
+                            if (evt instanceof io.agentscope.core.event.RequireUserConfirmEvent e) {
+                                confirmFlag[0] = true;
+                                confirmCalls[0] = e.getToolCalls();
+                                List<Map<String, Object>> calls = new java.util.ArrayList<>();
+                                for (io.agentscope.core.message.ToolUseBlock tc : e.getToolCalls()) {
+                                    calls.add(Map.of(
+                                            "toolCallId", str(tc.getId()),
+                                            "tool", str(tc.getName()),
+                                            "input", tc.getInput() == null ? Map.of() : tc.getInput()));
+                                }
+                                sink.accept(AgentStreamEvent.of("agent.confirm", Map.of(
+                                        "sessionId", str(h.spec().sessionId()),
+                                        "replyId", str(e.getReplyId()),
+                                        "toolCalls", calls)));
+                                return;
+                            }
                             if (evt instanceof io.agentscope.core.event.AgentStartEvent e) {
                                 sink.accept(AgentStreamEvent.of("agent.start", Map.of(
                                         "sessionId", str(e.getSessionId()), "replyId", str(e.getReplyId()),
@@ -224,6 +334,14 @@ public class AgentScopeRuntime implements AgentRuntime {
         } catch (RuntimeException e) {
             sink.accept(AgentStreamEvent.error(rootMessage(e)));
             throw e;
+        } finally {
+            // 流结束：若存在未确认的 ASKING 工具调用（本轮出现过 agent.confirm），实例挂起缓存
+            // 等待 confirm() 恢复；否则正常（调用方 close 释放）。
+            if (confirmFlag[0] && h.spec().sessionId() != null && !h.spec().sessionId().isBlank()) {
+                suspended.put(h.spec().sessionId(), new Suspended(
+                        h, confirmCalls[0] == null ? List.of() : confirmCalls[0]));
+                log.info("agent suspended awaiting confirm: session={}", h.spec().sessionId());
+            }
         }
     }
 
@@ -262,6 +380,175 @@ public class AgentScopeRuntime implements AgentRuntime {
     private int maxIters(AgentSpec spec) {
         Object v = spec.runtime().get("maxIterations");
         return v instanceof Number n ? n.intValue() : DEFAULT_MAX_ITERS;
+    }
+
+    /**
+     * HITL 确认回填：从挂起缓存取实例，把用户决定包装为框架 ConfirmResult
+     * （经 Msg.METADATA_CONFIRM_RESULTS 元数据二次 call 恢复执行），事件继续推 sink。
+     * rememberSession=true 时同步写会话级授权（经 checker 实现，跨实例生效）。
+     */
+    @Override
+    public void confirm(AgentHandle handle, List<io.xuanji.core.runtime.AgentConfirm> confirms,
+                        java.util.function.Consumer<io.xuanji.core.runtime.AgentStreamEvent> sink) {
+        if (!(handle instanceof AgentScopeHandle h)) {
+            throw new IllegalArgumentException("unknown handle type: " + handle.getClass());
+        }
+        String sessionId = h.spec().sessionId();
+        Suspended pending = sessionId == null ? null : suspended.remove(sessionId);
+        if (pending == null || pending.handle() != h) {
+            throw new IllegalStateException("no suspended agent awaiting confirm: session=" + sessionId);
+        }
+        List<io.agentscope.core.event.ConfirmResult> results = new java.util.ArrayList<>();
+        for (io.xuanji.core.runtime.AgentConfirm c : confirms) {
+            io.agentscope.core.message.ToolUseBlock tc = pending.askingCalls().stream()
+                    .filter(x -> c.toolCallId() != null && c.toolCallId().equals(x.getId()))
+                    .findFirst().orElse(null);
+            if (tc == null) {
+                continue;
+            }
+            // rememberSession 的落库由 server 侧 confirm API 负责（跨实例持久语义在平台侧），
+            // 这里只负责恢复执行。
+            results.add(new io.agentscope.core.event.ConfirmResult(c.approved(), tc));
+        }
+        if (results.isEmpty()) {
+            throw new IllegalArgumentException("no valid confirm targets in: " + confirms);
+        }
+        Msg resume = Msg.builder()
+                .role(io.agentscope.core.message.MsgRole.USER)
+                .metadata(Map.of(Msg.METADATA_CONFIRM_RESULTS, results))
+                .build();
+        try {
+            pending.handle().agent().streamEvents(List.of(resume))
+                    .doOnNext(evt -> mapEvent(evt, h, sink))
+                    .blockLast();
+        } catch (RuntimeException e) {
+            sink.accept(io.xuanji.core.runtime.AgentStreamEvent.error(rootMessage(e)));
+            throw e;
+        }
+    }
+
+    /**
+     * 按会话恢复（平台 confirm API 入口）：confirm 请求是独立 HTTP 请求，平台拿不到原
+     * AgentHandle——按 sessionId 从挂起缓存取回。无挂起实例时抛状态错（前端提示已失效）。
+     */
+    @Override
+    public void confirmBySession(String sessionId, List<io.xuanji.core.runtime.AgentConfirm> confirms,
+                                 java.util.function.Consumer<io.xuanji.core.runtime.AgentStreamEvent> sink) {
+        Suspended pending = sessionId == null ? null : suspended.remove(sessionId);
+        if (pending == null) {
+            throw new IllegalStateException("no suspended agent awaiting confirm: session=" + sessionId);
+        }
+        confirm(pending.handle(), confirms, sink);
+    }
+
+    /** stream/confirm 共用的事件映射（confirm 事件在 stream 入口单独处理）。 */
+    private void mapEvent(io.agentscope.core.event.AgentEvent evt, AgentScopeHandle h,
+                          java.util.function.Consumer<io.xuanji.core.runtime.AgentStreamEvent> sink) {
+        try {
+            if (evt instanceof io.agentscope.core.event.AgentStartEvent e) {
+                sink.accept(io.xuanji.core.runtime.AgentStreamEvent.of("agent.start", Map.of(
+                        "sessionId", str(e.getSessionId()), "replyId", str(e.getReplyId()),
+                        "name", str(e.getName()))));
+            } else if (evt instanceof io.agentscope.core.event.TextBlockDeltaEvent e) {
+                sink.accept(io.xuanji.core.runtime.AgentStreamEvent.delta(e.getDelta()));
+            } else if (evt instanceof io.agentscope.core.event.AgentResultEvent e) {
+                sink.accept(io.xuanji.core.runtime.AgentStreamEvent.result(
+                        e.getResult() == null ? null : e.getResult().getTextContent()));
+            } else if (evt instanceof io.agentscope.core.event.ToolCallStartEvent e) {
+                sink.accept(io.xuanji.core.runtime.AgentStreamEvent.of("tool.call", Map.of(
+                        "toolCallId", str(e.getToolCallId()),
+                        "tool", str(e.getToolCallName()))));
+            } else if (evt instanceof io.agentscope.core.event.ToolResultEndEvent e) {
+                sink.accept(io.xuanji.core.runtime.AgentStreamEvent.of("tool.result", Map.of(
+                        "toolCallId", str(e.getToolCallId()),
+                        "tool", str(e.getToolCallName()),
+                        "state", e.getState() == null ? "" : e.getState().name())));
+            } else if (evt instanceof io.agentscope.core.event.AgentEndEvent) {
+                sink.accept(io.xuanji.core.runtime.AgentStreamEvent.of("agent.end", Map.of()));
+            }
+        } catch (RuntimeException ex) {
+            log.warn("event map failed: {}", ex.toString());
+        }
+    }
+
+    /**
+     * 注册内置工具（AgentScope 2.0.4 自带，注解式 @Tool）：按 spec.builtinTools 白名单启用。
+     * baseDir 一律 = spec.workspaceRoot()（项目目录硬边界——所有工具都不能超过项目目录）；
+     * shell 用命令白名单构造器。workspaceRoot 为空（无项目上下文）时不注册任何内置工具。
+     */
+    private void registerBuiltinTools(io.agentscope.core.tool.Toolkit toolkit, AgentSpec spec) {
+        if (spec.builtinTools().isEmpty()) {
+            return;
+        }
+        if (spec.workspaceRoot() == null || spec.workspaceRoot().isBlank()) {
+            log.warn("builtin tools requested but no workspaceRoot, skipped: {}", spec.builtinTools());
+            return;
+        }
+        java.nio.file.Path root = java.nio.file.Path.of(spec.workspaceRoot()).normalize();
+        for (String entry : spec.builtinTools()) {
+            String bare = entry.endsWith(":always") ? entry.substring(0, entry.length() - 7) : entry;
+            switch (bare) {
+                case "fs.read" -> toolkit.registerTool(new io.agentscope.core.tool.file.ReadFileTool(root.toString()));
+                case "fs.write" -> toolkit.registerTool(new io.agentscope.core.tool.file.WriteFileTool(root.toString()));
+                case "shell" -> {
+                    Set<String> allowed = new java.util.HashSet<>();
+                    for (String cmd : shellAllowed.split(",")) {
+                        if (!cmd.isBlank()) {
+                            allowed.add(cmd.trim());
+                        }
+                    }
+                    toolkit.registerTool(new io.agentscope.core.tool.coding.ShellCommandTool(
+                            root.toString(), allowed, null));
+                }
+                default -> log.warn("unknown builtin tool, skipped: {}", entry);
+            }
+        }
+        log.info("builtin tools registered: {} root={}", spec.builtinTools(), root);
+    }
+
+    /**
+     * 权限上下文（HITL）：fs 工具 baseDir 硬限项目目录（安全）→ 白名单启用即 ALLOW；
+     * shell 危险 → "shell:always"（永久授权）ALLOW；"shell" 无规则 → DEFAULT mode 默认 ASK
+     * （单次授权，用户批准一次执行一次）；server 侧会话级授权（ToolApprovalStore）→ ALLOW。
+     */
+    /** ALLOW 规则工厂：PermissionRule.toolName 必填且须与外层 key 一致（框架 requireNonNull 校验） */
+    private static io.agentscope.core.permission.PermissionRule allowRule(String tool, String source) {
+        return new io.agentscope.core.permission.PermissionRule(
+                tool, null, io.agentscope.core.permission.PermissionBehavior.ALLOW, source);
+    }
+
+    private io.agentscope.core.permission.PermissionContextState permissionContext(AgentSpec spec) {
+        io.agentscope.core.permission.PermissionContextState.Builder b =
+                io.agentscope.core.permission.PermissionContextState.builder()
+                        .mode(io.agentscope.core.permission.PermissionMode.DEFAULT);
+        for (String entry : spec.builtinTools()) {
+            String bare = entry.endsWith(":always") ? entry.substring(0, entry.length() - 7) : entry;
+            switch (bare) {
+                case "fs.read" -> {
+                    b.addAllowRule("view_text_file", allowRule("view_text_file", "agentConfig"));
+                    b.addAllowRule("list_directory", allowRule("list_directory", "agentConfig"));
+                }
+                case "fs.write" -> {
+                    b.addAllowRule("write_text_file", allowRule("write_text_file", "agentConfig"));
+                    b.addAllowRule("insert_text_file", allowRule("insert_text_file", "agentConfig"));
+                }
+                case "shell" -> {
+                    if (entry.endsWith(":always")) {
+                        b.addAllowRule("execute_shell_command", allowRule("execute_shell_command", "agentConfig"));
+                    } else {
+                        ToolApprovalChecker checker = approvalChecker == null ? null : approvalChecker.getIfAvailable();
+                        if (checker != null && spec.workspaceId() != null
+                                && checker.sessionGranted(spec.workspaceId(), "shell")) {
+                            b.addAllowRule("execute_shell_command",
+                                    allowRule("execute_shell_command", "session"));
+                        }
+                        // 无规则 → DEFAULT mode 默认 ASK（单次授权）
+                    }
+                }
+                default -> { }
+            }
+        }
+        return b.build();
     }
 
     /**

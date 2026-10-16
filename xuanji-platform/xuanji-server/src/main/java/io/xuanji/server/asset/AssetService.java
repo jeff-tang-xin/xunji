@@ -45,7 +45,7 @@ public class AssetService {
             "agents", new AssetSpec("agent_config", List.of(
                     Col.of("name"), Col.of("description"), Col.of("model_provider_id"),
                     Col.of("system_prompt"), Col.json("tools_json"), Col.json("permission_json"),
-                    Col.json("params_json"), Col.json("skills_json"))),
+                    Col.json("params_json"), Col.json("skills_json"), Col.json("builtin_tools_json"))),
             "tools", new AssetSpec("tool_registry", List.of(
                     Col.of("name"), Col.of("description"), Col.of("source_type"),
                     Col.of("source_ref"), Col.json("input_schema"), Col.json("output_schema"))),

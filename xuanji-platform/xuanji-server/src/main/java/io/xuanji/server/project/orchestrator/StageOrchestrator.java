@@ -107,7 +107,7 @@ public class StageOrchestrator {
                 projectGoal, stageGoal, stepRepo, taskRunner, discussionEngine,
                 projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult);
 
-        AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance);
+        AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance, wsId);
         AgentSpec spec = withTools(base, tools.toolDefs());
 
         SseEmitter emitter = new SseEmitter(300_000L);
@@ -131,6 +131,46 @@ public class StageOrchestrator {
             }
         });
         return emitter;
+    }
+
+    /**
+     * 用户在项目区域（右侧决策卡）直接答复决策：DECISION 步置 DONE + 答复留档。
+     * 与对话内 record_answer 同一落库形态——主控下一轮从步骤台账看到答复，无需特殊通知。
+     * 有未处理决策时前端锁定对话输入，答复是唯一的解锁通道。
+     */
+    public Map<String, Object> answerDecision(LoginUser user, String wsId, Map<String, Object> body) {
+        workspaceRepo.findById(wsId).stream().findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "项目不存在"));
+        long seq = body.get("seq") == null ? -1
+                : (body.get("seq") instanceof Number n ? n.longValue()
+                        : Long.parseLong(String.valueOf(body.get("seq")).trim()));
+        String answer = body.get("answer") == null ? "" : String.valueOf(body.get("answer")).trim();
+        if (seq <= 0 || answer.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "seq 与 answer 必填");
+        }
+        StageStep found = stepRepo.findByStage(wsId, currentStageOf(wsId), currentIteration(wsId, currentStageOf(wsId)))
+                .stream()
+                .filter(s -> s.seq() == seq && s.stepType() == StepType.DECISION)
+                .findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "决策序号不存在: " + seq));
+        if (found.status() == StepStatus.DONE || found.status() == StepStatus.SKIPPED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "该决策已处理（" + found.status() + "），无需重复答复");
+        }
+        stepRepo.updateStatus(found.withAnswer(answer));
+        return Map.of("ok", true, "seq", seq, "message", "决策已答复并留档");
+    }
+
+    /** 当前阶段（决策答复按当前阶段台账找 DECISION 步）。 */
+    private String currentStageOf(String wsId) {
+        Map<String, Object> ws = workspaceRepo.findById(wsId).stream().findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "项目不存在"));
+        return String.valueOf(ws.get("current_stage"));
+    }
+
+    private int currentIteration(String wsId, String stage) {
+        return stepRepo.findByWorkspace(wsId).stream()
+                .filter(s -> stage.equals(s.stage()))
+                .mapToInt(StageStep::iteration).max().orElse(1);
     }
 
     /** 主控 = 阶段绑定 agents[0]（可配置），缺省 project_manager。 */
@@ -218,9 +258,11 @@ public class StageOrchestrator {
     private AgentSpec withTools(AgentSpec base, List<ToolDef> tools) {
         List<ToolDef> merged = new ArrayList<>(base.resolvedTools() == null ? List.of() : base.resolvedTools());
         merged.addAll(tools);
+        // 全参构造：透传批六新增的内置工具上下文（builtinTools/workspaceRoot/workspaceId），
+        // 旧 10 参兼容构造器会把这三项置空，导致主控对话丢失内置工具
         return new AgentSpec(base.agentConfigId(), base.name(), base.systemPrompt(), base.model(),
                 base.tools(), base.permission(), base.runtime(), base.sessionId(),
-                merged, base.skills());
+                merged, base.skills(), base.builtinTools(), base.workspaceRoot(), base.workspaceId());
     }
 
     private void send(SseEmitter emitter, String event, Object payload) {

@@ -150,9 +150,10 @@ public class TaskRunner {
         List<io.xuanji.core.runtime.ToolDef> merged = new java.util.ArrayList<>(
                 base.resolvedTools() == null ? List.of() : base.resolvedTools());
         merged.addAll(tools);
+        // 全参构造：透传内置工具上下文（同 StageOrchestrator.withTools，旧 10 参会丢批六新字段）
         return new AgentSpec(base.agentConfigId(), base.name(), base.systemPrompt(), base.model(),
                 base.tools(), base.permission(), base.runtime(), base.sessionId(),
-                merged, base.skills());
+                merged, base.skills(), base.builtinTools(), base.workspaceRoot(), base.workspaceId());
     }
 
     static String rootMessage(Throwable e) {

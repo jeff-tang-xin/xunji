@@ -88,12 +88,13 @@ class ProjectStageChatTest {
                 .thenReturn(List.of(Map.of("status", "APPROVED", "plan_json", json)));
     }
 
-    /** 取 buildSpecByAgentName 的三个入参：agentName / sessionId / guidance */
+    /** 取 buildSpecByAgentName 的四个入参：agentName / sessionId / guidance / wsId（批六起带项目上下文启用内置工具） */
     private String[] specArgs() {
         ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> session = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> guidance = ArgumentCaptor.forClass(String.class);
-        verify(agentNodes).buildSpecByAgentName(name.capture(), session.capture(), guidance.capture());
+        ArgumentCaptor<String> wsId = ArgumentCaptor.forClass(String.class);
+        verify(agentNodes).buildSpecByAgentName(name.capture(), session.capture(), guidance.capture(), wsId.capture());
         return new String[]{name.getValue(), session.getValue(), guidance.getValue()};
     }
 

@@ -123,7 +123,7 @@ public class ProjectChatService {
                 stageGuidance == null ? 0 : stageGuidance.length(),
                 stageGuidance == null ? "-" : stageGuidance.replace('\n', ' ').substring(0,
                         Math.min(120, stageGuidance.length())));
-        AgentSpec spec = agentNodes.buildSpecByAgentName(agentName, sessionId, stageGuidance);
+        AgentSpec spec = agentNodes.buildSpecByAgentName(agentName, sessionId, stageGuidance, wsId);
         String audit = "project-node=" + wsId + "/" + nodeId + " agent=" + agentName
                 + " session=" + sessionId
                 + " guidance=" + (stageGuidance == null ? "none" : stageGuidance.length() + "chars");
@@ -173,7 +173,7 @@ public class ProjectChatService {
         String sessionId = StageChatKeys.stageSession(wsId, stage, iteration);
         String guidance = buildStageContext(ws, stage, iteration, task);
 
-        AgentSpec spec = agentNodes.buildSpecByAgentName(agentName, sessionId, guidance);
+        AgentSpec spec = agentNodes.buildSpecByAgentName(agentName, sessionId, guidance, wsId);
         String audit = "project-stage=" + wsId + "/" + stage + "#" + iteration
                 + " agent=" + agentName + " session=" + sessionId
                 + " guidance=" + guidance.length() + "chars" + audit0;
