@@ -234,9 +234,14 @@ public class PeerConsultService {
     }
 
     private Map<String, Object> askPeerSchema() {
+        // JSON Schema 的 properties 值必须是对象（{"type":...,"description":...}）——
+        // 曾经直接放纯字符串（str(...)），请求体 schema 非法，网关上游 400 InvalidParameter，
+        // 且只有挂 ask_peer 的任务型步骤全挂（讨论/主控不挂此工具，无法对照）——实测 seq=9/10/11 全灭
         Map<String, Object> props = new LinkedHashMap<>();
-        props.put("target_agent", str("目的方 agent 英文名（需求问题→product_analyst，架构/技术→architect，数据库→dba；禁用中文显示名）"));
-        props.put("question", str("要问的具体问题：带上下文（你在做什么、卡在哪、已试过什么），让对方不需要猜"));
+        props.put("target_agent", java.util.Map.of("type", "string",
+                "description", "目的方 agent 英文名（需求问题→product_analyst，架构/技术→architect，数据库→dba；禁用中文显示名）"));
+        props.put("question", java.util.Map.of("type", "string",
+                "description", "要问的具体问题：带上下文（你在做什么、卡在哪、已试过什么），让对方不需要猜"));
         props.put("requirement_codes", java.util.Map.of("type", "array", "items", java.util.Map.of("type", "string"),
                 "description", "本次提问涉及的需求编号（如 [\"REQ-001\"]），涉及多个需求就都列上；不涉及具体需求可省略。需求看板会据此统计每个需求被澄清的次数"));
         Map<String, Object> schema = new LinkedHashMap<>();

@@ -256,11 +256,12 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
 
   /** 编排步骤表（新内核只读台账）：产出摘要直接看，全文/理由/错误展开看 */
   const stepCols: ColumnsType<StageStepRow> = [
-    // 固定列宽合计压到 336（右栏 tab 容器 ~480px）——固定列总和超容器会把表格撑出横向溢出，
-    // 状态列被裁一半（实测反馈）；步骤/产出两列不设 width，fixed 布局下平分剩余空间
-    { title: '#', dataIndex: 'seq', width: 40 },
+    // 列宽全部用百分比：fixed 布局下「无 width 列 / ellipsis 列无 width」会被压到极窄，
+    // 内容一字一行竖排（实测灾难截图）；百分比在任意容器宽下都按比例分配，不再塌缩。
+    // 「产出/说明」列砍掉——ellipsis 无 width 是重灾区，产出全文在展开行看（指令+产出都有）
+    { title: '#', dataIndex: 'seq', width: '9%' },
     {
-      title: '步骤', dataIndex: 'name',
+      title: '步骤', dataIndex: 'name', width: '34%',
       render: (v: string, r) => (
         <div style={{ minWidth: 0 }}>
           {/* 主控偶尔把长指令塞进 name——单行截断 + Tooltip 全文，防撑宽表格 */}
@@ -274,32 +275,19 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
       ),
     },
     {
-      title: '类型', dataIndex: 'stepType', width: 60,
+      title: '类型', dataIndex: 'stepType', width: '13%',
       render: (v: string) => <Tag style={{ marginInlineEnd: 0 }}>{STEP_TYPE_LABEL[v] || v}</Tag>,
     },
     {
-      title: '执行者', dataIndex: 'agent', width: 96, ellipsis: true,
+      title: '执行者', dataIndex: 'agent', width: '18%', ellipsis: true,
       render: (v?: string | null) => (v ? <Tooltip title={v}><span style={{ fontSize: 12 }}>{v}</span></Tooltip> : '—'),
     },
     {
-      title: '状态', dataIndex: 'status', width: 84,
+      title: '状态', dataIndex: 'status', width: '15%',
       render: (v: string) => <Tag color={STEP_STATUS_COLOR[v] || 'default'}>{STEP_STATUS_LABEL[v] || v}</Tag>,
     },
     {
-      title: '产出 / 说明', dataIndex: 'outputSummary', ellipsis: true,
-      render: (v, r) => {
-        const txt = v || r.skipReason || r.error || (r.status === 'WAITING' ? r.instruction : '') || '—'
-        return (
-          <Tooltip title={txt}>
-            <Typography.Text style={{ fontSize: 12 }} type={r.status === 'FAILED' ? 'danger' : undefined}>
-              {txt}
-            </Typography.Text>
-          </Tooltip>
-        )
-      },
-    },
-    {
-      title: '操作', width: 64,
+      title: '操作', width: '11%',
       render: (_, r) => {
         // 未处理决策（DECISION 且未 DONE/SKIPPED）：项目区域直接答复——有未处理决策时对话输入被锁定，这里是唯一解锁通道
         if (r.stepType !== 'DECISION' || r.status === 'DONE' || r.status === 'SKIPPED') return null
