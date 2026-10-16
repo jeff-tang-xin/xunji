@@ -81,7 +81,7 @@ async function readSse(res: Response, onEvent: (event: string, data: string) => 
     }
   }
 }
-export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: StageExecution | null }) {
+export function StageChatPanel({ projectId, exec, onJumpExec }: { projectId: string; exec?: StageExecution | null; onJumpExec?: () => void }) {
   const [msgs, setMsgs] = useState<StageChatMsg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -360,6 +360,19 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
     setBusy(true)
     const ac = new AbortController()
     abortRef.current = ac
+    // 工具执行过程实时卡片：PM 对话要跑 plan_steps/declare_requirements 等编排工具，
+    // qwen 每轮生成 1-3 分钟，无过程显示时用户只看到「正在处理…」干等（实测反馈）
+    const toolLines: string[] = []
+    let procMsgId = 0
+    const pushToolLine = (line: string) => {
+      toolLines.push(line)
+      if (!procMsgId) {
+        procMsgId = nextId()
+        setMsgs((x) => [...x, { id: procMsgId, type: 'process', title: '🔧 工具执行', text: toolLines.join('\n') }])
+      } else {
+        setMsgs((x) => x.map((m) => (m.id === procMsgId ? { ...m, text: toolLines.join('\n') } : m)))
+      }
+    }
     try {
       const r = await apiFetch(`/api/projects/${projectId}/stage/chat`, {
         method: 'POST',
@@ -392,6 +405,20 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
           const full = payload.text
           setMsgs((x) => x.map((m) => (m.id === agentMsgId && (!m.text || m.text.startsWith('（'))
             ? { ...m, text: full } : m)))
+        } else if (event === 'tool.call') {
+          pushToolLine(`🔧 ${String(payload.tool || '')} 执行中…`)
+        } else if (event === 'tool.result') {
+          const tool = String(payload.tool || '')
+          const line = `✅ ${tool} ${payload.state === 'ERROR' ? '失败' : '完成'}`
+          const idx = toolLines.lastIndexOf(`🔧 ${tool} 执行中…`)
+          if (idx >= 0) toolLines[idx] = line
+          else toolLines.push(line)
+          if (procMsgId) {
+            setMsgs((x) => x.map((m) => (m.id === procMsgId ? { ...m, text: toolLines.join('\n') } : m)))
+          } else {
+            procMsgId = nextId()
+            setMsgs((x) => [...x, { id: procMsgId, type: 'process', title: '🔧 工具执行', text: toolLines.join('\n') }])
+          }
         } else if (event === 'agent.confirm' && Array.isArray(payload.toolCalls)) {
           // 工具授权请求：流到此结束，实例挂起等待用户决定——推授权卡
           const calls = (payload.toolCalls as Array<Record<string, unknown>>).map((tc) => ({
@@ -661,6 +688,9 @@ export function StageChatPanel({ projectId, exec }: { projectId: string; exec?: 
             style={{ marginTop: 6 }}
             message={`待处理决策 ${pendingDecisions.length} 项：${pendingDecisions.map((d) => `#${d.seq} ${d.name}`).join('、')}`}
             description="决策需要在右侧「阶段执行」面板处理（点决策行的「处理」按钮答复）。答复后对话自动解锁。"
+            action={onJumpExec && (
+              <Button size="small" type="primary" onClick={onJumpExec}>去处理</Button>
+            )}
           />
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>

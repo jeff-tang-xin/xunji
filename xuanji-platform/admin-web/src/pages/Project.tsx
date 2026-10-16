@@ -126,6 +126,8 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   /** 阶段执行视图数据，由本页轮询后喂给 StageExecutionPanel */
   const [exec, setExec] = useState<StageExecution | null>(null)
   const [execBusy, setExecBusy] = useState(false)
+// 右栏受控 tab：对话内决策黄卡「去处理」按钮跳转到「阶段执行」
+const [rightTab, setRightTab] = useState('exec')
   const [artifactDrawer, setArtifactDrawer] = useState(false)
 
   const load = useCallback(async () => {
@@ -295,13 +297,14 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
               </Typography.Text>
             }
           >
-            <StageChatPanel projectId={id} exec={exec} />
+            <StageChatPanel projectId={id} exec={exec} onJumpExec={() => setRightTab('exec')} />
           </Card>
         </Col>
 
         <Col xs={24} lg={9}>
           <Tabs
-            defaultActiveKey="exec"
+            activeKey={rightTab}
+            onChange={setRightTab}
             size="small"
             items={[
               {
