@@ -398,7 +398,10 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
         } else if (evt.type === 'tool.call') {
           procLines.push(`🔧 ${String(evt.meta?.tool || '')} 执行中…`)
         } else if (evt.type === 'tool.result') {
-          procLines.push(`🔧 ${String(evt.meta?.tool || '')} 完成`)
+          // 回放同样区分成败（meta 带 state；旧事件无 state 默认完成）
+          const rt = String(evt.meta?.tool || '')
+          const rok = evt.meta?.state !== 'ERROR'
+          procLines.push(`${rok ? '✅' : '❌'} ${rt} ${rok ? '完成' : '失败'}`)
         } else if (evt.type === 'error') {
           procLines.push(`⚠️ ${evt.text || '执行出错'}`)
         }
@@ -494,7 +497,9 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
           setMsgs((x) => x.map((m) => (m.id === agentMsgId ? { ...m, phaseText: `🔧 ${tool} 执行中…` } : m)))
         } else if (event === 'tool.result') {
           const tool = String(payload.tool || '')
-          const line = `✅ ${tool} ${payload.state === 'ERROR' ? '失败' : '完成'}`
+          // 失败标 ❌（此前写死 ✅，「✅ xx 失败」自相矛盾——实测反馈）
+          const ok = payload.state !== 'ERROR'
+          const line = `${ok ? '✅' : '❌'} ${tool} ${ok ? '完成' : '失败'}`
           const idx = toolLines.lastIndexOf(`🔧 ${tool} 执行中…`)
           if (idx >= 0) toolLines[idx] = line
           else toolLines.push(line)
@@ -505,7 +510,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec, autoSend }: {
             setMsgs((x) => [...x, { id: procMsgId, type: 'process', title: '🔧 工具执行', text: toolLines.join('\n') }])
           }
           setMsgs((x) => x.map((m) => (m.id === agentMsgId
-            ? { ...m, phaseText: `✅ ${tool} ${payload.state === 'ERROR' ? '失败' : '完成'}，继续…` } : m)))
+            ? { ...m, phaseText: `${ok ? '✅' : '❌'} ${tool} ${ok ? '完成' : '失败'}，继续…` } : m)))
         } else if (event === 'agent.confirm' && Array.isArray(payload.toolCalls)) {
           // 工具授权请求：流到此结束，实例挂起等待用户决定——推授权卡
           const calls = (payload.toolCalls as Array<Record<string, unknown>>).map((tc) => ({
