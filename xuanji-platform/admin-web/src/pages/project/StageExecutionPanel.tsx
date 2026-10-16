@@ -235,8 +235,11 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
     {
       title: '步骤', dataIndex: 'name', width: 170,
       render: (v: string, r) => (
-        <div>
-          <div>{v || `步骤 ${r.seq}`}</div>
+        <div style={{ minWidth: 0 }}>
+          {/* 主控偶尔把长指令塞进 name——单行截断 + Tooltip 全文，防撑宽表格 */}
+          <Tooltip title={v || `步骤 ${r.seq}`}>
+            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v || `步骤 ${r.seq}`}</div>
+          </Tooltip>
           {(r.participants || []).length > 0 && (
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>{(r.participants || []).join('、')}</Typography.Text>
           )}
@@ -413,6 +416,7 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
         steps.length > 0 ? (
           <Table
             size="small"
+            tableLayout="fixed"
             rowKey={(r) => String(r.id)}
             dataSource={steps}
             columns={stepCols}
@@ -420,18 +424,30 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
             locale={{ emptyText: '本阶段还没有步骤——在左侧对话里说一句话即可启动' }}
             expandable={{
               expandedRowRender: (r) => (
-                <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                // 展开行内容一律内部滚动（maxHeight + overflowY），断词约束——
+                // 决策指令/产出全文几百字，直接渲染会把表格撑出横向滚动条（实测踩过）
+                <Space direction="vertical" size={6} style={{ width: '100%', maxWidth: '100%', minWidth: 0 }}>
                   {r.instruction && (
-                    <div>
+                    <div style={{ minWidth: 0 }}>
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>指令 / 问题：</Typography.Text>
-                      <Typography.Paragraph style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{r.instruction}</Typography.Paragraph>
+                      <div style={{
+                        fontSize: 12, whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'break-word',
+                        maxHeight: 220, overflowY: 'auto', padding: '6px 8px', background: '#fafafa',
+                        borderRadius: 6, border: '1px solid #f0f0f0', marginTop: 4,
+                      }}>
+                        {r.instruction}
+                      </div>
                     </div>
                   )}
                   {r.skipReason && (
-                    <Typography.Text type="warning" style={{ fontSize: 12 }}>跳过理由：{r.skipReason}</Typography.Text>
+                    <Typography.Text type="warning" style={{ fontSize: 12, overflowWrap: 'break-word' }}>跳过理由：{r.skipReason}</Typography.Text>
                   )}
-                  {r.error && <Typography.Text type="danger" style={{ fontSize: 12 }}>错误：{r.error}</Typography.Text>}
-                  {r.outputFull && <MarkdownView scroll={false} text={r.outputFull} />}
+                  {r.error && <Typography.Text type="danger" style={{ fontSize: 12, overflowWrap: 'break-word' }}>错误：{r.error}</Typography.Text>}
+                  {r.outputFull && (
+                    <div style={{ minWidth: 0, maxHeight: 360, overflowY: 'auto' }}>
+                      <MarkdownView scroll={false} text={r.outputFull} />
+                    </div>
+                  )}
                 </Space>
               ),
               rowExpandable: (r) => !!(r.outputFull || r.skipReason || r.error || r.instruction),
