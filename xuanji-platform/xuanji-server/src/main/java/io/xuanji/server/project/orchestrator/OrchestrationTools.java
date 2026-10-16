@@ -13,6 +13,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 会话级编排工具集——主控 agent 的「动词」，AI 驱动内核的执行原语。
@@ -50,6 +52,10 @@ public class OrchestrationTools {
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
     private final RequirementRepository requirementRepo;
     private final PeerConsultService peerConsult;
+    private final DecisionSettleService decisionSettler;
+
+    /** 需求编号形态（REQ-001）：requirement_codes 漏传时从决策/任务文本兜底提取。 */
+    private static final Pattern REQ_CODE = Pattern.compile("\\b(REQ-\\d+)\\b");
 
     /** 阶段兜底智能体（与 ProjectChatService.STAGE_DEFAULT_AGENT 同口径）：跨阶段求助按目标阶段选人。 */
     private static final Map<String, String> STAGE_DEFAULT_AGENT = Map.of(
@@ -68,7 +74,8 @@ public class OrchestrationTools {
                               DiscussionEngine discussionEngine, ProjectRepository projectRepo,
                               StageAdvancer advancer, io.xuanji.server.engine.AgentNodeExecutor agentNodes,
                               com.fasterxml.jackson.databind.ObjectMapper objectMapper,
-                              RequirementRepository requirementRepo, PeerConsultService peerConsult) {
+                              RequirementRepository requirementRepo, PeerConsultService peerConsult,
+                              DecisionSettleService decisionSettler) {
         this.user = user;
         this.wsId = wsId;
         this.stage = stage;
@@ -84,6 +91,7 @@ public class OrchestrationTools {
         this.objectMapper = objectMapper;
         this.requirementRepo = requirementRepo;
         this.peerConsult = peerConsult;
+        this.decisionSettler = decisionSettler;
     }
 
     /** 主控可见的全部编排工具（BEAN 形态 ToolDef）。 */
@@ -455,11 +463,56 @@ public class OrchestrationTools {
             if (badAgent != null) {
                 return ToolResult.of(Map.of("ok", false, "message", badAgent));
             }
-            StageStep step = nextStep(name, StepType.TASK, agent, List.of(), instruction);
+            // 需求关联：显式参数 + 任务名/说明正则兜底（LLM 漏传时从文本提取 REQ-xxx）
+            List<String> codes = new ArrayList<>(req.input().get("requirement_codes") instanceof List<?> rl
+                    ? rl.stream().map(String::valueOf).filter(c -> !c.isBlank()).toList() : List.<String>of());
+            Matcher rm = REQ_CODE.matcher(name + " " + instruction);
+            while (rm.find()) {
+                String c = rm.group(1);
+                if (!codes.contains(c)) {
+                    codes.add(c);
+                }
+            }
+            // 需求门禁：未确认（PROPOSED）需求不能派发实现任务——先征询确认，或显式豁免（留档）
+            boolean gateSkip = Boolean.TRUE.equals(req.input().get("requirement_gate_skip"));
+            String gateReason = str(req.input().get("requirement_gate_reason"));
+            if (gateSkip && gateReason.isBlank()) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "需求门禁豁免必须给 requirement_gate_reason（豁免留档用户可见）"));
+            }
+            if (!codes.isEmpty() && !gateSkip) {
+                List<String> blocked = new ArrayList<>();
+                for (String code : codes) {
+                    var r = requirementRepo.findByCode(wsId, code);
+                    if (r.isEmpty()) {
+                        blocked.add(code + "(需求不存在，检查编号)");
+                    } else if ("PROPOSED".equals(r.get().status())) {
+                        blocked.add(code + "(待确认)");
+                    }
+                }
+                if (!blocked.isEmpty()) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "需求门禁：以下需求未确认，不能派发实现任务——" + String.join("、", blocked)
+                                    + "。两条出路：① 用 request_decision 征询用户（带 requirement_codes），用户答复后需求自动确认；"
+                                    + "② 确属无需需求确认的探索性/技术验证工作，带 requirement_gate_skip=true + requirement_gate_reason 显式豁免"));
+                }
+            }
+            StageStep step = nextStep(name, StepType.TASK, agent, List.of(), instruction)
+                    .withRequirementCodes(codes);
+            if (gateSkip) {
+                // 豁免留痕：写进步骤说明，台账可见
+                step = new StageStep(step.id(), step.workspaceId(), step.stage(), step.iteration(), step.seq(),
+                        step.name(), step.stepType(), step.agent(), step.participants(), step.status(),
+                        "[需求门禁豁免: " + gateReason + "] " + instruction, step.outputSummary(), step.outputFull(),
+                        step.artifactId(), step.skipReason(), step.error(), step.createdAt(), step.startedAt(),
+                        step.finishedAt(), step.verifiedBy(), step.acceptanceJson(), step.deviationJson(),
+                        step.requirementCodes());
+            }
             long id = stepRepo.insert(step);
             taskRunner.submit(step.withId(id), brief(""));
             return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
-                    "message", "任务已派发给 " + agent + "（后台执行中，3 分钟超时），完成后结果进黑板"));
+                    "message", "任务已派发给 " + agent + "（后台执行中，8 分钟超时），完成后结果进黑板"
+                            + (codes.isEmpty() ? "" : "；关联需求 " + String.join("、", codes))));
         });
     }
 
@@ -490,11 +543,21 @@ public class OrchestrationTools {
             if (question.isBlank()) {
                 return ToolResult.of(Map.of("ok", false, "message", "question 必填"));
             }
+            // 需求关联：显式参数 + 问题文本正则兜底——答复后系统自动把关联需求置 CONFIRMED
+            List<String> codes = new ArrayList<>(req.input().get("requirement_codes") instanceof List<?> rl
+                    ? rl.stream().map(String::valueOf).filter(c -> !c.isBlank()).toList() : List.<String>of());
+            Matcher rm = REQ_CODE.matcher(question);
+            while (rm.find()) {
+                String c = rm.group(1);
+                if (!codes.contains(c)) {
+                    codes.add(c);
+                }
+            }
             StageStep step = nextStep("决策：" + truncate(question, 40), StepType.DECISION,
-                    "user", List.of(), question);
+                    "user", List.of(), question).withRequirementCodes(codes);
             stepRepo.insert(step);
             return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
-                    "message", "已向用户提出决策请求，等待答复（答复后用 record_answer 落档）"));
+                    "message", "已向用户提出决策请求，等待答复（答复后需求自动确认并生成决策记录；也可用 record_answer 落档）"));
         });
     }
 
@@ -508,7 +571,11 @@ public class OrchestrationTools {
                 return ToolResult.of(Map.of("ok", false, "message", "决策序号不存在: " + seq));
             }
             stepRepo.updateStatus(found.get().withAnswer(answer));
-            return ToolResult.of(Map.of("ok", true, "message", "决策已闭环"));
+            // 决策答复闭环：关联需求自动确认 + 决策记录落档（与答复端点同一条确定性联动）
+            List<String> confirmed = decisionSettler.settle(found.get().withAnswer(answer), answer,
+                    user == null ? "user" : user.username());
+            return ToolResult.of(Map.of("ok", true, "message", "决策已闭环"
+                    + (confirmed.isEmpty() ? "" : "；关联需求已自动确认: " + String.join("、", confirmed))));
         });
     }
 
@@ -727,6 +794,13 @@ public class OrchestrationTools {
         props.put("name", str("任务名"));
         props.put("agent", str("执行 agent 英文名（agent_config.name，如 developer；禁用中文显示名）"));
         props.put("instruction", str("任务说明（含验收口径）"));
+        props.put("requirement_codes", new LinkedHashMap<>(Map.of(
+                "type", "array", "items", Map.of("type", "string"),
+                "description", "本任务服务的需求项编号列表（如 [\"REQ-002\"]）。实现类任务必填——需求门禁会拒绝派发未确认（PROPOSED）需求的实现任务")));
+        props.put("requirement_gate_skip", new LinkedHashMap<>(Map.of(
+                "type", "boolean",
+                "description", "需求门禁豁免开关：确属无需需求确认的探索性/技术验证工作时才置 true，必须同时给 requirement_gate_reason（豁免留档用户可见）")));
+        props.put("requirement_gate_reason", str("门禁豁免理由（requirement_gate_skip=true 时必填，留档可见）"));
         return schema(props, List.of("name", "agent", "instruction"));
     }
 

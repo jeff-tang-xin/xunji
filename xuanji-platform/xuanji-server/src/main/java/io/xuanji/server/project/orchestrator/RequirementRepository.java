@@ -96,6 +96,18 @@ public class RequirementRepository {
                 """, status, workspaceId, code);
     }
 
+    /**
+     * 决策答复驱动的需求确认：置 CONFIRMED 并把确认来源写进 source 列（decision#seq）——
+     * 用户通过决策答复确认需求口径时，需求状态由确定性代码回写（不依赖主控自觉调 confirm），
+     * source 留痕可追溯「谁在哪个决策里确认的」。
+     */
+    public void confirmByDecision(String workspaceId, String code, long decisionSeq) {
+        jdbc.update("""
+                UPDATE project_requirement SET status = 'CONFIRMED', source = ?, updated_at = now()
+                WHERE workspace_id = ? AND code = ?
+                """, "decision#" + decisionSeq, workspaceId, code);
+    }
+
     /** 依赖计数：某需求被多少 active 需求依赖（drop 前检查用）。 */
     public int countDependents(String workspaceId, String code) {
         List<Integer> rows = jdbc.query("""

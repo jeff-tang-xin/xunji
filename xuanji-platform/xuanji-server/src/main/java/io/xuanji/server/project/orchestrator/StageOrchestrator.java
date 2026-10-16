@@ -60,6 +60,7 @@ public class StageOrchestrator {
     private final PeerConsultService peerConsult;
     private final StageDocStore docStore;
     private final StageChatEventBus eventBus;
+    private final DecisionSettleService decisionSettler;
 
     /** SSE 会话执行池：虚拟线程（JDK21），阻塞 IO 型任务不占平台线程，并发对话不再互相排队。 */
     private final ExecutorService chatExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -75,7 +76,7 @@ public class StageOrchestrator {
                              WorkspaceRepository workspaceRepo, StageAdvancer advancer,
                              ObjectMapper objectMapper, RequirementRepository requirementRepo,
                              PeerConsultService peerConsult, StageDocStore docStore,
-                             StageChatEventBus eventBus) {
+                             StageChatEventBus eventBus, DecisionSettleService decisionSettler) {
         this.runtime = runtime;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
@@ -89,6 +90,7 @@ public class StageOrchestrator {
         this.peerConsult = peerConsult;
         this.docStore = docStore;
         this.eventBus = eventBus;
+        this.decisionSettler = decisionSettler;
     }
 
     /**
@@ -114,7 +116,8 @@ public class StageOrchestrator {
 
         OrchestrationTools tools = new OrchestrationTools(user, wsId, stage, iteration,
                 projectGoal, stageGoal, stepRepo, taskRunner, discussionEngine,
-                projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult);
+                projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult,
+                decisionSettler);
 
         AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance, wsId);
         AgentSpec spec = withTools(base, tools.toolDefs());
@@ -258,7 +261,8 @@ public class StageOrchestrator {
 
             OrchestrationTools tools = new OrchestrationTools(system, wsId, stage, iteration,
                     projectGoal, stageGoal, stepRepo, taskRunner, discussionEngine,
-                    projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult);
+                    projectRepo, advancer, agentNodes, objectMapper, requirementRepo, peerConsult,
+                    decisionSettler);
             AgentSpec base = agentNodes.buildSpecByAgentName(masterAgent, sessionId, guidance, wsId);
             AgentSpec spec = withTools(base, tools.toolDefs());
             String query = "[系统唤醒] " + reason + "\n请基于以上情况继续推进。";
@@ -338,12 +342,18 @@ public class StageOrchestrator {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该决策已处理（" + found.status() + "），无需重复答复");
         }
         stepRepo.updateStatus(found.withAnswer(answer));
+        // 决策答复闭环（确定性联动，与 record_answer 工具同一条）：关联需求自动置 CONFIRMED
+        //（source=decision#seq）+ 决策记录双落档——用户答复即确认，不依赖主控自觉调 confirm
+        List<String> confirmed = decisionSettler.settle(found.withAnswer(answer), answer,
+                user == null ? "user" : user.username());
         // 决策答复即唤醒：答复内容直接进唤醒消息（不依赖主控主动查台账），主控立即继续推进。
         // 后端是运行唯一真相——唤醒不依赖前端在线，前端经总线实时回显。
         String stage = currentStageOf(wsId);
         wakeMaster(wsId, stage, currentIteration(wsId, stage),
-                "决策 #" + seq + "「" + found.name() + "」已答复：" + answer);
-        return Map.of("ok", true, "seq", seq, "message", "决策已答复并留档");
+                "决策 #" + seq + "「" + found.name() + "」已答复：" + answer
+                        + (confirmed.isEmpty() ? "" : "（关联需求已自动确认: " + String.join("、", confirmed) + "）"));
+        return Map.of("ok", true, "seq", seq,
+                "message", "决策已答复并留档" + (confirmed.isEmpty() ? "" : "；关联需求已自动确认: " + String.join("、", confirmed)));
     }
 
     /**
@@ -429,9 +439,9 @@ public class StageOrchestrator {
         sb.append("1. 阶段开始或需求变化时，先用 plan_steps 规划小流程（TASK=产出型，DISCUSS=讨论型）；规划必须携带 intent_anchor（全局意图与总体验收口径），并为每个 TASK 步给出可判定的 acceptance 断言（test/artifact/api 三类，禁止「质量良好」这类不可判定描述）；\n");
         sb.append("2. 需求先行：实施工作开始前必须先有确认的需求项——讨论沉淀的需求用 declare_requirements 落档（PROPOSED），再用 request_decision 请用户确认（CONFIRMED）；规划步骤时为每步声明 requirement_codes（为了哪个需求）；discuss 发起讨论与 ask_peer 求助同样必带 requirement_codes（本次讨论/澄清涉及哪些需求），需求看板据此留痕并统计每个需求被讨论/澄清的次数；被依赖需求未 DONE 前，不要为依赖它的需求排实施步骤（可以先排讨论型步骤）；运行中用户提出新需求，同样走 declare_requirements → 用户确认 → 并入规划；任何阶段（含 OPERATE 运维）都适用——写代码、改配置、执行变更、数据修复都是需求，先落项再动手，禁止「边聊边做」绕过需求台账；\n");
         sb.append("3. 澄清/共识类的事直接在对话里完成（秒级），不要做成任务；\n");
-        sb.append("   【决策纪律】凡是需要用户明确答复的问题（征询同意、二选一、确认需求等），必须先调用 request_decision 工具留档，再在回复正文里展开问题内容；禁止只在文本里说「已发出决策 #N」而不调用工具——没有工具调用就没有决策留痕，用户在阶段执行台账里看不到，事后也无法追溯。答复入口就是对话本身：告诉用户「直接回复即可」，不要让用户去找「右侧决策区」（不存在这个区域）；\n");
+        sb.append("   【决策纪律】凡是需要用户明确答复的问题（征询同意、二选一、确认需求等），必须先调用 request_decision 工具留档，再在回复正文里展开问题内容；涉及需求口径确认的决策必带 requirement_codes（关联哪些需求项）——用户答复后系统自动把关联需求置 CONFIRMED 并生成决策记录，不需要你再调 declare_requirements confirm；禁止只在文本里说「已发出决策 #N」而不调用工具——没有工具调用就没有决策留痕，用户在阶段执行台账里看不到，事后也无法追溯。答复入口就是对话本身：告诉用户「直接回复即可」，不要让用户去找「右侧决策区」（不存在这个区域）；\n");
         sb.append("4. 需要多角色视角时用 discuss 发起讨论；讨论最少三方——你必须主持（自动加入发言与汇总），participants 填目的方等参与方（至少 2 个角色，按问题域拉能解答的人）；rounds 默认 0（并行独立观点）即可，互见轮仅在确需收敛分歧时用（每轮发言需数分钟，轮次越多越慢）；\n");
-        sb.append("5. 有明确产出的工作用 execute_step 派给对应 agent（后台执行，8 分钟超时，任务必须小）；instruction 必须包含该步的 acceptance 验收口径，让执行者知道「什么算做完」；执行中遇到需求/架构疑问，执行 agent 会通过 ask_peer 向对应角色求助（问答留档，你下轮可见）——发现求助暴露需求矛盾时，用 request_decision 升级给用户；\n");
+        sb.append("5. 有明确产出的工作用 execute_step 派给对应 agent（后台执行，8 分钟超时，任务必须小）；instruction 必须包含该步的 acceptance 验收口径，让执行者知道「什么算做完」；实现类任务必带 requirement_codes（本任务服务哪些需求项）——需求门禁会拒绝派发未确认（PROPOSED）需求的实现任务，被拦时先 request_decision 征询用户确认（答复后自动确认），确属无需确认的探索性工作才用 requirement_gate_skip=true + reason 显式豁免（留档用户可见）；执行中遇到需求/架构疑问，执行 agent 会通过 ask_peer 向对应角色求助（问答留档，你下轮可见）——发现求助暴露需求矛盾时，用 request_decision 升级给用户；\n");
         sb.append("6. 判断某个小流程不值得做时用 skip_step 跳过，必须写明理由；\n");
         sb.append("7. 执行中发现某步无法按计划完成（技术障碍/依赖缺失/成本超限），必须先用 declare_deviation 申报偏差（原因+替代方案），禁止静默换路、静默降级或悄悄缩小范围；降级影响交付口径时继续用 request_decision 征询用户；\n");
         sb.append("8. 需要用户拍板时用 request_decision；用户在对话里答复后用 record_answer 落档；\n");
