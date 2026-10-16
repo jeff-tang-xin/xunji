@@ -46,12 +46,26 @@ class ToolAgentAdapter implements AgentTool {
 
     @Override
     public String getName() {
-        return tool.metadata().name();
+        // LLM function-calling 的函数名必须匹配 ^[a-zA-Z0-9_-]+$（OpenAI 兼容 API 硬约束，
+        // 中文名会被网关/上游 400 InvalidParameter——实测步骤 8/9 全挂）。
+        // 显示名（中文）合法时直接用（编排/内置工具全是英文名，不受影响）；
+        // 非法时从 id 派生安全名（datasource.query -> datasource_query），中文 label 挪进 description 保语义。
+        String name = tool.metadata().name();
+        if (name.matches("[a-zA-Z0-9_-]+")) {
+            return name;
+        }
+        return tool.metadata().id().replaceAll("[^a-zA-Z0-9_-]", "_");
     }
 
     @Override
     public String getDescription() {
-        return tool.metadata().description();
+        String desc = tool.metadata().description();
+        String name = tool.metadata().name();
+        if (!name.matches("[a-zA-Z0-9_-]+") && !desc.startsWith("【")) {
+            // 函数名被替换成英文 id 时，把中文显示名带进描述，LLM 仍能按中文名理解工具用途
+            return "【" + name + "】" + desc;
+        }
+        return desc;
     }
 
     @Override

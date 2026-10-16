@@ -56,7 +56,10 @@ class McpAgentTool implements AgentTool {
 
     @Override
     public String getName() {
-        return def.name();
+        String name = def.name();
+        // LLM function-calling 函数名硬约束 ^[a-zA-Z0-9_-]+$（中文名被上游 400 InvalidParameter——
+        // ToolAgentAdapter 实测踩坑），非法名 sanitize 成下划线
+        return name.matches("[a-zA-Z0-9_-]+") ? name : name.replaceAll("[^a-zA-Z0-9_-]", "_");
     }
 
     @Override
