@@ -14,12 +14,13 @@ import { useEffect, useState } from 'react'
 import { Alert, Button, Card, Collapse, Empty, message, Modal, Space, Spin, Steps, Tag, Tooltip, Typography } from 'antd'
 import { FileTextOutlined, LockOutlined } from '@ant-design/icons'
 import type { StageExecution, StageStepRow } from './types'
+import { TraceGraph } from './TraceGraph'
 import { DecisionAnswerModal } from './DecisionAnswerModal'
 import { StageSessionsPanel } from './StageSessionsPanel'
 import { apiJson } from '../../api/client'
 
 interface TraceArtifact { name: string; file_path: string | null; kind: string; content_md?: string | null }
-interface TraceStep {
+export interface TraceStep {
   stage: string; iteration: number; seq: number; name: string
   step_type: string; status: string; verified_by: string | null
   error: string | null; output_summary: string | null; artifact: TraceArtifact | null
@@ -43,9 +44,6 @@ const STEP_STATUS_TEXT: Record<string, string> = {
   DONE: '完成', FAILED: '失败', SKIPPED: '跳过',
   EXECUTING: '执行中', WAITING: '待决策', PLANNED: '待执行',
 }
-const REQ_STATUS_COLOR: Record<string, string> = {
-  CONFIRMED: 'green', IN_PROGRESS: 'blue', PROPOSED: 'gold', DONE: 'cyan',
-}
 const STAGE_TAG_COLOR: Record<string, string> = { REQUIREMENT: 'gold', DEVELOP: 'geekblue', OPERATE: 'volcano' }
 
 /** 步骤→产出证据的文件内容弹窗：有 file_path 走 /files/content（≤200KB 文本），否则显示登记时的 content_md。 */
@@ -66,38 +64,6 @@ function ArtifactModal({ projectId, path, name, contentMd, onClose }: { projectI
           : <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>{path ? (content ?? '加载中…') : (contentMd || '（无正文）')}</pre>}
       </div>
     </Modal>
-  )
-}
-
-/** 矩阵拓扑节点：状态色胶囊，hover 看摘要，点击看详情（产出证据/错误/验证成色）。 */
-function TraceNode({ s, onOpen }: { s: TraceStep; onOpen: (s: TraceStep) => void }) {
-  const label = `${s.stage === 'REQUIREMENT' ? '需求' : s.stage === 'DEVELOP' ? '开发' : '运维'}#${s.seq}`
-  return (
-    <Tooltip
-      title={
-        <div style={{ maxWidth: 320 }}>
-          <div>{s.name}</div>
-          <div style={{ opacity: 0.75 }}>{STEP_STATUS_TEXT[s.status] || s.status}{s.verified_by === 'tool' ? ' · 机器验证' : s.verified_by === 'human' ? ' · 人确认' : ''}</div>
-          {s.output_summary && <div style={{ opacity: 0.75, marginTop: 4 }}>{s.output_summary.slice(0, 120)}</div>}
-        </div>
-      }
-    >
-      <span
-        onClick={() => onOpen(s)}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 3, cursor: 'pointer',
-          padding: '1px 7px', borderRadius: 10, fontSize: 11,
-          border: `1px solid ${s.status === 'DONE' ? '#b7eb8f' : s.status === 'FAILED' ? '#ffa39e' : s.status === 'EXECUTING' || s.status === 'WAITING' ? '#91caff' : '#d9d9d9'}`,
-          background: s.status === 'DONE' ? '#f6ffed' : s.status === 'FAILED' ? '#fff1f0' : s.status === 'EXECUTING' || s.status === 'WAITING' ? '#e6f4ff' : '#fafafa',
-          color: s.status === 'DONE' ? '#389e0d' : s.status === 'FAILED' ? '#cf1322' : s.status === 'EXECUTING' || s.status === 'WAITING' ? '#0958d9' : '#666',
-        }}
-      >
-        {label}
-        {s.verified_by === 'tool' && <span title="机器验证">⚙</span>}
-        {s.verified_by === 'human' && <span title="人确认">👤</span>}
-        {s.artifact && <FileTextOutlined style={{ fontSize: 10 }} />}
-      </span>
-    </Tooltip>
   )
 }
 
@@ -206,94 +172,12 @@ export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], on
         </Card>
       )}
 
-      {data.requirements.length === 0
+      {data.requirements.length === 0 && data.unlinked.length === 0
         ? <Empty description="尚无需求项——需求确认后这里会长出完整追溯链" />
         : (
-          <>
-            <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-              追溯拓扑：一行 = 一条需求横穿三阶段的完整链路；节点颜色 = 状态，点击看详情与产出证据。
-              依赖未闭环（前置未 DONE）的需求整行降透明度。
-            </Typography.Text>
-            {/* 矩阵拓扑：行=需求 × 列=三阶段——「一条需求横穿三阶段」的链路感，不是内容平铺 */}
-            <div style={{
-              display: 'grid', gridTemplateColumns: 'minmax(150px, 220px) 1fr 1fr 1fr',
-              border: '1px solid #f0f0f0', borderRadius: 8, overflow: 'hidden', marginBottom: 10,
-            }}>
-              <div style={{ padding: '6px 10px', background: '#fafafa', fontWeight: 600, fontSize: 12 }}>需求</div>
-              {data.stages.map((s) => (
-                <div key={s.stage} style={{ padding: '6px 10px', background: '#fafafa', fontWeight: 600, fontSize: 12, textAlign: 'center' }}>
-                  {s.label}{s.status === 'ACTIVE' ? '（当前）' : ''}
-                </div>
-              ))}
-              {data.requirements.map((r) => {
-                const blocked = (r.depends_on || []).some((d) => {
-                  const dep = data!.requirements.find((x) => x.code === d)
-                  return dep ? dep.status !== 'DONE' : false
-                })
-                const byStage = new Map<string, TraceStep[]>()
-                for (const s of r.chain) {
-                  const arr = byStage.get(s.stage) || []
-                  arr.push(s)
-                  byStage.set(s.stage, arr)
-                }
-                return (
-                  <div key={r.code} style={{ display: 'contents' }}>
-                    <div style={{
-                      padding: '8px 10px', borderTop: '1px solid #f0f0f0',
-                      opacity: blocked ? 0.5 : 1,
-                    }}>
-                      <Space wrap size={4}>
-                        <Typography.Text strong style={{ fontSize: 12 }}>{r.code}</Typography.Text>
-                        <Tag style={{ marginInlineEnd: 0 }} color={REQ_STATUS_COLOR[r.status] || 'default'}>{r.status}</Tag>
-                      </Space>
-                      <Tooltip title={r.title}>
-                        <div style={{ fontSize: 11, color: '#888', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</div>
-                      </Tooltip>
-                      {r.depends_on.length > 0 && (
-                        <div style={{ fontSize: 11, color: blocked ? '#fa8c16' : '#bbb' }}>
-                          依赖：{r.depends_on.join('、')}{blocked ? '（未闭环）' : ''}
-                        </div>
-                      )}
-                    </div>
-                    {data!.stages.map((st) => (
-                      <div key={st.stage} style={{
-                        padding: '6px 8px', borderTop: '1px solid #f0f0f0', borderLeft: '1px solid #f5f5f5',
-                        display: 'flex', flexWrap: 'wrap', gap: 4, alignContent: 'flex-start',
-                        opacity: blocked ? 0.5 : 1, minHeight: 40,
-                      }}>
-                        {(byStage.get(st.stage) || []).map((s) => (
-                          <TraceNode key={`${s.stage}-${s.iteration}-${s.seq}`} s={s} onOpen={setDetailStep} />
-                        ))}
-                        {(byStage.get(st.stage) || []).length === 0 && (
-                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>—</Typography.Text>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )
-              })}
-              {data.unlinked.length > 0 && (
-                <div style={{ display: 'contents' }}>
-                  <div style={{ padding: '8px 10px', borderTop: '1px solid #f0f0f0', background: '#fffbe6' }}>
-                    <Typography.Text type="warning" style={{ fontSize: 12 }}>
-                      断链 {data.unlinked.length} 项
-                    </Typography.Text>
-                    <div style={{ fontSize: 11, color: '#fa8c16' }}>未声明需求关联——流程正义要求每步可归因</div>
-                  </div>
-                  {data!.stages.map((st) => (
-                    <div key={st.stage} style={{
-                      padding: '6px 8px', borderTop: '1px solid #f0f0f0', borderLeft: '1px solid #f5f5f5',
-                      background: '#fffbe6', display: 'flex', flexWrap: 'wrap', gap: 4, alignContent: 'flex-start',
-                    }}>
-                      {data!.unlinked.filter((s) => s.stage === st.stage).map((s) => (
-                        <TraceNode key={`${s.stage}-${s.iteration}-${s.seq}`} s={s} onOpen={setDetailStep} />
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </>
+          <Card size="small" title="追溯拓扑" style={{ marginBottom: 10 }}>
+            <TraceGraph data={{ stages: data.stages, requirements: data.requirements, unlinked: data.unlinked }} onOpenStep={setDetailStep} />
+          </Card>
         )}
 
       {/* 交付物与历史会话收进折叠区：真相主线（需求链路）不被打断，登记型内容按需展开 */}
