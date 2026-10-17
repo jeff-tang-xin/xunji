@@ -39,18 +39,14 @@ import {
   SettingOutlined,
 } from '@ant-design/icons'
 import { apiJson } from '../api/client'
-import { EXEC_LIVE_STATES, ProjectDetailData, ProjectRow, SHOW_TEMPLATE_ENTRY, STAGE_ORDER, StageExecution, StageView, fmtDate, nextStageOf, projectStatusColor, stageLabel } from './project/types'
+import { EXEC_LIVE_STATES, ProjectDetailData, ProjectRow, SHOW_TEMPLATE_ENTRY, StageExecution, fmtDate, projectStatusColor, stageLabel } from './project/types'
 import { ArtifactDrawer } from './project/ArtifactDrawer'
 import { CreateProjectModal } from './project/CreateProjectModal'
 import ProjectFiles from './project/ProjectFiles'
 import { StageChatPanel } from './project/StageChatPanel'
 import { MarkdownView } from './project/shared'
 import { DsOption } from './project/types'
-import { StageExecutionPanel } from './project/StageExecutionPanel'
-import { StageGroups } from './project/StageGroups'
-import { StageSessionsPanel } from './project/StageSessionsPanel'
 import { TemplateEditor } from './project/TemplateEditor'
-import { RequirementBoard } from './project/RequirementBoard'
 import { TracePanel } from './project/TracePanel'
 
 /** 右栏 tab 内容统一限高内部滚动：任何 tab 内容多都不再把整页撑出几屏长（实测反馈）。
@@ -67,7 +63,6 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [detail, setDetail] = useState<ProjectDetailData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [advancing, setAdvancing] = useState(false)
   /** 交付物全文查看：点卡片打开抽屉渲染完整 markdown */
   const [viewArtifact, setViewArtifact] = useState<ProjectDetailData['artifacts'][number] | null>(null)
   /** 项目编辑/删除 */
@@ -136,9 +131,8 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   }
   /** 阶段执行视图数据，由本页轮询后喂给 StageExecutionPanel */
   const [exec, setExec] = useState<StageExecution | null>(null)
-  const [execBusy, setExecBusy] = useState(false)
 // 右栏受控 tab：对话内决策黄卡「去处理」按钮跳转到「阶段执行」
-const [rightTab, setRightTab] = useState('exec')
+const [rightTab, setRightTab] = useState('trace')
 // 决策答复的前端自动续跑已下线：answer 端点置 DONE 后由后端 wakeMaster 直接唤醒主控
 //（答复内容进唤醒消息），前端经会话事件总线实时回显——与任务/讨论落板唤醒同一条后端链路。
   const [artifactDrawer, setArtifactDrawer] = useState(false)
@@ -157,14 +151,11 @@ const [rightTab, setRightTab] = useState('exec')
   }, [id])
 
   /** 拉阶段执行视图；silent=true 时不置 busy，避免轮询把面板闪成加载态 */
-  const loadExec = useCallback(async (silent = false) => {
-    if (!silent) setExecBusy(true)
+  const loadExec = useCallback(async () => {
     try {
       setExec(await apiJson<StageExecution>(`/api/projects/${id}/stage-execution`))
     } catch {
       // 执行视图取不到不打断详情页主流程（例如规划尚未生成），保留上一次数据即可
-    } finally {
-      if (!silent) setExecBusy(false)
     }
   }, [id])
 
@@ -182,7 +173,7 @@ const [rightTab, setRightTab] = useState('exec')
   useEffect(() => {
     if (!execState || !EXEC_LIVE_STATES.has(execState)) return
     // 30s 兜底轮询：实时推送（下方事件订阅）为主通道，轮询只在断线/漏事件时自愈
-    const t = setInterval(() => { void loadExec(true) }, 30000)
+    const t = setInterval(() => { void loadExec() }, 30000)
     return () => clearInterval(t)
   }, [execState, loadExec])
 
@@ -192,7 +183,7 @@ const [rightTab, setRightTab] = useState('exec')
   const [reqTick, setReqTick] = useState(0)
   useEffect(() => {
     const es = new EventSource(`/api/projects/${id}/events`)
-    const refresh = () => { void loadExec(true); void load(true) }
+    const refresh = () => { void loadExec(); void load(true) }
     es.addEventListener('step.updated', refresh)
     es.addEventListener('decision.answered', refresh)
     es.addEventListener('requirement.updated', () => { setReqTick((x) => x + 1); refresh() })
@@ -212,36 +203,7 @@ const [rightTab, setRightTab] = useState('exec')
 
   const currentStage = detail.current_stage || 'REQUIREMENT'
 
-  /** 生命周期视图：3 阶段状态按当前阶段推导（V27 起完成度真相在 run，台账仅历史兼容） */
-  const views = STAGE_ORDER.map((st) => ({
-    stage: st,
-    label: stageLabel(st),
-    status: STAGE_ORDER.indexOf(st) < STAGE_ORDER.indexOf(currentStage) ? 'DONE'
-      : st === currentStage ? 'IN_PROGRESS' : 'NOT_STARTED',
-    resident: st === 'OPERATE',
-    iterations: [] as string[],
-  }))
 
-  /** 推进阶段（AI 自动流转失败时的人工兜底；单向不可回退） */
-  const advanceStage = async (v: StageView) => {
-    setAdvancing(true)
-    try {
-      const r = await apiJson<{ current_stage?: string }>(`/api/projects/${id}/stage/advance`, 'POST', {})
-      const to = stageLabel(r?.current_stage || nextStageOf(v.stage))
-      message.success(`项目已推进到「${to}」阶段`)
-      await load()
-      // 推进后新阶段会自动产出规划草稿，执行视图要跟着换成新阶段那条
-      await loadExec()
-    } catch (e) {
-      if (e instanceof Error) message.error(e.message)
-    } finally {
-      setAdvancing(false)
-    }
-  }
-
-  /** 运维阶段发起新一轮迭代（后端 iterate 端点未建，暂复用 advance，由后端校验拒绝时提示） */
-  const deliverables = detail.artifacts.filter((a) => a.kind === 'DELIVERABLE')
-  const processes = detail.artifacts.filter((a) => a.kind === 'PROCESS')
   /** 留档：过程性文档（讨论纪要/求助问答/决策记录/对话留档），与交付物分开浏览 */
   const archives = detail.artifacts.filter((a) => a.kind === 'DOC' || a.kind === 'DECISION')
 
@@ -333,7 +295,7 @@ const [rightTab, setRightTab] = useState('exec')
               </Typography.Text>
             }
           >
-            <StageChatPanel projectId={id} exec={exec} onJumpExec={() => setRightTab('exec')} />
+            <StageChatPanel projectId={id} exec={exec} onJumpExec={() => setRightTab('trace')} />
           </Card>
         </Col>
 
@@ -346,92 +308,14 @@ const [rightTab, setRightTab] = useState('exec')
               {
                 key: 'trace',
                 label: '追溯',
-                children: tabBody(<TracePanel projectId={id} refreshKey={reqTick} />),
-              },
-              {
-                key: 'requirements',
-                label: '需求',
-                children: tabBody(<RequirementBoard projectId={id} refreshKey={reqTick} />),
-              },
-              {
-                key: 'exec',
-                label: '阶段执行',
-                children: tabBody(execBusy && !exec ? (
-                  <div style={{ padding: 32, textAlign: 'center' }}><Spin /></div>
-                ) : (
-                  <StageExecutionPanel
-                    projectId={id}
-                    exec={exec}
-                    busy={execBusy}
-                    onRefresh={() => void loadExec()}
-                    onChanged={() => { void loadExec(); void load() }}
-                  />
-                )),
-              },
-              {
-                key: 'stages',
-                label: '生命周期',
                 children: tabBody(
-                  <StageGroups
-                    views={views}
-                    currentStage={currentStage}
-                    exec={exec}
-                    artifacts={detail.artifacts}
-                    onAdvance={(v) => void advanceStage(v)}
-                    advancing={advancing}
-                  />
+                  <TracePanel projectId={id} refreshKey={reqTick} exec={exec} artifacts={detail?.artifacts || []} onRefresh={() => { void load(true); void loadExec() }} />
                 ),
               },
               {
                 key: 'files',
                 label: '文件',
                 children: tabBody(<ProjectFiles projectId={id} />),
-              },
-              {
-                key: 'artifacts',
-                label: `交付物 ${deliverables.length}`,
-                children: (
-                  <>
-                    <div style={{ marginBottom: 8, textAlign: 'right' }}>
-                      <Button size="small" type="link" onClick={() => setArtifactDrawer(true)}>登记留档</Button>
-                    </div>
-                    {deliverables.length === 0
-                      ? <Empty description="暂无交付留档" />
-                      : [...deliverables].reverse().map((a) => (
-                        <Card key={a.id} size="small" style={{ marginBottom: 8, cursor: 'pointer' }}
-                          onClick={() => setViewArtifact(a)}>
-                          <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                            <Space>
-                              <FileTextOutlined />
-                              <Typography.Text strong>{a.name}</Typography.Text>
-                              {a.version != null && <Tag style={{ marginInlineEnd: 0 }}>v{a.version}</Tag>}
-                            </Space>
-                            {a.content_md && (
-                              <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }} ellipsis={{ rows: 2 }}>
-                                {a.content_md}
-                              </Typography.Paragraph>
-                            )}
-                          </Space>
-                        </Card>
-                      ))}
-                    {processes.length > 0 && (
-                      <>
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                          过程留档（{processes.length}）
-                        </Typography.Text>
-                        {processes.map((a) => (
-                          <Card key={a.id} size="small" style={{ marginBottom: 8 }}>
-                            <Space>
-                              <FileTextOutlined />
-                              <Typography.Text strong>{a.name}</Typography.Text>
-                              <Tag>过程</Tag>
-                            </Space>
-                          </Card>
-                        ))}
-                      </>
-                    )}
-                  </>
-                ),
               },
               {
                 key: 'archives',
@@ -461,11 +345,6 @@ const [rightTab, setRightTab] = useState('exec')
                       </Card>
                     ))
                 ),
-              },
-              {
-                key: 'sessions',
-                label: '会话',
-                children: tabBody(<StageSessionsPanel projectId={id} />),
               },
             ]}
           />

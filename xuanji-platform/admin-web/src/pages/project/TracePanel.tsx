@@ -11,11 +11,14 @@
  * 复用父组件 requirement.updated/step.updated 事件刷新机制由 refreshKey 驱动）。
  */
 import { useEffect, useState } from 'react'
-import { Alert, Card, Empty, message, Modal, Space, Spin, Steps, Tag, Timeline, Tooltip, Typography } from 'antd'
-import { FileTextOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Collapse, Empty, message, Modal, Space, Spin, Steps, Tag, Tooltip, Typography } from 'antd'
+import { FileTextOutlined, LockOutlined } from '@ant-design/icons'
+import type { StageExecution, StageStepRow } from './types'
+import { DecisionAnswerModal } from './DecisionAnswerModal'
+import { StageSessionsPanel } from './StageSessionsPanel'
 import { apiJson } from '../../api/client'
 
-interface TraceArtifact { name: string; file_path: string | null; kind: string }
+interface TraceArtifact { name: string; file_path: string | null; kind: string; content_md?: string | null }
 interface TraceStep {
   stage: string; iteration: number; seq: number; name: string
   step_type: string; status: string; verified_by: string | null
@@ -45,8 +48,8 @@ const REQ_STATUS_COLOR: Record<string, string> = {
 }
 const STAGE_TAG_COLOR: Record<string, string> = { REQUIREMENT: 'gold', DEVELOP: 'geekblue', OPERATE: 'volcano' }
 
-/** 步骤→产出证据的文件内容弹窗（复用 /files/content，≤200KB 文本）。 */
-function ArtifactModal({ projectId, path, name, onClose }: { projectId: string; path: string | null; name: string; onClose: () => void }) {
+/** 步骤→产出证据的文件内容弹窗：有 file_path 走 /files/content（≤200KB 文本），否则显示登记时的 content_md。 */
+function ArtifactModal({ projectId, path, name, contentMd, onClose }: { projectId: string; path: string | null; name: string; contentMd?: string | null; onClose: () => void }) {
   const [content, setContent] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   useEffect(() => {
@@ -58,41 +61,99 @@ function ArtifactModal({ projectId, path, name, onClose }: { projectId: string; 
   return (
     <Modal open title={<Space><FileTextOutlined />{name}</Space>} onCancel={onClose} footer={null} width={780}>
       <div style={{ maxHeight: '65vh', overflow: 'auto' }}>
-        {err ? <Alert type="error" message={err} /> : <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>{content ?? '加载中…'}</pre>}
+        {err
+          ? <Alert type="error" message={err} />
+          : <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>{path ? (content ?? '加载中…') : (contentMd || '（无正文）')}</pre>}
       </div>
     </Modal>
   )
 }
 
-function StepNode({ s, onOpen }: { s: TraceStep; onOpen: (a: TraceArtifact) => void }) {
-  const color = STEP_STATUS_COLOR[s.status] || 'default'
+/** 矩阵拓扑节点：状态色胶囊，hover 看摘要，点击看详情（产出证据/错误/验证成色）。 */
+function TraceNode({ s, onOpen }: { s: TraceStep; onOpen: (s: TraceStep) => void }) {
+  const label = `${s.stage === 'REQUIREMENT' ? '需求' : s.stage === 'DEVELOP' ? '开发' : '运维'}#${s.seq}`
   return (
-    <div style={{ padding: '2px 0' }}>
-      <Space wrap size={6}>
-        <Tag style={{ marginInlineEnd: 0 }} color={STAGE_TAG_COLOR[s.stage]}>{s.stage === 'REQUIREMENT' ? '需求' : s.stage === 'DEVELOP' ? '开发' : '运维'}#{s.seq}</Tag>
-        <Typography.Text style={{ fontSize: 13 }}>{s.name}</Typography.Text>
-        <Tag style={{ marginInlineEnd: 0 }} color={color}>{STEP_STATUS_TEXT[s.status] || s.status}</Tag>
-        {s.verified_by === 'tool' && <Tag style={{ marginInlineEnd: 0 }} color="cyan">机器验证</Tag>}
-        {s.verified_by === 'human' && <Tag style={{ marginInlineEnd: 0 }} color="purple">人确认</Tag>}
-        {s.artifact && (
-          <a onClick={() => onOpen(s.artifact!)} style={{ fontSize: 12 }}>
-            <FileTextOutlined /> {s.artifact.name}
-          </a>
-        )}
-      </Space>
-      {s.error && (
-        <Typography.Paragraph type="danger" style={{ fontSize: 12, marginBottom: 0 }} ellipsis>
-          {s.error}
-        </Typography.Paragraph>
-      )}
-    </div>
+    <Tooltip
+      title={
+        <div style={{ maxWidth: 320 }}>
+          <div>{s.name}</div>
+          <div style={{ opacity: 0.75 }}>{STEP_STATUS_TEXT[s.status] || s.status}{s.verified_by === 'tool' ? ' · 机器验证' : s.verified_by === 'human' ? ' · 人确认' : ''}</div>
+          {s.output_summary && <div style={{ opacity: 0.75, marginTop: 4 }}>{s.output_summary.slice(0, 120)}</div>}
+        </div>
+      }
+    >
+      <span
+        onClick={() => onOpen(s)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 3, cursor: 'pointer',
+          padding: '1px 7px', borderRadius: 10, fontSize: 11,
+          border: `1px solid ${s.status === 'DONE' ? '#b7eb8f' : s.status === 'FAILED' ? '#ffa39e' : s.status === 'EXECUTING' || s.status === 'WAITING' ? '#91caff' : '#d9d9d9'}`,
+          background: s.status === 'DONE' ? '#f6ffed' : s.status === 'FAILED' ? '#fff1f0' : s.status === 'EXECUTING' || s.status === 'WAITING' ? '#e6f4ff' : '#fafafa',
+          color: s.status === 'DONE' ? '#389e0d' : s.status === 'FAILED' ? '#cf1322' : s.status === 'EXECUTING' || s.status === 'WAITING' ? '#0958d9' : '#666',
+        }}
+      >
+        {label}
+        {s.verified_by === 'tool' && <span title="机器验证">⚙</span>}
+        {s.verified_by === 'human' && <span title="人确认">👤</span>}
+        {s.artifact && <FileTextOutlined style={{ fontSize: 10 }} />}
+      </span>
+    </Tooltip>
   )
 }
 
-export function TracePanel({ projectId, refreshKey = 0 }: { projectId: string; refreshKey?: number }) {
+/** 步骤详情弹窗：流程正义的落点——谁做的、验证成色、产出证据、错误，全部可查。 */
+function StepDetailModal({ projectId, s, onClose }: { projectId: string; s: TraceStep | null; onClose: () => void }) {
+  return (
+    <Modal open={!!s} title={<Space><Tag color={STAGE_TAG_COLOR[s?.stage || '']}>{s?.stage === 'REQUIREMENT' ? '需求' : s?.stage === 'DEVELOP' ? '开发' : '运维'}#{s?.seq}</Tag>{s?.name}</Space>} onCancel={onClose} footer={null} width={680}>
+      {s && (
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Space wrap size={6}>
+            <Tag color={STEP_STATUS_COLOR[s.status] || 'default'}>{STEP_STATUS_TEXT[s.status] || s.status}</Tag>
+            {s.verified_by === 'tool' && <Tag color="cyan">机器验证</Tag>}
+            {s.verified_by === 'human' && <Tag color="purple">人确认</Tag>}
+            {s.verified_by === 'self' && <Tooltip title="AI 自述完成——未经机器判定或人确认"><Tag>AI 自述</Tag></Tooltip>}
+          </Space>
+          {s.error && <Alert type="error" message={s.error} />}
+          {s.output_summary && <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>{s.output_summary}</Typography.Paragraph>}
+          {s.artifact && <ArtifactLink projectId={projectId} artifact={s.artifact} />}
+        </Space>
+      )}
+    </Modal>
+  )
+}
+
+/** 产出证据链接：有文件路径走文件弹窗，否则提示看交付物折叠区。 */
+function ArtifactLink({ projectId, artifact }: { projectId: string; artifact: TraceArtifact }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <a onClick={() => setOpen(true)} style={{ fontSize: 12 }}>
+        <FileTextOutlined /> 产出证据：{artifact.name}
+      </a>
+      {open && (
+        <ArtifactModal projectId={projectId} path={artifact.file_path} name={artifact.name} contentMd={artifact.content_md} onClose={() => setOpen(false)} />
+      )}
+    </>
+  )
+}
+
+
+export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], onRefresh }: {
+  projectId: string
+  refreshKey?: number
+  /** 执行视图：待决策区数据源（DECISION 步 WAITING/PLANNED 即待答复） */
+  exec: StageExecution | null
+  /** 全部交付物（kind=DELIVERABLE）：链路证据之外的登记型交付物也在这里可见 */
+  artifacts?: { id: number; name: string; kind: string; stage?: string | null; content_md?: string | null; version?: number | null }[]
+  onRefresh?: () => void
+}) {
   const [data, setData] = useState<TraceData | null>(null)
   const [loading, setLoading] = useState(true)
   const [viewing, setViewing] = useState<TraceArtifact | null>(null)
+  /** 待答复决策步：点「处理」打开答复 Modal（有未处理决策时左侧对话输入被锁定，这里是唯一解锁通道） */
+  const [decisionStep, setDecisionStep] = useState<StageStepRow | null>(null)
+  /** 矩阵节点点击详情 */
+  const [detailStep, setDetailStep] = useState<TraceStep | null>(null)
 
   const load = () => {
     setLoading(true)
@@ -112,51 +173,167 @@ export function TracePanel({ projectId, refreshKey = 0 }: { projectId: string; r
     status: (s.status === 'DONE' ? 'finish' : s.status === 'ACTIVE' ? 'process' : 'wait') as 'finish' | 'process' | 'wait',
   }))
 
+  // 待答复决策步（新内核口径）：DECISION 且未 DONE/SKIPPED——决策是链路上的活结，置顶展示
+  const pendingDecisions = (exec?.steps || []).filter(
+    (s) => s.stepType === 'DECISION' && s.status !== 'DONE' && s.status !== 'SKIPPED',
+  )
+  const deliverables = artifacts.filter((a) => a.kind === 'DELIVERABLE')
+
   return (
     <div>
       {/* 三阶段流水线：项目走到哪儿了，一眼可见 */}
       <Steps size="small" items={stepItems} style={{ marginBottom: 16 }} />
 
-      {data.requirements.length === 0
-        ? <Empty description="尚无需求项——需求确认后这里会长出完整追溯链" />
-        : data.requirements.map((r) => {
-          const done = r.chain.filter((s) => s.status === 'DONE').length
-          return (
-            <Card key={r.code} size="small" style={{ marginBottom: 10 }}>
-              <Space wrap size={6} style={{ marginBottom: r.chain.length ? 8 : 0 }}>
-                <Typography.Text strong>{r.code}</Typography.Text>
-                <Typography.Text style={{ fontSize: 13 }}>{r.title}</Typography.Text>
-                <Tag style={{ marginInlineEnd: 0 }} color={REQ_STATUS_COLOR[r.status] || 'default'}>{r.status}</Tag>
-                {r.depth > 0 && <Tooltip title={`依赖前置需求：${r.depends_on.join('、')}`}><Tag style={{ marginInlineEnd: 0 }}>依赖深度 {r.depth}</Tag></Tooltip>}
-                {r.chain.length > 0 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{done}/{r.chain.length} 步完成</Typography.Text>}
+      {/* 待决策区：链路上的活结——不处理，主控就停在这里（对话输入同时被锁定） */}
+      {pendingDecisions.length > 0 && (
+        <Card size="small" style={{ marginBottom: 10, borderColor: '#fa8c16' }}>
+          <Space wrap size={6} style={{ marginBottom: 6 }}>
+            <LockOutlined style={{ color: '#fa8c16' }} />
+            <Typography.Text strong>{pendingDecisions.length} 个决策待处理</Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>主控在等你的决定，答复后继续推进</Typography.Text>
+          </Space>
+          {pendingDecisions.map((s) => (
+            <div key={s.id} style={{ padding: '4px 0', borderTop: '1px solid #f5f5f5' }}>
+              <Space wrap size={6}>
+                <Tag style={{ marginInlineEnd: 0 }} color="orange">决策 #{s.seq}</Tag>
+                <Typography.Text style={{ fontSize: 13 }}>{s.name}</Typography.Text>
+                <Button size="small" type="primary" onClick={() => setDecisionStep(s)}>
+                  处理
+                </Button>
               </Space>
-              {r.chain.length > 0 && (
-                <Timeline
-                  style={{ marginBottom: 0 }}
-                  items={r.chain.map((s) => ({
-                    color: s.status === 'DONE' ? 'green' : s.status === 'FAILED' ? 'red' : s.status === 'EXECUTING' || s.status === 'WAITING' ? 'blue' : 'gray',
-                    children: <StepNode s={s} onOpen={setViewing} />,
-                  }))}
-                />
-              )}
-            </Card>
-          )
-        })}
-
-      {data.unlinked.length > 0 && (
-        <Card size="small" style={{ marginTop: 8, borderColor: '#faad14' }}>
-          <Typography.Text type="warning" style={{ fontSize: 12 }}>
-            {data.unlinked.length} 个工作项未声明需求关联（决策/求助步除外）——链路断点，主控应补 requirement_codes
-          </Typography.Text>
-          <div style={{ marginTop: 6 }}>
-            {data.unlinked.map((s) => <StepNode key={`${s.stage}-${s.iteration}-${s.seq}`} s={s} onOpen={setViewing} />)}
-          </div>
+            </div>
+          ))}
         </Card>
       )}
 
+      {data.requirements.length === 0
+        ? <Empty description="尚无需求项——需求确认后这里会长出完整追溯链" />
+        : (
+          <>
+            <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+              追溯拓扑：一行 = 一条需求横穿三阶段的完整链路；节点颜色 = 状态，点击看详情与产出证据。
+              依赖未闭环（前置未 DONE）的需求整行降透明度。
+            </Typography.Text>
+            {/* 矩阵拓扑：行=需求 × 列=三阶段——「一条需求横穿三阶段」的链路感，不是内容平铺 */}
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'minmax(150px, 220px) 1fr 1fr 1fr',
+              border: '1px solid #f0f0f0', borderRadius: 8, overflow: 'hidden', marginBottom: 10,
+            }}>
+              <div style={{ padding: '6px 10px', background: '#fafafa', fontWeight: 600, fontSize: 12 }}>需求</div>
+              {data.stages.map((s) => (
+                <div key={s.stage} style={{ padding: '6px 10px', background: '#fafafa', fontWeight: 600, fontSize: 12, textAlign: 'center' }}>
+                  {s.label}{s.status === 'ACTIVE' ? '（当前）' : ''}
+                </div>
+              ))}
+              {data.requirements.map((r) => {
+                const blocked = (r.depends_on || []).some((d) => {
+                  const dep = data!.requirements.find((x) => x.code === d)
+                  return dep ? dep.status !== 'DONE' : false
+                })
+                const byStage = new Map<string, TraceStep[]>()
+                for (const s of r.chain) {
+                  const arr = byStage.get(s.stage) || []
+                  arr.push(s)
+                  byStage.set(s.stage, arr)
+                }
+                return (
+                  <div key={r.code} style={{ display: 'contents' }}>
+                    <div style={{
+                      padding: '8px 10px', borderTop: '1px solid #f0f0f0',
+                      opacity: blocked ? 0.5 : 1,
+                    }}>
+                      <Space wrap size={4}>
+                        <Typography.Text strong style={{ fontSize: 12 }}>{r.code}</Typography.Text>
+                        <Tag style={{ marginInlineEnd: 0 }} color={REQ_STATUS_COLOR[r.status] || 'default'}>{r.status}</Tag>
+                      </Space>
+                      <Tooltip title={r.title}>
+                        <div style={{ fontSize: 11, color: '#888', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</div>
+                      </Tooltip>
+                      {r.depends_on.length > 0 && (
+                        <div style={{ fontSize: 11, color: blocked ? '#fa8c16' : '#bbb' }}>
+                          依赖：{r.depends_on.join('、')}{blocked ? '（未闭环）' : ''}
+                        </div>
+                      )}
+                    </div>
+                    {data!.stages.map((st) => (
+                      <div key={st.stage} style={{
+                        padding: '6px 8px', borderTop: '1px solid #f0f0f0', borderLeft: '1px solid #f5f5f5',
+                        display: 'flex', flexWrap: 'wrap', gap: 4, alignContent: 'flex-start',
+                        opacity: blocked ? 0.5 : 1, minHeight: 40,
+                      }}>
+                        {(byStage.get(st.stage) || []).map((s) => (
+                          <TraceNode key={`${s.stage}-${s.iteration}-${s.seq}`} s={s} onOpen={setDetailStep} />
+                        ))}
+                        {(byStage.get(st.stage) || []).length === 0 && (
+                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>—</Typography.Text>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )
+              })}
+              {data.unlinked.length > 0 && (
+                <div style={{ display: 'contents' }}>
+                  <div style={{ padding: '8px 10px', borderTop: '1px solid #f0f0f0', background: '#fffbe6' }}>
+                    <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                      断链 {data.unlinked.length} 项
+                    </Typography.Text>
+                    <div style={{ fontSize: 11, color: '#fa8c16' }}>未声明需求关联——流程正义要求每步可归因</div>
+                  </div>
+                  {data!.stages.map((st) => (
+                    <div key={st.stage} style={{
+                      padding: '6px 8px', borderTop: '1px solid #f0f0f0', borderLeft: '1px solid #f5f5f5',
+                      background: '#fffbe6', display: 'flex', flexWrap: 'wrap', gap: 4, alignContent: 'flex-start',
+                    }}>
+                      {data!.unlinked.filter((s) => s.stage === st.stage).map((s) => (
+                        <TraceNode key={`${s.stage}-${s.iteration}-${s.seq}`} s={s} onOpen={setDetailStep} />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+      {/* 交付物与历史会话收进折叠区：真相主线（需求链路）不被打断，登记型内容按需展开 */}
+      <Collapse
+        size="small"
+        style={{ marginTop: 8 }}
+        items={[
+          {
+            key: 'deliverables',
+            label: `交付物 ${deliverables.length}`,
+            children: deliverables.length === 0
+              ? <Empty description="暂无交付物" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              : [...deliverables].reverse().map((a) => (
+                <Card key={a.id} size="small" style={{ marginBottom: 8, cursor: 'pointer' }} onClick={() => setViewing({ name: a.name, file_path: null, kind: 'DELIVERABLE', content_md: a.content_md })}>
+                  <Space>
+                    <FileTextOutlined />
+                    <Typography.Text strong>{a.name}</Typography.Text>
+                    {a.version != null && <Tag style={{ marginInlineEnd: 0 }}>v{a.version}</Tag>}
+                  </Space>
+                </Card>
+              )),
+          },
+          {
+            key: 'sessions',
+            label: '历史会话',
+            children: <StageSessionsPanel projectId={projectId} />,
+          },
+        ]}
+      />
+
       {viewing && (
-        <ArtifactModal projectId={projectId} path={viewing.file_path} name={viewing.name} onClose={() => setViewing(null)} />
+        <ArtifactModal projectId={projectId} path={viewing.file_path} name={viewing.name} contentMd={viewing.content_md} onClose={() => setViewing(null)} />
       )}
+      <DecisionAnswerModal
+        projectId={projectId}
+        step={decisionStep}
+        onClose={() => setDecisionStep(null)}
+        onAnswered={() => { if (onRefresh) onRefresh() }}
+      />
+      <StepDetailModal projectId={projectId} s={detailStep} onClose={() => setDetailStep(null)} />
     </div>
   )
 }

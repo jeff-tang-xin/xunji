@@ -638,6 +638,13 @@ public class OrchestrationTools {
             if (!s.requirementCodes().isEmpty()) {
                 sb.append("→").append(s.requirementCodes());
             }
+            // 流程正义：验证成色随行透出——self=AI 自述（默认不标），tool=机器判定，human=人确认；
+            // 主控与用户都能看出「这一步的完成是谁说了算」，未验证的完成不许说成已交付
+            if ("tool".equals(s.verifiedBy())) {
+                sb.append("【机器验证】");
+            } else if ("human".equals(s.verifiedBy())) {
+                sb.append("【人确认】");
+            }
             if (s.outputSummary() != null && !s.outputSummary().isBlank()) {
                 sb.append("：").append(truncate(s.outputSummary(), 120));
             }
@@ -656,6 +663,22 @@ public class OrchestrationTools {
         if (reqs.isEmpty()) {
             return "";
         }
+        // 流程点归属：每条需求在三阶段的链路进展（挂链步骤数/完成数）——
+        // 主控执行任何一步前都知道「这条需求链走到哪了、本阶段的哪些步在服务它」，
+        // 不再只看本阶段台账的井底视角（用户定调：智能体必须知道流程点内归属）
+        List<StageStep> allSteps = stepRepo.findByWorkspace(wsId);
+        java.util.Map<String, java.util.Map<String, int[]>> chain = new java.util.LinkedHashMap<>();
+        for (StageStep s : allSteps) {
+            for (String code : s.requirementCodes()) {
+                chain.computeIfAbsent(code, k -> new java.util.LinkedHashMap<>())
+                        .computeIfAbsent(s.stage(), k -> new int[2]);
+                int[] c = chain.get(code).get(s.stage());
+                c[0]++;
+                if (!s.status().active()) {
+                    c[1]++;
+                }
+            }
+        }
         StringBuilder sb = new StringBuilder();
         for (RequirementRepository.Requirement r : reqs) {
             sb.append("- ").append(r.code()).append(" [").append(r.status()).append("] ")
@@ -663,9 +686,33 @@ public class OrchestrationTools {
             if (r.dependsOn() != null && !r.dependsOn().isBlank() && !"[]".equals(r.dependsOn())) {
                 sb.append("（依赖 ").append(r.dependsOn()).append("）");
             }
+            java.util.Map<String, int[]> byStage = chain.get(r.code());
+            if (byStage != null && !byStage.isEmpty()) {
+                sb.append("（链路");
+                boolean first = true;
+                for (String st : STAGES) {
+                    int[] c = byStage.get(st);
+                    if (c == null) {
+                        continue;
+                    }
+                    sb.append(first ? "：" : " · ").append(stageShort(st)).append(" ").append(c[1]).append("/").append(c[0]);
+                    first = false;
+                }
+                sb.append("）");
+            }
             sb.append("\n");
         }
         return sb.toString();
+    }
+
+    /** 阶段短名（链路统计用）：REQUIREMENT→需求 / DEVELOP→开发 / OPERATE→运维。 */
+    private static String stageShort(String stage) {
+        return switch (stage) {
+            case "REQUIREMENT" -> "需求";
+            case "DEVELOP" -> "开发";
+            case "OPERATE" -> "运维";
+            default -> stage;
+        };
     }
 
     private String toJson(Object value) {
