@@ -47,22 +47,8 @@ public class ProjectTemplateService {
     public Map<String, Object> templateDetail(String code) {
         Map<String, Object> tpl = requireTemplate(code);
         long templateId = ((Number)tpl.get("id")).longValue();
-        ArrayList nodes = new ArrayList();
-        for (Map<String, Object> tn : this.repo.findTemplateNodes(templateId)) {
-            LinkedHashMap<String, Object> n = new LinkedHashMap<String, Object>();
-            n.put("type", tn.get("type"));
-            n.put("seq", tn.get("seq"));
-            n.put("owner_role", tn.get("owner_role"));
-            n.put("agent_name", tn.get("agent_name"));
-            n.put("workflow_def_id", tn.get("workflow_def_id"));
-            n.put("standards", parseStringList(objectMapper, tn.get("standards")));
-            n.put("requirements", parseStringList(objectMapper, tn.get("requirements")));
-            n.put("methodology", tn.get("methodology"));
-            n.put("deliverable", tn.get("deliverable"));
-            n.put("depends_on", parseIntList(objectMapper, tn.get("depends_on")));
-            n.put("preconditions", parseStringList(objectMapper, tn.get("preconditions")));
-            nodes.add(n);
-        }
+        // V38 起节点链表已删（V30 后模板真相是 stages_json）：nodes 恒空，字段保留兼容旧前端
+        List<Map<String, Object>> nodes = List.of();
         LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("id", tpl.get("id"));
         result.put("code", tpl.get("code"));
@@ -84,11 +70,9 @@ public class ProjectTemplateService {
         }
         String name = limited(requireText(body.get("name"), "name"), 128, "name");
         String description = limited(blankToNull(body.get("description")), 512, "description");
-        List<Map<String, Object>> nodes = normalizeTemplateNodes(body.get("nodes"));
         String stagesJson = normalizeTemplateStages(body.get("stages"));
         long templateId = this.repo.insertTemplate(code, name, description, stagesJson);
-        insertTemplateNodes(templateId, nodes);
-        log.info("template created: code={} nodes={} stages={}", new Object[]{code, nodes.size(), stagesJson == null ? 0 : stagesJson.length()});
+        log.info("template created: code={} stages={}", new Object[]{code, stagesJson == null ? 0 : stagesJson.length()});
         return templateDetail(code);
     }
     @Transactional
@@ -100,14 +84,9 @@ public class ProjectTemplateService {
         }
         String name = limited(requireText(body.get("name"), "name"), 128, "name");
         String description = limited(blankToNull(body.get("description")), 512, "description");
-        List<Map<String, Object>> nodes = normalizeTemplateNodes(body.get("nodes"));
         String stagesJson = normalizeTemplateStages(body.get("stages"));
         long templateId = ((Number)tpl.get("id")).longValue();
         this.repo.updateTemplate(templateId, name, description, stagesJson);
-        if (body.get("nodes") != null) {
-            this.repo.deleteTemplateNodes(templateId);
-            insertTemplateNodes(templateId, nodes);
-        }
         return templateDetail(code);
     }
     @Transactional
@@ -174,72 +153,5 @@ public class ProjectTemplateService {
     }
     Map<String, Object> requireTemplate(String code) {
         return (Map)this.repo.findTemplateByCode(code).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "模板不存在: " + code));
-    }
-    private List<Map<String, Object>> normalizeTemplateNodes(Object raw) {
-        List list;
-        if (raw == null) {
-            return new ArrayList<Map<String, Object>>();
-        }
-        if (!(raw instanceof List) || (list = (List)raw).isEmpty()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "nodes 不能为空（模板至少包含一个节点，或改用 stages 阶段预设）");
-        }
-        ArrayList<Map<String, Object>> nodes = new ArrayList<Map<String, Object>>();
-        for (int i = 0; i < list.size(); ++i) {
-            Object e = list.get(i);
-            if (!(e instanceof Map)) {
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "nodes[" + i + "] 必须是对象");
-            }
-            Map m = (Map)e;
-            Map<String, Object> e2 = asStringMap(m);
-            String label = "nodes[" + i + "]";
-            String type = limited(requireText(e2.get("type"), label + ".type"), 24, label + ".type");
-            String ownerRole = limited(requireText(e2.get("owner_role"), label + ".owner_role"), 32, label + ".owner_role");
-            int seq = requireSeq(e2.get("seq"), label + ".seq");
-            String deliverable = limited(blankToNull(e2.get("deliverable")), 256, label + ".deliverable");
-            String agentName = limited(blankToNull(e2.get("agent_name")), 64, label + ".agent_name");
-            Long workflowDefId = optionalLong(e2.get("workflow_def_id"), label + ".workflow_def_id");
-            String stage = resolveStage(e2.get("stage"), type);
-            LinkedHashMap<String, Object> n = new LinkedHashMap<String, Object>();
-            n.put("type", type);
-            n.put("seq", seq);
-            n.put("owner_role", ownerRole);
-            n.put("agent_name", agentName);
-            n.put("workflow_def_id", workflowDefId);
-            n.put("stage", stage);
-            n.put("standards", requireStringList(e2.get("standards"), label + ".standards"));
-            n.put("requirements", requireStringList(e2.get("requirements"), label + ".requirements"));
-            n.put("methodology", blankToNull(e2.get("methodology")));
-            n.put("deliverable", deliverable);
-            n.put("depends_on", requireIntList(e2.get("depends_on"), label + ".depends_on"));
-            n.put("preconditions", requireStringList(e2.get("preconditions"), label + ".preconditions"));
-            nodes.add(n);
-        }
-        HashSet<Integer> seqs = new HashSet<Integer>();
-        for (Map map : nodes) {
-            int seq = (Integer)map.get("seq");
-            if (seqs.add(seq)) continue;
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "seq 重复: " + seq);
-        }
-        for (int expected = 1; expected <= nodes.size(); ++expected) {
-            if (seqs.contains(expected)) continue;
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "seq 必须从 1 起连续，缺少 seq=" + expected + "（当前共 " + nodes.size() + " 个节点）");
-        }
-        for (Map map : nodes) {
-            int seq = (Integer)map.get("seq");
-            for (Object depObj : (List)map.get("depends_on")) {
-                int dep = (Integer)depObj;
-                if (!seqs.contains(dep)) {
-                    throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "节点 seq=" + seq + " 的 depends_on 引用了不存在的 seq=" + dep);
-                }
-                if (dep < seq) continue;
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "节点 seq=" + seq + " 的 depends_on 必须小于自身 seq（引用 seq=" + dep + " 会成环或自依赖）");
-            }
-        }
-        return nodes;
-    }
-    private void insertTemplateNodes(long templateId, List<Map<String, Object>> nodes) {
-        for (Map<String, Object> n : nodes) {
-            this.repo.insertTemplateNode(templateId, (String)n.get("type"), (Integer)n.get("seq"), toJson(objectMapper, n.get("standards")), toJson(objectMapper, n.get("requirements")), (String)n.get("methodology"), (String)n.get("deliverable"), toJson(objectMapper, n.get("depends_on")), toJson(objectMapper, n.get("preconditions")), (String)n.get("owner_role"), (String)n.get("agent_name"), (Long)n.get("workflow_def_id"), (String)n.get("stage"));
-        }
     }
 }

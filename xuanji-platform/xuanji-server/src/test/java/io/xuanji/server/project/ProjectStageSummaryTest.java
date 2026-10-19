@@ -61,7 +61,6 @@ class ProjectStageSummaryTest {
         lenient().when(workspaceRepo.findById(WS)).thenReturn(List.of(Map.of(
                 "id", WS, "name", "订单中心改造", "binding_type", "PROJECT",
                 "current_stage", "REQUIREMENT", "project_mode", "NEW", "created_by", "admin")));
-        lenient().when(repo.findNodesByWorkspace(WS)).thenReturn(List.of());
         lenient().when(repo.findArtifactsByWorkspace(WS)).thenReturn(List.of());
     }
 
@@ -150,20 +149,17 @@ class ProjectStageSummaryTest {
     }
 
     @Test
-    @DisplayName("还没有执行体（规划未起跑）：退回台账口径，总结不能是空壳")
+    @DisplayName("还没有执行体（规划未起跑）：无 run 可统计，总结仍产出且不抛异常（V38 台账已删）")
     void fallsBackToLedgerWhenNoRun() {
         Map<String, Object> plan = new LinkedHashMap<>();
         plan.put("status", "PENDING");
         plan.put("exec_run_id", null);
         when(repo.findCurrentStagePlan(WS, "REQUIREMENT", 1)).thenReturn(List.of(plan));
-        when(repo.findNodesByWorkspace(WS)).thenReturn(List.of(Map.of(
-                "name", "需求澄清", "type", "DISCUSS", "status", "DONE",
-                "stage", "REQUIREMENT", "iteration", 1)));
 
         service.draftStageSummary(USER, WS);
 
         String md = capturedSummaryMd();
-        assertTrue(md.contains("1 / 1"), "无 run 时应按台账统计，实际：" + md);
+        assertTrue(md.contains("0 / 0"), "无 run 时子任务统计应为 0/0，实际：" + md);
     }
 
     @Test

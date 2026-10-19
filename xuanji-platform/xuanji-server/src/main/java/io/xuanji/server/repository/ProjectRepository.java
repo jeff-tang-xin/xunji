@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 项目（workspace 即项目）数据访问层：project_work_node / project_artifact 的 SQL。
+ * 项目（workspace 即项目）数据访问层：project_template / project_stage_plan / project_artifact 的 SQL。
  *
  * <p>边界：本层只做 SQL 与结果读取；节点链编排、DAG 依赖判定、留档登记等业务在
  * {@code ProjectService}。JSONB 列查询统一 {@code ::text}（规避 PGobject 序列化），
@@ -18,12 +18,7 @@ import java.util.Map;
 @Repository
 public class ProjectRepository {
 
-    private static final String NODE_COLS =
-            "id, workspace_id, type, seq, status, depends_on::text AS depends_on, "
-                    + "preconditions::text AS preconditions, workflow_ref::text AS workflow_ref, "
-                    + "input_refs::text AS input_refs, output_refs::text AS output_refs, "
-                    + "owner_role, scope, stage, iteration, name, trigger_mode, approval_mode, "
-                    + "participants::text AS participants, plan_id, created_by, created_at, updated_at";
+    
 
     private static final String ARTIFACT_COLS =
             "id, workspace_id, node_id, kind, name, type, file_path, content_md, "
@@ -35,7 +30,7 @@ public class ProjectRepository {
         this.jdbc = jdbc;
     }
 
-    /* ---------- project_template / project_template_node ---------- */
+    /* ---------- project_template ---------- */
 
     private static final String TEMPLATE_COLS = "id, code, name, description, builtin, created_at, stages_json::text AS stages_json";
 
@@ -44,12 +39,7 @@ public class ProjectRepository {
      * （owner_role 职能、agent_name 内置智能体）+ 默认流程（workflow_def_id）+ DAG 结构。
      * standards/requirements/depends_on/preconditions 为 JSONB，统一 {@code ::text} 读取。
      */
-    private static final String TEMPLATE_NODE_COLS =
-            "id, template_id, type, seq, standards::text AS standards, "
-                    + "requirements::text AS requirements, methodology, deliverable, "
-                    + "depends_on::text AS depends_on, "
-                    + "preconditions::text AS preconditions, owner_role, "
-                    + "agent_name, workflow_def_id, stage, created_at";
+    
 
     /** 按 code 查模板（含 builtin），不存在返回空列表。 */
     public List<Map<String, Object>> findTemplateByCode(String code) {
@@ -57,20 +47,13 @@ public class ProjectRepository {
                 "SELECT " + TEMPLATE_COLS + " FROM project_template WHERE code = ?", code);
     }
 
-    /** 查模板全部节点（按 seq 排序），JSONB 列为 ::text JSON 字符串。 */
-    public List<Map<String, Object>> findTemplateNodes(long templateId) {
-        return jdbc.queryForList(
-                "SELECT " + TEMPLATE_NODE_COLS + " FROM project_template_node "
-                        + "WHERE template_id = ? ORDER BY seq", templateId);
-    }
-
     /** 模板列表（供前端下拉与模板管理页加载）：附 node_count 与 builtin。 */
     public List<Map<String, Object>> findTemplates() {
+        // V38 起节点链表已删（V30 后模板真相是 stages_json），node_count 不再有意义
         return jdbc.queryForList(
                 "SELECT t.id, t.code, t.name, t.description, t.builtin, "
-                        + "t.stages_json::text AS stages_json, "
-                        + "(SELECT COUNT(*) FROM project_template_node n WHERE n.template_id = t.id) "
-                        + "AS node_count FROM project_template t ORDER BY t.id");
+                        + "t.stages_json::text AS stages_json "
+                        + "FROM project_template t ORDER BY t.id");
     }
 
     /** 新建模板（builtin 恒为 false：内置模板只由迁移种子产生），RETURNING id。 */
@@ -93,100 +76,16 @@ public class ProjectRepository {
         jdbc.update("DELETE FROM project_template WHERE code = ?", code);
     }
 
-    /** 整体替换节点前的清空（更新模板时按新节点集重建）。 */
-    public void deleteTemplateNodes(long templateId) {
-        jdbc.update("DELETE FROM project_template_node WHERE template_id = ?", templateId);
-    }
-
-    /**
-     * 插入模板节点：JSONB 列用 ?::jsonb，workflow_def_id 用 ?::bigint（便于 null 类型推断），
-     * methodology/deliverable/agent_name 为文本，允许 null。
-     */
-    public void insertTemplateNode(long templateId, String type, int seq,
-                                   String standardsJson, String requirementsJson,
-                                   String methodology, String deliverable,
-                                   String dependsOnJson, String preconditionsJson, String ownerRole,
-                                   String agentName, Long workflowDefId, String stage) {
-        jdbc.update("INSERT INTO project_template_node (template_id, type, seq, standards, requirements, "
-                        + "methodology, deliverable, depends_on, preconditions, owner_role, "
-                        + "agent_name, workflow_def_id, stage) "
-                        + "VALUES (?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?::bigint, ?)",
-                templateId, type, seq, standardsJson, requirementsJson,
-                methodology, deliverable, dependsOnJson, preconditionsJson, ownerRole,
-                agentName, workflowDefId, stage);
-    }
-
     /** 该 workspace 现有最大迭代号；无节点返回 0（发起迭代时 +1 即为新轮次）。 */
     public int maxIteration(String workspaceId) {
+        // V38 起台账表已删：迭代轮次真相在 project_stage_plan（每轮规划一行）
         Integer mx = jdbc.queryForObject(
-                "SELECT MAX(iteration) FROM project_work_node WHERE workspace_id = ?",
+                "SELECT MAX(iteration) FROM project_stage_plan WHERE workspace_id = ? AND stage = 'OPERATE'",
                 Integer.class, workspaceId);
         return mx == null ? 0 : mx;
     }
 
-    /* ---------- project_work_node ---------- */
-
-    public List<Map<String, Object>> findNodesByWorkspace(String workspaceId) {
-        return jdbc.queryForList(
-                "SELECT " + NODE_COLS + " FROM project_work_node WHERE workspace_id = ? ORDER BY seq",
-                workspaceId);
-    }
-
-    public List<Map<String, Object>> findNodeById(String nodeId) {
-        return jdbc.queryForList("SELECT " + NODE_COLS + " FROM project_work_node WHERE id = ?", nodeId);
-    }
-
-    /**
-     * 插入子任务节点（V17/V26 基础字段版）：委托给带扩展字段的实现，保持既有调用点不动。
-     */
-    public void insertNode(String id, String workspaceId, String type, int seq, String status,
-                           String dependsOnJson, String preconditionsJson, String workflowRefJson,
-                           String inputRefsJson, String outputRefsJson, String ownerRole,
-                           String scope, String stage, Integer iteration, String createdBy) {
-        insertNode(id, workspaceId, type, seq, status, dependsOnJson, preconditionsJson, workflowRefJson,
-                inputRefsJson, outputRefsJson, ownerRole, scope, stage, iteration, createdBy, Map.of());
-    }
-
-    /**
-     * 插入子任务节点（V27 扩展）：{@code ext} 可带 name（界面主标题）、trigger_mode（何时开始）、
-     * approval_mode（完成后要不要人点头）、participants（实际参与的 agent 数组 JSON）、plan_id（来源规划）。
-     *
-     * <p>参数已到 15 个，扩展字段改走 Map 而不是继续加位置参数 —— 再加就没人能读对了。</p>
-     */
-    public void insertNode(String id, String workspaceId, String type, int seq, String status,
-                           String dependsOnJson, String preconditionsJson, String workflowRefJson,
-                           String inputRefsJson, String outputRefsJson, String ownerRole,
-                           String scope, String stage, Integer iteration, String createdBy,
-                           Map<String, Object> ext) {
-        Map<String, Object> e = ext == null ? Map.of() : ext;
-        jdbc.update("INSERT INTO project_work_node (id, workspace_id, type, seq, status, depends_on, "
-                        + "preconditions, workflow_ref, input_refs, output_refs, owner_role, scope, "
-                        + "stage, iteration, name, trigger_mode, approval_mode, participants, plan_id, created_by) "
-                        + "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?::jsonb, ?::jsonb, ?::jsonb, ?, ?, ?, "
-                        + "COALESCE(?, 1), ?, COALESCE(?, 'AUTO'), COALESCE(?, 'REVIEW'), ?::jsonb, ?, ?)",
-                id, workspaceId, type, seq, status, dependsOnJson, preconditionsJson, workflowRefJson,
-                inputRefsJson, outputRefsJson, ownerRole, scope, stage, iteration,
-                e.get("name"), e.get("trigger_mode"), e.get("approval_mode"),
-                e.get("participants"), e.get("plan_id"), createdBy);
-    }
-
-    public void updateNodeStatus(String nodeId, String status) {
-        jdbc.update("UPDATE project_work_node SET status = ?, updated_at = now() WHERE id = ?",
-                status, nodeId);
-    }
-
-    public void updateNodeRefs(String nodeId, String inputRefsJson, String outputRefsJson) {
-        jdbc.update("UPDATE project_work_node SET input_refs = ?::jsonb, output_refs = ?::jsonb, "
-                        + "updated_at = now() WHERE id = ?",
-                inputRefsJson, outputRefsJson, nodeId);
-    }
-
-    /** 写入节点绑定的阶段工作流引用（workflow_ref JSONB，形如 {"definitionId":<id>}）。 */
-    public void updateNodeWorkflowRef(String nodeId, String workflowRefJson) {
-        jdbc.update("UPDATE project_work_node SET workflow_ref = ?::jsonb, updated_at = now() WHERE id = ?",
-                workflowRefJson, nodeId);
-    }
-
+    
     /** 查 wf_definition 是否已发布（status=PUBLISHED），供节点绑定阶段工作流时校验。 */
     public boolean isDefinitionPublished(long definitionId) {
         Integer cnt = jdbc.queryForObject(
@@ -365,13 +264,6 @@ public class ProjectRepository {
         return jdbc.queryForList("SELECT id, workspace_id, stage, capability_json::text AS capability_json, "
                 + "note, created_by, created_at, updated_at FROM project_stage_capability "
                 + "WHERE workspace_id = ? AND stage = ?", workspaceId, stage);
-    }
-
-    /** 现有最大 seq：PM 规划落子任务时从 maxSeq+1 顺延，避免与既有节点撞 id。 */
-    public int maxSeq(String workspaceId) {
-        Integer mx = jdbc.queryForObject(
-                "SELECT MAX(seq) FROM project_work_node WHERE workspace_id = ?", Integer.class, workspaceId);
-        return mx == null ? 0 : mx;
     }
 
     /**

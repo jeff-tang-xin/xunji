@@ -179,7 +179,6 @@ public class ProjectService {
         if (!"PROJECT".equals(ws.get("binding_type"))) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "该 workspace 不是项目（binding_type=" + String.valueOf(ws.get("binding_type")) + "）");
         }
-        List<Map<String, Object>> nodes = this.repo.findNodesByWorkspace(id);
         List<Map<String, Object>> artifacts = this.repo.findArtifactsByWorkspace(id);
         LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("id", ws.get("id"));
@@ -190,9 +189,9 @@ public class ProjectService {
         result.put("created_at", ws.get("created_at"));
         result.put("template", ws.get("template_code"));
         result.put("project_mode", ws.get("project_mode"));
-        String currentStage = this.resolveCurrentStage(ws.get("current_stage"), nodes);
+        String currentStage = this.resolveCurrentStage(ws.get("current_stage"));
         result.put("current_stage", currentStage);
-        result.put("stages", this.buildStageViews(id, currentStage, nodes));
+        result.put("stages", this.buildStageViews(id, currentStage));
         result.put("artifacts", artifacts);
         return result;
     }
@@ -200,16 +199,6 @@ public class ProjectService {
     
     @Transactional
     
-    public void onNodeRunFinished(String wsId, String nodeId, String runStatus) {
-        if (nodeId == null || nodeId.isBlank()) {
-            log.warn("onNodeRunFinished: nodeId is blank, skip (wsId={} runStatus={})", (Object)wsId, (Object)runStatus);
-            return;
-        }
-        String target = "SUCCESS".equals(runStatus) ? "DONE" : "BLOCKED";
-        this.repo.updateNodeStatus(nodeId, target);
-        log.info("node run finished: wsId={} nodeId={} runStatus={} -> nodeStatus={}", new Object[]{wsId, nodeId, runStatus, target});
-    }
-
     private Long parseWorkflowRefDefinitionId(Object workflowRefJson) {
         if (workflowRefJson == null) {
             return null;
@@ -271,45 +260,19 @@ public class ProjectService {
         return ws;
     }
 
-    private String resolveCurrentStage(Object rawStage, List<Map<String, Object>> nodes) {
-        String s;
-        String string = s = rawStage == null ? "" : String.valueOf(rawStage).trim().toUpperCase();
-        if (STAGE_ORDER.contains(s)) {
-            return s;
-        }
-        for (String stage : STAGE_ORDER) {
-            if (STAGE_OPERATE.equals(stage)) break;
-            boolean hasNode = false;
-            for (Map<String, Object> n : nodes) {
-                if (!stage.equals(nodeStage(n)) || iterationOf(n) != 1) continue;
-                hasNode = true;
-                if ("DONE".equals(String.valueOf(n.get("status")))) continue;
-                return stage;
-            }
-            if (hasNode) continue;
-            return stage;
-        }
-        return STAGE_OPERATE;
+    private String resolveCurrentStage(Object rawStage) {
+        String s = rawStage == null ? "" : String.valueOf(rawStage).trim().toUpperCase();
+        // V38 起台账表已删：current_stage 有值即真相（V27 后创建即写入），无值兜底第一阶段
+        return STAGE_ORDER.contains(s) ? s : STAGE_ORDER.get(0);
     }
 
-    private List<Map<String, Object>> buildStageViews(String wsId, String currentStage, List<Map<String, Object>> nodes) {
+    private List<Map<String, Object>> buildStageViews(String wsId, String currentStage) {
+        // V38 起台账表已删：阶段视图状态单一来自 stage_plan/run（stageStatusFromRun），无 run 时 PENDING
         ArrayList<Map<String, Object>> views = new ArrayList<Map<String, Object>>();
         for (String stage : STAGE_ORDER) {
-            ArrayList<Map<String, Object>> stageNodes = new ArrayList<Map<String, Object>>();
-            ArrayList<Map<String, Object>> firstRound = new ArrayList<Map<String, Object>>();
-            TreeSet<Integer> iterations = new TreeSet<Integer>();
-            for (Map<String, Object> n2 : nodes) {
-                if (!stage.equals(nodeStage(n2))) continue;
-                stageNodes.add(n2);
-                int it = iterationOf(n2);
-                iterations.add(it);
-                if (it != 1) continue;
-                firstRound.add(n2);
-            }
-            long done = firstRound.stream().filter(n -> "DONE".equals(String.valueOf(n.get("status")))).count();
             String status = this.stageStatusFromRun(wsId, stage);
             if (status == null) {
-                status = this.stageStatus(firstRound);
+                status = "PENDING";
             }
             LinkedHashMap<String, Object> v = new LinkedHashMap<String, Object>();
             v.put("stage", stage);
@@ -317,39 +280,13 @@ public class ProjectService {
             v.put("status", status);
             v.put("resident", STAGE_OPERATE.equals(stage));
             v.put("current", stage.equals(currentStage));
-            v.put("iterations", new ArrayList(iterations));
-            v.put("node_count", stageNodes.size());
-            v.put("done_count", done);
-            v.put("nodes", stageNodes);
+            v.put("iterations", List.of());
+            v.put("node_count", 0);
+            v.put("done_count", 0);
+            v.put("nodes", List.of());
             views.add(v);
         }
         return views;
-    }
-
-    private String stageStatus(List<Map<String, Object>> firstRound) {
-        if (firstRound.isEmpty()) {
-            return "PENDING";
-        }
-        boolean allDone = true;
-        boolean running = false;
-        boolean blocked = false;
-        for (Map<String, Object> n : firstRound) {
-            String st = String.valueOf(n.get("status"));
-            if ("RUNNING".equals(st) || "WAITING_APPROVAL".equals(st)) {
-                running = true;
-            } else if ("FAILED".equals(st) || "REJECTED".equals(st)) {
-                blocked = true;
-            }
-            if ("DONE".equals(st)) continue;
-            allDone = false;
-        }
-        if (running) {
-            return "RUNNING";
-        }
-        if (blocked) {
-            return "BLOCKED";
-        }
-        return allDone ? "DONE" : "PENDING";
     }
 
     private String stageStatusFromRun(String wsId, String stage) {
@@ -382,8 +319,7 @@ public class ProjectService {
     public Map<String, Object> advanceStage(LoginUser user, String wsId, Map<String, Object> body) {
         boolean alreadyWaived;
         Map<String, Object> ws = this.requireProject(user, wsId);
-        List<Map<String, Object>> nodes = this.repo.findNodesByWorkspace(wsId);
-        String current = this.resolveCurrentStage(ws.get("current_stage"), nodes);
+        String current = this.resolveCurrentStage(ws.get("current_stage"));
         if (STAGE_OPERATE.equals(current)) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "运维阶段为常驻阶段，不可继续推进，请在运维阶段内发起迭代");
         }
@@ -506,8 +442,7 @@ public class ProjectService {
     public Map<String, Object> draftStageSummary(LoginUser user, String wsId) {
         Object execRunId;
         Map<String, Object> ws = this.requireProject(user, wsId);
-        List<Map<String, Object>> nodes = this.repo.findNodesByWorkspace(wsId);
-        String stage = this.resolveCurrentStage(ws.get("current_stage"), nodes);
+        String stage = this.resolveCurrentStage(ws.get("current_stage"));
         int iteration = this.currentIteration(wsId, stage);
         int done = 0;
         ArrayList<String> unfinished = new ArrayList<String>();
@@ -523,15 +458,6 @@ public class ProjectService {
                     continue;
                 }
                 unfinished.add(strOr(nr.get("node_name"), nid) + "(" + String.valueOf(nr.get("status")) + ")");
-            }
-        } else {
-            for (Map<String, Object> n : nodes) {
-                if (!stage.equals(nodeStage(n)) || iterationOf(n) != iteration) continue;
-                if ("DONE".equals(String.valueOf(n.get("status")))) {
-                    ++done;
-                    continue;
-                }
-                unfinished.add(strOr(n.get("name"), String.valueOf(n.get("type"))) + "(" + String.valueOf(n.get("status")) + ")");
             }
         }
         for (Map<String, Object> a : this.repo.findArtifactsByWorkspace(wsId)) {
@@ -595,8 +521,7 @@ public class ProjectService {
     public Map<String, Object> planDetail(LoginUser user, String wsId) {
         int iteration;
         Map<String, Object> ws = this.requireProject(user, wsId);
-        List<Map<String, Object>> nodes = this.repo.findNodesByWorkspace(wsId);
-        String stage = this.resolveCurrentStage(ws.get("current_stage"), nodes);
+        String stage = this.resolveCurrentStage(ws.get("current_stage"));
         List<Map<String, Object>> rows = this.repo.findCurrentStagePlan(wsId, stage, iteration = this.currentIteration(wsId, stage));
         if (rows.isEmpty()) {
             // 读端点不再自动生成规划草稿（副作用违背对话触发原则）；无规划如实返回 404
@@ -658,7 +583,6 @@ public class ProjectService {
         if (this.repo.decideStagePlan(planId, "APPROVED", user.username(), null) == 0) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.CONFLICT, "该规划已被处理，请刷新");
         }
-        this.materializePlan(wsId, row, user.username());
         return this.startStageExecution(user, wsId, row);
     }
 
@@ -980,76 +904,6 @@ public class ProjectService {
         return s.length() <= max ? s : s.substring(0, max - 1) + "…";
     }
 
-    private List<Map<String, Object>> materializePlan(String wsId, Map<String, Object> planRow, String createdBy) {
-        long planId = ((Number)planRow.get("id")).longValue();
-        String stage = String.valueOf(planRow.get("stage"));
-        int iteration = ((Number)planRow.get("iteration")).intValue();
-        ArrayList<Map<String, Object>> existing = new ArrayList<Map<String, Object>>();
-        for (Map<String, Object> n : this.repo.findNodesByWorkspace(wsId)) {
-            Number num;
-            Object object = n.get("plan_id");
-            if (!(object instanceof Number) || (num = (Number)object).longValue() != planId) continue;
-            existing.add(n);
-        }
-        if (!existing.isEmpty()) {
-            return existing;
-        }
-        Map<String, Object> plan = parseJsonMap(objectMapper, planRow.get("plan_json"));
-        List<Map<String, Object>> tasks = mapList(objectMapper, plan.get("tasks"));
-        int cursor = this.repo.maxSeq(wsId);
-        LinkedHashMap<Integer, Integer> keyToSeq = new LinkedHashMap<Integer, Integer>();
-        for (Map<String, Object> t : tasks) {
-            keyToSeq.put(intOr(t.get("key"), keyToSeq.size() + 1), ++cursor);
-        }
-        LinkedHashMap keyToId = new LinkedHashMap();
-        keyToSeq.forEach((k, s) -> keyToId.put(k, depId(wsId, (int)s)));
-        ArrayList<Map<String, Object>> created = new ArrayList<Map<String, Object>>();
-        for (Map<String, Object> t : tasks) {
-            int seq = keyToSeq.getOrDefault(intOr(t.get("key"), 0), ++cursor);
-            ArrayList<String> deps = new ArrayList<String>();
-            for (Object d : objList(objectMapper, t.get("depends"))) {
-                String id = (String)keyToId.get(intOr(d, -1));
-                if (id == null) continue;
-                deps.add(id);
-            }
-            String type = strOr(t.get("type"), "DEVELOP").toUpperCase();
-            String name = strOr(t.get("name"), type);
-            List<String> agents = strList(objectMapper, t.get("agents"));
-            List<String> participants = strList(objectMapper, t.get("participants"));
-            String trigger = strOr(t.get("trigger_mode"), "AUTO").toUpperCase();
-            String approval = strOr(t.get("approval_mode"), "REVIEW").toUpperCase();
-            if (FORCE_TYPES.contains(type)) {
-                approval = "FORCE";
-                trigger = "MANUAL_START";
-            }
-            LinkedHashMap<String, Object> ext = new LinkedHashMap<String, Object>();
-            ext.put("name", name);
-            ext.put("trigger_mode", trigger);
-            ext.put("approval_mode", approval);
-            ext.put("participants", toJson(objectMapper, participants));
-            ext.put("plan_id", planId);
-            String nodeId = depId(wsId, seq);
-            this.repo.insertNode(nodeId, wsId, type, seq, "NOT_STARTED", toJson(objectMapper, deps), toJson(objectMapper, List.of()), null, toJson(objectMapper, List.of()), toJson(objectMapper, List.of()), agents.isEmpty() ? null : agents.get(0), strOr(t.get("scope"), null), stage, iteration, createdBy, ext);
-            LinkedHashMap<String, Object> n = new LinkedHashMap<String, Object>();
-            n.put("id", nodeId);
-            n.put("type", type);
-            n.put("name", name);
-            n.put("seq", seq);
-            n.put("stage", stage);
-            n.put("iteration", iteration);
-            n.put("status", "NOT_STARTED");
-            n.put("depends_on", deps);
-            n.put("agents", agents);
-            n.put("participants", participants);
-            n.put("trigger_mode", trigger);
-            n.put("approval_mode", approval);
-            n.put("scope", t.get("scope"));
-            created.add(n);
-        }
-        log.info("规划落子任务: project={} plan_id={} stage={} iteration={} nodes={}", new Object[]{wsId, planId, stage, iteration, created.size()});
-        return created;
-    }
-
     /**
      * 需求清单（V34 需求先行）：需求项 + 依赖拓扑深度。
      * depth = 依赖链长度（无依赖 0，取依赖方 depth 最大值 +1），前端按 depth 分层画拓扑图；
@@ -1278,8 +1132,7 @@ public class ProjectService {
 
     public Map<String, Object> stageExecution(LoginUser user, String wsId) {
         Map<String, Object> ws = this.requireProject(user, wsId);
-        List<Map<String, Object>> nodes = this.repo.findNodesByWorkspace(wsId);
-        String current = this.resolveCurrentStage(ws.get("current_stage"), nodes);
+        String current = this.resolveCurrentStage(ws.get("current_stage"));
         int iteration = this.currentIteration(wsId, current);
         Map plan = this.repo.findCurrentStagePlan(wsId, current, iteration).stream().findFirst().orElse(null);
         Map<String, Object> clarify = this.chatService.latestClarification(wsId, current, iteration);
@@ -1381,8 +1234,7 @@ public class ProjectService {
         String nodeId;
         int iteration;
         Map<String, Object> ws = this.requireProject(user, wsId);
-        List<Map<String, Object>> nodes = this.repo.findNodesByWorkspace(wsId);
-        String current = this.resolveCurrentStage(ws.get("current_stage"), nodes);
+        String current = this.resolveCurrentStage(ws.get("current_stage"));
         Map plan = (Map)this.repo.findCurrentStagePlan(wsId, current, iteration = this.currentIteration(wsId, current)).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段还没有规划，无门可审"));
         if (plan.get("exec_run_id") == null) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, stageLabel(current) + "阶段尚未开始执行，无门可审");
@@ -1627,13 +1479,6 @@ public class ProjectService {
         this.requireOwner(user, ws);
     }
 
-    private Map<String, Object> requireNodeInWorkspace(String wsId, String nodeId) {
-        Map node = (Map)this.repo.findNodeById(nodeId).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "node not found"));
-        if (!wsId.equals(node.get("workspace_id"))) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "node 不属于该项目");
-        }
-        return node;
-    }
 
     private void requireOwner(LoginUser user, Map<String, Object> row) {
         boolean orgVisible;

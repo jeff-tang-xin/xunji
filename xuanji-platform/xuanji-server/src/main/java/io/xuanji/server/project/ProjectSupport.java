@@ -148,20 +148,6 @@ public final class ProjectSupport {
     public static String stageLabel(String stage) {
         return STAGE_LABEL.getOrDefault(stage, stage);
     }
-    public static String nodeStage(Map<String, Object> node) {
-        return resolveStage(node.get("stage"), node.get("type"));
-    }
-    public static int iterationOf(Map<String, Object> node) {
-        int n;
-        Object it = node.get("iteration");
-        if (it instanceof Number) {
-            Number num = (Number)it;
-            n = num.intValue();
-        } else {
-            n = 1;
-        }
-        return n;
-    }
     public static Map<String, Object> parseScopes(Object raw) {
         if (!(raw instanceof Map)) {
             return Map.of();

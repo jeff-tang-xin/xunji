@@ -591,15 +591,7 @@ public class ProjectChatService {
         txTemplate.executeWithoutResult(tx -> {
             repo.insertArtifact(wsId, nodeId, "DELIVERABLE", name, "DOC", filePathFx, contentMd,
                     null, "FINAL", stage, user.username());
-            // 交付留档登记后，更新节点 output_refs（对齐 ProjectService.addArtifact 语义）
-            Map<String, Object> node = repo.findNodeById(nodeId)
-                    .stream().findFirst().orElse(null);
-            if (node != null) {
-                List<String> inputs = parseStringList(node.get("input_refs"));
-                List<String> outputs = parseStringList(node.get("output_refs"));
-                outputs.add(name + "@latest");
-                repo.updateNodeRefs(nodeId, toJson(inputs), toJson(outputs));
-            }
+            // V38 起台账表已删：节点 output_refs 无处写，交付物登记以 artifact 单表为准
         });
         log.info("project-node chat 留档已登记: node={} name={} stage={} file={} chars={}",
                 nodeId, name, stage, filePath, contentMd.length());
