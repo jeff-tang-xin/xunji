@@ -38,6 +38,8 @@ public class TaskRunner {
     private final StageDocStore docStore;
     private final StageOrchestrator orchestrator;
     private final ProjectEventBus projectEvents;
+    private final StageChatEventBus chatEvents;
+    private final OpsConnectionManager ops;
 
     /** 双池防自等死锁：调度池跑 run（含限时等待），工作池跑阻塞的 invoke。
      * 工作池 4 线程：单线程时一个 8 分钟任务就把全平台任务型步骤串成队，多项目并发必排队。 */
@@ -57,6 +59,7 @@ public class TaskRunner {
                       StageStepRepository stepRepo, ProjectRepository projectRepo,
                       PeerConsultService peerConsult, RequirementRepository requirementRepo,
                       StageDocStore docStore, ProjectEventBus projectEvents,
+                      StageChatEventBus chatEvents, OpsConnectionManager ops,
                       @org.springframework.context.annotation.Lazy StageOrchestrator orchestrator) {
         this.invoker = invoker;
         this.agentNodes = agentNodes;
@@ -66,6 +69,8 @@ public class TaskRunner {
         this.requirementRepo = requirementRepo;
         this.docStore = docStore;
         this.projectEvents = projectEvents;
+        this.chatEvents = chatEvents;
+        this.ops = ops;
         this.orchestrator = orchestrator;
     }
 
@@ -105,13 +110,63 @@ public class TaskRunner {
         stepRepo.updateStatus(step.withStatus(StepStatus.EXECUTING));
         log.info("任务执行开始: ws={} {}#{} seq={} agent={}",
                 step.workspaceId(), step.stage(), step.iteration(), step.seq(), step.agent());
+        // 执行过程收集（每步执行都可视）：agent 的思考/回复增量与工具调用进轨迹，
+        // 节流落 output_full（轮询兜底）+ 广播 step.process（在线前端实时看）；
+        // 完成时 output_full 被纯产出覆盖，轨迹另落 CHATLOG 文件留档（回放通道）
+        StringBuilder trace = new StringBuilder();
+        final long[] lastFlush = {System.currentTimeMillis()};
+        final StringBuilder pending = new StringBuilder();
+        java.util.function.Consumer<String> flush = (force) -> {
+            String buf = pending.toString();
+            if (buf.isEmpty()) {
+                return;
+            }
+            if (!"now".equals(force) && System.currentTimeMillis() - lastFlush[0] < 2000) {
+                return; // 节流：delta 每 token 一帧，2s 落一次库/推一次
+            }
+            pending.setLength(0);
+            lastFlush[0] = System.currentTimeMillis();
+            trace.append(buf);
+            try {
+                stepRepo.appendSpeech(step.id(), buf);
+            } catch (Exception ignore) {
+                // 落库失败不阻断执行（在线实时不受影响）
+            }
+            try {
+                chatEvents.publish(StageChatEventBus.key(step.workspaceId(), step.stage(), step.iteration()),
+                        "step.process", java.util.Map.of(
+                                "seq", step.seq(), "stage", step.stage(),
+                                "stepType", "TASK", "name", step.name(),
+                                "agent", step.agent(), "delta", buf));
+            } catch (Exception ignore) {
+                // 广播失败不阻断执行
+            }
+        };
+        java.util.function.Consumer<io.xuanji.core.runtime.AgentStreamEvent> onEvent = evt -> {
+            String type = evt.type();
+            if ("agent.delta".equals(type) && evt.delta() != null && !evt.delta().isEmpty()) {
+                pending.append(evt.delta());
+                flush.accept("throttle");
+            } else if ("tool.call".equals(type)) {
+                String tool = evt.meta() == null ? "" : String.valueOf(evt.meta().getOrDefault("tool", evt.meta().get("name")));
+                if (!tool.isBlank()) {
+                    pending.append("\n🔧 调用 ").append(tool).append(" …\n");
+                    flush.accept("now");
+                }
+            }
+        };
         try {
             // 挂 ask_peer：执行中遇到需求/架构问题可 @对应方解答（三方结构，问答留档）——
             // 讨论式开发核心：执行 agent 不清楚就问，禁止靠猜
             AgentSpec base = agentNodes.buildSpecByAgentName(step.agent(), null);
-            AgentSpec spec = withTools(base, List.of(peerConsult.askPeerDef(step, brief)));
+            // 挂运维工具三件套（ops_remote_shell/db_query/db_dml）：地址与凭证不暴露给 AI，
+            // 工具参数只收引用 ID（server-1/db-1），连接由 OpsConnectionManager 平台侧代理——
+            // 用不用由 AI 按任务决定（部署/排障任务才会调）
+            AgentSpec spec = withTools(base, java.util.stream.Stream.concat(
+                    List.of(peerConsult.askPeerDef(step, brief)).stream(),
+                    OpsTools.defsFor(step.workspaceId(), ops).stream()).toList());
             String prompt = brief.render(step.name(), step.instruction());
-            Future<String> future = workPool.submit(() -> invoker.invoke(spec, prompt));
+            Future<String> future = workPool.submit(() -> invoker.invoke(spec, prompt, onEvent));
             StepInterruption.register(step.id(), future);
             String output;
             try {
@@ -136,6 +191,14 @@ public class TaskRunner {
                     "DELIVERABLE", step.name(), "TEXT", null, output, 1, "ACTIVE", step.stage(), step.agent());
             String summary = output.length() > 300 ? output.substring(0, 300) + "…" : output;
             stepRepo.updateStatus(step.withOutput(summary, output, null));
+            // 执行轨迹留档（每步可视的回放通道）：output_full 已被纯产出覆盖，
+            // 轨迹落 CHATLOG 文件——前端过程留档区可点击回看完整执行轨迹
+            flush.accept("now");
+            String trajectory = trace.toString();
+            if (!trajectory.isBlank()) {
+                docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(), "CHATLOG",
+                        step.seq(), step.name() + "-执行轨迹", trajectory);
+            }
             // 文档双落：产出落项目目录（docs/{stage}/iter{n}/），相对路径回填 DELIVERABLE 索引
             // （不另插 DOC 索引——同一产出两条索引会让交付物 tab 重复）
             String docPath = docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(),
@@ -152,11 +215,23 @@ public class TaskRunner {
             // 同步链路不唤醒：主控就阻塞在本方法调用上，产出经返回值直接回到它手里
             return output;
         } catch (DiscussionEngine.UserInterrupted ui) {
-            // 已落 SKIPPED，原样上抛：主控工具层收到「用户已终止」直接进入下一步
+            // 已落 SKIPPED；终止前的轨迹同样落档（用户看到执行到哪一步被终止）
+            flush.accept("now");
+            if (!trace.isEmpty()) {
+                docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(), "CHATLOG",
+                        step.seq(), step.name() + "-执行轨迹(终止)", trace + "\n\n⏹ 用户终止\n");
+            }
             throw ui;
         } catch (Exception e) {
             String msg = rootMessage(e);
             stepRepo.updateStatus(step.withError(msg));
+            // 失败也要把已产生的轨迹落档（排障需要）+ 广播终止
+            flush.accept("now");
+            String trajectory = trace.toString();
+            if (!trajectory.isBlank()) {
+                docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(), "CHATLOG",
+                        step.seq(), step.name() + "-执行轨迹(失败)", trajectory + "\n\n❌ 失败原因：" + msg + "\n");
+            }
             log.warn("任务执行失败: ws={} seq={} -> {}", step.workspaceId(), step.seq(), msg);
             // 项目状态实时推送：失败也是终态
             projectEvents.publish(step.workspaceId(), "step.updated", Map.of(

@@ -35,12 +35,30 @@ public class AgentInvoker {
      * @return 最终文本；调用失败或空产出抛 IllegalStateException（调用方转 FAILED 留档）
      */
     public String invoke(AgentSpec spec, String message) {
+        return invoke(spec, message, null);
+    }
+
+    /**
+     * 同步调用并透传执行过程事件（任务步骤过程可视化的数据源）。
+     *
+     * <p>onEvent 收到 agent.delta（文本增量）/ tool.call（工具调用）等中间事件——
+     * 调用方（TaskRunner）据此做过程落库与 SSE 广播；传 null 即纯收敛调用。
+     * agent.result 仍以返回值为准，onEvent 只是旁观，不影响收敛语义。</p>
+     */
+    public String invoke(AgentSpec spec, String message, java.util.function.Consumer<io.xuanji.core.runtime.AgentStreamEvent> onEvent) {
         AgentHandle handle = runtime.createAgent(spec);
         AtomicReference<String> finalText = new AtomicReference<>();
         try {
             runtime.stream(handle, new AgentMessage(message, null, null), evt -> {
                 if ("agent.result".equals(evt.type()) && evt.text() != null) {
                     finalText.set(evt.text());
+                }
+                if (onEvent != null && !"agent.result".equals(evt.type())) {
+                    try {
+                        onEvent.accept(evt);
+                    } catch (Exception ignore) {
+                        // 过程旁观者异常不阻断执行
+                    }
                 }
             });
         } catch (RuntimeException e) {

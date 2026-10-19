@@ -48,10 +48,10 @@ interface ConfirmCardData {
   approved?: boolean
 }
 
-/** 阶段对话消息（user 右侧蓝底，agent 左侧白底，error 红底，queued 灰底待发送，process 过程留档卡片，confirm 工具授权卡） */
+/** 阶段对话消息（user 右侧蓝底，agent 左侧白底带归属标注，error 红底，queued 灰底待发送，process 过程卡片，confirm 工具授权卡） */
 export interface StageChatMsg {
   id: number
-  type: 'user' | 'agent' | 'error' | 'queued' | 'system' | 'process' | 'confirm' | 'chatlog'
+  type: 'user' | 'agent' | 'error' | 'queued' | 'system' | 'confirm' | 'chatlog'
   text: string
   attachments?: ChatAttachment[]
   /** agent 回复流式生成中 */
@@ -68,6 +68,57 @@ export interface StageChatMsg {
   confirmData?: ConfirmCardData
   /** 系统唤醒轮的 agent 回复（后端自动续跑，非用户输入触发）——渲染带「系统唤醒」标识 */
   systemWake?: boolean
+  /** 归属智能体（统一时间线）：主控='主控'，执行者=agent 名——渲染成消息头彩色标注 */
+  sender?: string
+  /** 在做什么（任务名/议题名/求助对象）：如「架构设计与技术选型」「@architect 求助」 */
+  action?: string
+}
+
+/** 归属标注配色：按名字稳定取色（同一智能体恒定同色，多智能体时间线一眼分清谁在说话） */
+const SENDER_COLORS = ['#1677ff', '#722ed1', '#13c2c2', '#eb2f96', '#fa8c16', '#52c41a', '#2f54eb', '#faad14']
+const senderColor = (name: string) => {
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+  return SENDER_COLORS[h % SENDER_COLORS.length]
+}
+
+/** 步骤 outputFull → 统一时间线消息序列（谁在做什么、说了什么）。
+ * 讨论：按【发言者】分段，汇总段归主控（主席收口）；求助：问/答各归其主；
+ * 任务：产出/轨迹整体归执行 agent。▶ 进行中提示行丢弃（状态条已表达）。 */
+function stepToMsgs(s: { stepType: string; name: string; agent?: string | null; outputFull?: string | null; status: string }):
+  { sender: string; action?: string; text: string }[] {
+  const full = s.outputFull || ''
+  if (!full.trim()) return []
+  if (s.stepType === 'TASK') {
+    return [{ sender: s.agent || '执行智能体', action: s.name, text: full.trim() }]
+  }
+  if (s.stepType === 'CONSULT') {
+    const out: { sender: string; action?: string; text: string }[] = []
+    const qm = full.match(/【问】\(([^)]*)\)\n?([\s\S]*?)(?=\n\n【答】|$)/)
+    const am = full.match(/【答】\(([^)]*)\)\n?([\s\S]*)$/)
+    if (qm) out.push({ sender: qm[1] || '求助方', action: `@${(am?.[1] || '对方').trim()} 求助`, text: qm[2].trim() })
+    if (am) out.push({ sender: am[1] || '支援方', action: qm ? `回答 ${qm[1] || '求助方'}` : undefined, text: am[2].trim() })
+    return out.length ? out : [{ sender: s.agent || '求助', action: s.name, text: full.trim() }]
+  }
+  // DISCUSS：发言分段；「===== 汇总 =====」之后是主控（主席）收口
+  const sumIdx = full.indexOf('===== 汇总 =====')
+  const body = sumIdx >= 0 ? full.slice(0, sumIdx) : full
+  const sum = sumIdx >= 0 ? full.slice(sumIdx + '===== 汇总 ====='.length).trim() : ''
+  const out: { sender: string; action?: string; text: string }[] = []
+  for (const seg of body.split(/(?=【[^】]+】)/)) {
+    const t = seg.replace(/▶\s*\S+\s*发言中…/g, '').trim()
+    if (!t) continue
+    const m = t.match(/^【([^】]+)】\s*([\s\S]*)$/)
+    if (m) {
+      const sender = m[1].trim()
+      const text = m[2].trim()
+      if (text) out.push({ sender, action: s.name, text })
+    } else if (t) {
+      out.push({ sender: '讨论', action: s.name, text: t })
+    }
+  }
+  if (sum) out.push({ sender: '主控', action: `讨论收口 · ${s.name}`, text: sum })
+  return out
 }
 
 async function readSse(res: Response, onEvent: (event: string, data: string) => void) {
@@ -221,33 +272,13 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
     if (e) e.done = true
     ensureTypeTimer()
   }
-  /** process 卡片展开状态（默认收起，只显示开头一段） */
-  const [expanded, setExpanded] = useState<Set<number>>(new Set())
-  const toggleExpanded = (id: number) => {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  /** 发言/问答文本 → markdown：【说话人】加粗，段落保留 */
-  const renderSpeech = (raw: string): string =>
-    raw.replace(/^【([^】]+)】/gm, '**【$1】**').trim()
-
-  /** 讨论纪要里的汇总段（===== 汇总 ===== 之后）；无分隔符返回全文 */
-  const summaryPart = (full: string): string => {
-    const idx = full.indexOf('===== 汇总 =====')
-    return idx >= 0 ? full.slice(idx + '===== 汇总 ====='.length).trim() : full.trim()
-  }
 
   useEffect(() => {
     const steps = exec?.steps || []
     const prev = prevStepsRef.current
     const next = new Map<number, { status: string; fullLen: number }>()
     const events: string[] = []
-    const processMsgs: { title: string; text: string }[] = []
+    const timeline: { sender: string; action?: string; text: string }[] = []
     for (const s of steps) {
       const full = s.outputFull || ''
       const before = prev.get(s.id)
@@ -259,13 +290,15 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
           events.push(`讨论 #${s.seq} ${s.name} 进行中${(s.participants || []).length ? `（${(s.participants || []).join('、')}）` : ''}，发言将实时显示在这里`)
         } else if (s.status === 'EXECUTING' && s.stepType === 'CONSULT') {
           events.push(`求助 #${s.seq} ${s.name} 进行中，答复后将显示在这里`)
+        } else if (s.status === 'EXECUTING' && s.stepType === 'TASK') {
+          events.push(`任务 #${s.seq} ${s.name} 进行中（${s.agent || '执行智能体'}），执行过程将实时显示在这里`)
         }
         continue
       }
       if (before.status !== s.status) {
         if (s.status === 'EXECUTING') {
           events.push(`⚙ #${s.seq} ${s.name} 开始执行${(s.participants || []).length ? `（${(s.participants || []).join('、')}）` : ''}`)
-        } else if (s.status === 'DONE' && s.stepType !== 'DISCUSS' && s.stepType !== 'CONSULT') {
+        } else if (s.status === 'DONE' && s.stepType !== 'DISCUSS' && s.stepType !== 'CONSULT' && s.stepType !== 'TASK') {
           events.push(`✅ #${s.seq} ${s.name} 完成${s.outputSummary ? `：${s.outputSummary.slice(0, 100)}` : ''}`)
         } else if (s.status === 'FAILED') {
           events.push(`❌ #${s.seq} ${s.name} 失败：${(s.error || '').slice(0, 100)}`)
@@ -275,30 +308,32 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
           events.push(`⏸ #${s.seq} ${s.name} 等待你的答复：${(s.instruction || '').slice(0, 100)}`)
         }
       }
-      // 讨论进行中：新落库的发言增量进对话流
+      // 统一时间线：讨论发言/求助问答/任务轨迹按归属拆条进对话流（谁在做什么、说了什么）
       if (s.stepType === 'DISCUSS' && full.length > before.fullLen) {
         const delta = full.slice(before.fullLen, full.length)
-        if (delta.trim()) processMsgs.push({ title: `讨论 #${s.seq} ${s.name}·新发言`, text: renderSpeech(delta) })
+        for (const m of stepToMsgs({ stepType: 'DISCUSS', name: s.name, outputFull: delta, status: s.status })) {
+          timeline.push(m)
+        }
       }
-      // 讨论完成：汇总进对话流（发言已按增量推过，只推汇总段）
-      if (s.stepType === 'DISCUSS' && s.status === 'DONE' && before.status !== 'DONE') {
-        const sum = summaryPart(full)
-        if (sum) processMsgs.push({ title: `讨论汇总 #${s.seq} ${s.name}`, text: renderSpeech(sum) })
-      }
-      // 求助问答完成：问答全文进对话流
+      // 求助问答完成：问答全文拆条（问归求助方、答归支援方）
       if (s.stepType === 'CONSULT' && s.status === 'DONE' && before.status !== 'DONE') {
-        if (full.trim()) processMsgs.push({ title: `求助问答 #${s.seq} ${s.name}`, text: renderSpeech(full) })
+        for (const m of stepToMsgs(s)) timeline.push(m)
+      }
+      // 任务执行中的轨迹实时性由总线 SSE 负责（step.process 流式消息）；
+      // 轮询只兜底终态：任务完成推产出全文（output_full 已被纯产出覆盖，整段推）
+      if (s.stepType === 'TASK' && s.status === 'DONE' && before.status !== 'DONE') {
+        for (const m of stepToMsgs(s)) timeline.push(m)
       }
       // 讨论/求助/任务完成的前端自动续跑已下线：后端统一唤醒（StageOrchestrator.wakeIfSettled，
       // 批次收敛 + 系统身份无头轮）——后端是运行唯一真相，前端续跑依赖页面开着且与后端双触发。
       // 前端经会话事件总线（下方 effect）实时回显后端唤醒轮。
     }
     prevStepsRef.current = next
-    if (events.length > 0 || processMsgs.length > 0) {
+    if (events.length > 0 || timeline.length > 0) {
       setMsgs((x) => [
         ...x,
         ...(events.length > 0 ? [{ id: nextId(), type: 'system' as const, text: events.join('\n') }] : []),
-        ...processMsgs.map((p) => ({ id: nextId(), type: 'process' as const, title: p.title, text: p.text })),
+        ...timeline.map((m) => ({ id: nextId(), type: 'agent' as const, sender: m.sender, action: m.action, text: m.text })),
       ])
     }
   }, [exec?.steps])
@@ -335,23 +370,15 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
           }
           return { id: nextId(), type: (m.role === 'USER' ? 'user' : 'agent') as 'user' | 'agent', text: raw }
         })
-      // 过程留档回放：讨论发言与求助问答落在 project_stage_step（不在 agent_state 会话），
-      // 单独拉 stage-execution 补齐——刷新后聊天框仍能看到 agent 们讨论了什么、问了什么
+      // 过程回放：讨论发言/求助问答/任务产出都落在 project_stage_step（不在 agent_state 会话），
+      // 单独拉 stage-execution 补齐——按归属拆条融入历史流（统一时间线，可视即留档）
       apiJson<{ steps?: StageStepRow[] }>(`/api/projects/${projectId}/stage-execution`)
         .then((ex) => {
           if (!alive) return
           const proc = (ex?.steps || [])
-            .filter((s) => (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT') && (s.outputFull || '').trim())
+            .filter((s) => (s.stepType === 'DISCUSS' || s.stepType === 'CONSULT' || s.stepType === 'TASK') && (s.outputFull || '').trim())
             .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
-            .flatMap((s) => {
-              const label = s.stepType === 'DISCUSS'
-                ? `讨论纪要 #${s.seq} ${s.name}${s.status === 'FAILED' ? '·中断' : ''}`
-                : `求助问答 #${s.seq} ${s.name}`
-              return [{ id: nextId(), type: 'process' as const, title: label, text: renderSpeech(s.outputFull || '') }]
-            })
-          const divider = proc.length > 0
-            ? [{ id: nextId(), type: 'system' as const, text: '── 以下为讨论与求助留档 ──' }]
-            : []
+            .flatMap((s) => stepToMsgs(s).map((m) => ({ id: nextId(), type: 'agent' as const, sender: m.sender, action: m.action, text: m.text })))
           // 对话过程留档（docs/{stage}/iter{n}/*-CHATLOG-*.md）：思考与工具轨迹的历史回放通道
           apiJson<{ files?: { path: string; type: string }[] }>(`/api/projects/${projectId}/files`)
             .then((fl) => {
@@ -362,14 +389,13 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
                 .map((f) => f.path)
                 .sort()
               const logMsgs = logs.map((path) => ({ id: nextId(), type: 'chatlog' as const, text: path }))
-              const logDivider = logMsgs.length > 0
-                ? [{ id: nextId(), type: 'system' as const, text: '── 以下为对话过程留档（含思考与工具轨迹） ──' }]
-                : []
-              if (hist.length || divider.length || logMsgs.length) {
-                setMsgs([...hist, ...divider, ...proc, ...logDivider, ...logMsgs])
+              // 过程卡片（讨论/求助/任务）与 CHATLOG 条目直接融入历史流——
+              // 可视即留档，不再用「以下为留档」分隔条制造两个世界
+              if (hist.length || proc.length || logMsgs.length) {
+                setMsgs([...hist, ...proc, ...logMsgs])
               }
             })
-            .catch(() => { if (hist.length || divider.length) setMsgs([...hist, ...divider, ...proc]) })
+            .catch(() => { if (hist.length || proc.length) setMsgs([...hist, ...proc]) })
         })
         .catch(() => { if (hist.length) setMsgs(hist) })
     }).catch(() => { /* 历史取不到不打断对话主流程 */ })
@@ -387,6 +413,9 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
     const busAgent = { id: 0 }
     const busProc = { id: 0 }
     const busToolLines: string[] = []
+    // 任务执行流式消息（step.process）：按 seq 聚合一条带归属的消息，delta 增量 append——
+    // developer 执行任务的思考/工具轨迹实时进对话流（统一时间线：谁在做什么）
+    const busStepMsgs = new Map<number, { id: number }>()
     const wait = (ms: number) => new Promise<void>((res) => { timer = window.setTimeout(res, ms) })
     const connect = async () => {
       while (alive) {
@@ -403,10 +432,24 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
               busProc.id = 0
               busToolLines.length = 0
               setMsgs((x) => [...x, { id: nextId(), type: 'system', text: `⚙ 系统唤醒：${String(payload.reason || '后台任务已落板，主控继续推进')}` }])
+            } else if (event === 'step.process') {
+              const seq = Number(payload.seq || 0)
+              const delta = typeof payload.delta === 'string' ? payload.delta : ''
+              if (!seq || !delta.trim()) return
+              const name = String(payload.name || `#${seq}`)
+              const agent = String(payload.agent || '执行智能体')
+              let entry = busStepMsgs.get(seq)
+              if (!entry) {
+                entry = { id: nextId() }
+                busStepMsgs.set(seq, entry)
+                setMsgs((x) => [...x, { id: entry!.id, type: 'agent', sender: agent, action: name, text: delta }])
+              } else {
+                setMsgs((x) => x.map((m) => (m.id === entry!.id ? { ...m, text: m.text + delta } : m)))
+              }
             } else if (event === 'agent.start') {
               const id = nextId()
               busAgent.id = id
-              setMsgs((x) => [...x, { id, type: 'agent', text: '', streaming: true, systemWake: true, phaseText: '🤔 主控继续推进中…' }])
+              setMsgs((x) => [...x, { id, type: 'agent', sender: '主控', text: '', streaming: true, systemWake: true, phaseText: '🤔 主控继续推进中…' }])
             } else if (event === 'agent.delta' && busAgent.id && typeof payload.delta === 'string') {
               queueDelta(busAgent.id, payload.delta)
               setMsgs((x) => x.map((m) => (m.id === busAgent.id ? { ...m, phaseText: undefined } : m)))
@@ -417,7 +460,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
               busToolLines.push(`🔧 ${tool} 执行中…`)
               if (!busProc.id) {
                 busProc.id = nextId()
-                setMsgs((x) => [...x, { id: busProc.id, type: 'process', title: '🔧 工具执行（系统唤醒轮）', text: busToolLines.join('\n') }])
+                setMsgs((x) => [...x, { id: busProc.id, type: 'agent', sender: '主控', action: '🔧 工具执行（系统唤醒轮）', text: busToolLines.join('\n') }])
               } else {
                 setMsgs((x) => x.map((m) => (m.id === busProc.id ? { ...m, text: busToolLines.join('\n') } : m)))
               }
@@ -508,10 +551,10 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
       setMsgs((x) => {
         const extra: StageChatMsg[] = []
         if (procLines.length) {
-          extra.push({ id: nextId(), type: 'process', title: '🔧 工具执行', text: procLines.join('\n') })
+          extra.push({ id: nextId(), type: 'agent', sender: '主控', action: '🔧 工具执行', text: procLines.join('\n') })
         }
         if (buf.trim()) {
-          extra.push({ id: agentId, type: 'agent', text: buf })
+          extra.push({ id: agentId, type: 'agent', sender: '主控', text: buf })
         }
         return [...x, ...extra]
       })
@@ -528,7 +571,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
     const startedAt = Math.floor(Date.now() / 1000)
     setMsgs((x) => [
       ...x.map((m) => (m.id === q.id ? { ...m, type: 'user' as const } : m)),
-      { id: agentMsgId, type: 'agent', text: '', streaming: true, startedAt, phaseText: '🤔 思考与规划中…' },
+      { id: agentMsgId, type: 'agent', sender: '主控', text: '', streaming: true, startedAt, phaseText: '🤔 思考与规划中…' },
     ])
     busyRef.current = true
     setBusy(true)
@@ -543,7 +586,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
       toolLines.push(line)
       if (!procMsgId) {
         procMsgId = nextId()
-        setMsgs((x) => [...x, { id: procMsgId, type: 'process', title: '🔧 工具执行', text: toolLines.join('\n') }])
+        setMsgs((x) => [...x, { id: procMsgId, type: 'agent', sender: '主控', action: '🔧 工具执行', text: toolLines.join('\n') }])
       } else {
         setMsgs((x) => x.map((m) => (m.id === procMsgId ? { ...m, text: toolLines.join('\n') } : m)))
       }
@@ -613,7 +656,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
             setMsgs((x) => x.map((m) => (m.id === procMsgId ? { ...m, text: toolLines.join('\n') } : m)))
           } else {
             procMsgId = nextId()
-            setMsgs((x) => [...x, { id: procMsgId, type: 'process', title: '🔧 工具执行', text: toolLines.join('\n') }])
+            setMsgs((x) => [...x, { id: procMsgId, type: 'agent', sender: '主控', action: '🔧 工具执行', text: toolLines.join('\n') }])
           }
           setMsgs((x) => x.map((m) => (m.id === agentMsgId
             ? { ...m, phaseText: `${ok ? '✅' : '❌'} ${tool} ${ok ? '完成' : '失败'}，继续…` } : m)))
@@ -792,6 +835,16 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
               marginBottom: 10,
               textAlign: m.type === 'user' ? 'right' : m.type === 'system' ? 'center' : 'left',
             }}>
+              {/* 统一时间线归属标注：谁在做什么（多智能体协作一眼分清） */}
+              {m.sender && (
+                <div style={{ marginBottom: 2, display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                  <span style={{
+                    fontSize: 12, fontWeight: 600, color: '#fff', background: senderColor(m.sender),
+                    padding: '1px 8px', borderRadius: 10, lineHeight: '18px',
+                  }}>{m.sender}</span>
+                  {m.action && <span style={{ fontSize: 12, color: '#8c8c8c' }}>{m.action}</span>}
+                </div>
+              )}
               {m.type === 'confirm' && m.confirmData ? (
                 <div style={{
                   maxWidth: '94%', padding: '10px 14px', borderRadius: 8, textAlign: 'left',
@@ -841,32 +894,6 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
                 >
                   <FileTextOutlined style={{ marginInlineEnd: 6 }} />
                   对话过程留档 · {m.text.split('/').pop()?.replace(/^\d+-CHATLOG-/, '').replace(/\.md$/, '')}（点击查看思考与工具轨迹）
-                </div>
-              ) : m.type === 'process' ? (
-                <div style={{
-                  maxWidth: '94%', padding: '8px 12px', borderRadius: 8, textAlign: 'left',
-                  background: '#f9f0ff', border: '1px solid #d3adf7',
-                }}>
-                  <div
-                    style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#531dab' }}
-                    onClick={() => toggleExpanded(m.id)}
-                  >
-                    {expanded.has(m.id) ? '▾ ' : '▸ '}{m.title}
-                  </div>
-                  <div style={{
-                    marginTop: 4, fontSize: 13,
-                    maxHeight: expanded.has(m.id) ? 'none' : 120,
-                    overflow: 'hidden',
-                    maskImage: expanded.has(m.id) ? 'none' : 'linear-gradient(to bottom, #000 70%, transparent)',
-                    WebkitMaskImage: expanded.has(m.id) ? 'none' : 'linear-gradient(to bottom, #000 70%, transparent)',
-                  }}>
-                    <MarkdownView scroll={false} text={m.text} />
-                  </div>
-                  {!expanded.has(m.id) && (
-                    <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => toggleExpanded(m.id)}>
-                      展开全文
-                    </Button>
-                  )}
                 </div>
               ) : (
               <div
