@@ -77,6 +77,8 @@ public class ProjectService {
     @Autowired
     private io.xuanji.server.project.orchestrator.TaskRunner taskRunner;
     @Autowired
+    private io.xuanji.server.asset.CryptoUtil crypto;
+    @Autowired
     private io.xuanji.server.project.orchestrator.DiscussionEngine discussionEngine;
     @Autowired
     private io.xuanji.server.project.orchestrator.StageOrchestrator stageOrchestrator;
@@ -132,12 +134,14 @@ public class ProjectService {
             this.repo.upsertStageCapability(wsId, STAGE_REQUIREMENT, toJson(objectMapper, cap), "创建项目时预设", user.username());
             boundWf = wfRef;
         }
-        List<String> presetServers = strList(objectMapper, body.get("servers"));
+        List<Map<String, Object>> presetServers = opsEntries(body.get("servers"), false, List.of());
+        List<Map<String, Object>> presetDatabases = opsEntries(body.get("databases"), true, List.of());
+        String presetDeploySpec = body.get("deploy_spec") == null ? "" : String.valueOf(body.get("deploy_spec")).trim();
         List<String> presetConnectors = strList(objectMapper, body.get("connectors"));
-        if (!presetServers.isEmpty() || !presetConnectors.isEmpty()) {
+        if (!presetServers.isEmpty() || !presetDatabases.isEmpty() || !presetDeploySpec.isEmpty() || !presetConnectors.isEmpty()) {
             LinkedHashMap<String, Object> cap = new LinkedHashMap<String, Object>();
             for (String k : CAPABILITY_KEYS) {
-                cap.put(k, "workflow".equals(k) ? "" : List.of());
+                cap.put(k, "workflow".equals(k) ? "" : "deploy_spec".equals(k) ? "" : List.of());
             }
             List<Map<String, Object>> existing = this.repo.findStageCapability(wsId, STAGE_OPERATE);
             if (!existing.isEmpty()) {
@@ -145,6 +149,16 @@ public class ProjectService {
             }
             if (!presetServers.isEmpty()) {
                 cap.put("servers", presetServers);
+            }
+            // 新项目没有平台级数据源连接器可绑——数据库以地址直登（host:port/库名+说明），
+            // 部署也不预置目录，只有服务器与部署规范（目录/启动方式由规范约定）
+            // 运维连接对象列表：{address, username?, password(加密), note}——地址与凭证平台托管，
+            // AI 只见引用 ID（server-1/db-1），连接由 OpsConnectionManager 代理
+            if (!presetDatabases.isEmpty()) {
+                cap.put("databases", presetDatabases);
+            }
+            if (!presetDeploySpec.isEmpty()) {
+                cap.put("deploy_spec", presetDeploySpec);
             }
             if (!presetConnectors.isEmpty()) {
                 cap.put("connectors", presetConnectors);
@@ -1286,6 +1300,12 @@ public class ProjectService {
                 cap.put(k, wf);
                 continue;
             }
+            // deploy_spec 是部署规范文本（目录约定/启动方式/端口等），单字符串不是列表
+            if ("deploy_spec".equals(k)) {
+                String spec = body == null || body.get(k) == null ? "" : String.valueOf(body.get(k)).trim();
+                cap.put(k, spec);
+                continue;
+            }
             cap.put(k, strList(objectMapper, body == null ? null : body.get(k)));
         }
         String note = body == null || body.get("note") == null ? null : String.valueOf(body.get("note")).trim();
@@ -1324,27 +1344,44 @@ public class ProjectService {
         boolean nameChanged = name != null && !name.isBlank();
         boolean hasServers = body.containsKey("servers");
         boolean hasConnectors = body.containsKey("connectors");
-        if (!nameChanged && !hasServers && !hasConnectors) {
+        boolean hasDatabases = body.containsKey("databases");
+        boolean hasDeploySpec = body.containsKey("deploy_spec");
+        if (!nameChanged && !hasServers && !hasConnectors && !hasDatabases && !hasDeploySpec) {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST,
-                    "无可更新字段（name / servers / connectors）");
+                    "无可更新字段（name / servers / databases / deploy_spec / connectors）");
         }
         if (nameChanged) {
             workspaceRepo.rename(wsId, name.trim());
         }
-        if (hasServers || hasConnectors) {
-            List<String> servers = strList(objectMapper, body.get("servers"));
+        if (hasServers || hasConnectors || hasDatabases || hasDeploySpec) {
+            // 旧条目先取出：编辑回显脱敏（密码不回明文），用户未改密码字段（空或 ***）时沿用旧密码
+            List<Map<String, Object>> existing = this.repo.findStageCapability(wsId, STAGE_OPERATE);
+            Map<String, Object> oldCap = existing.isEmpty() ? Map.of()
+                    : parseJsonMap(objectMapper, existing.get(0).get("capability_json"));
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> oldServers = oldCap.get("servers") instanceof List<?> l
+                    ? (List<Map<String, Object>>) l : List.of();
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> oldDatabases = oldCap.get("databases") instanceof List<?> l2
+                    ? (List<Map<String, Object>>) l2 : List.of();
+            List<Map<String, Object>> servers = opsEntries(body.get("servers"), false, oldServers);
             List<String> connectors = strList(objectMapper, body.get("connectors"));
+            List<Map<String, Object>> databases = opsEntries(body.get("databases"), true, oldDatabases);
+            String deploySpec = body.get("deploy_spec") == null ? "" : String.valueOf(body.get("deploy_spec")).trim();
             // 白名单初始化 → 现值 → 显式键覆盖（与创建时绑定同款 merge，但空数组语义为清空）
             LinkedHashMap<String, Object> cap = new LinkedHashMap<String, Object>();
             for (String k : CAPABILITY_KEYS) {
-                cap.put(k, "workflow".equals(k) ? "" : List.of());
+                cap.put(k, "workflow".equals(k) ? "" : "deploy_spec".equals(k) ? "" : List.of());
             }
-            List<Map<String, Object>> existing = this.repo.findStageCapability(wsId, STAGE_OPERATE);
-            if (!existing.isEmpty()) {
-                cap.putAll(parseJsonMap(objectMapper, existing.get(0).get("capability_json")));
-            }
+            cap.putAll(oldCap);
             if (hasServers) {
                 cap.put("servers", servers);
+            }
+            if (hasDatabases) {
+                cap.put("databases", databases);
+            }
+            if (hasDeploySpec) {
+                cap.put("deploy_spec", deploySpec);
             }
             if (hasConnectors) {
                 cap.put("connectors", connectors);
@@ -1357,12 +1394,67 @@ public class ProjectService {
             result.put("name", name.trim());
         }
         if (hasServers) {
-            result.put("servers", strList(objectMapper, body.get("servers")));
+            result.put("servers", maskEntries(opsEntries(body.get("servers"), false, List.of())));
+        }
+        if (hasDatabases) {
+            result.put("databases", maskEntries(opsEntries(body.get("databases"), true, List.of())));
+        }
+        if (hasDeploySpec) {
+            result.put("deploy_spec", body.get("deploy_spec") == null ? "" : String.valueOf(body.get("deploy_spec")).trim());
         }
         if (hasConnectors) {
             result.put("connectors", strList(objectMapper, body.get("connectors")));
         }
         return result;
+    }
+
+    /**
+     * 运维连接条目规范化（servers/databases 对象列表）：address 必填，password 用
+     * CryptoUtil 加密落库（地址与凭证平台托管，AI 只见引用 ID）。编辑场景 password
+     * 传空或 "***"（回显脱敏值）表示沿用旧密码，避免脱敏值被二次加密覆盖真值。
+     */
+    private List<Map<String, Object>> opsEntries(Object raw, boolean isDb, List<Map<String, Object>> oldEntries) {
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        if (!(raw instanceof List<?> list)) {
+            return out;
+        }
+        for (int idx = 0; idx < list.size(); idx++) {
+            Object o = list.get(idx);
+            if (!(o instanceof Map)) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> item = (Map<String, Object>) o;
+            String address = item.get("address") == null ? "" : String.valueOf(item.get("address")).trim();
+            if (address.isEmpty()) {
+                continue;
+            }
+            Map<String, Object> e = new java.util.LinkedHashMap<>();
+            e.put("address", address);
+            if (isDb) {
+                e.put("username", item.get("username") == null ? "" : String.valueOf(item.get("username")).trim());
+            }
+            String pwd = item.get("password") == null ? "" : String.valueOf(item.get("password")).trim();
+            String oldPwd = idx < oldEntries.size() && oldEntries.get(idx).get("password") != null
+                    ? String.valueOf(oldEntries.get(idx).get("password")) : "";
+            if (pwd.isEmpty() || "***".equals(pwd)) {
+                e.put("password", oldPwd);
+            } else {
+                e.put("password", crypto.encrypt(pwd));
+            }
+            e.put("note", item.get("note") == null ? "" : String.valueOf(item.get("note")).trim());
+            out.add(e);
+        }
+        return out;
+    }
+
+    /** 回显脱敏：password 永不回明文——有值给 "***"，无值给空串。 */
+    private List<Map<String, Object>> maskEntries(List<Map<String, Object>> entries) {
+        for (Map<String, Object> e : entries) {
+            Object pwd = e.get("password");
+            e.put("password", pwd != null && !String.valueOf(pwd).isBlank() ? "***" : "");
+        }
+        return entries;
     }
 
     /**

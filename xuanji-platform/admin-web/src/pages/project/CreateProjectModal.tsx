@@ -7,7 +7,8 @@ import {
   message,
 } from 'antd'
 import { apiJson } from '../../api/client'
-import { WorkflowOption, ProjectTemplate, DsOption, SHOW_TEMPLATE_ENTRY } from './types'
+import { WorkflowOption, ProjectTemplate, SHOW_TEMPLATE_ENTRY } from './types'
+import { OpsConnLists, OpsServer, OpsDatabase, cleanServers, cleanDatabases } from './OpsConnLists'
 
 /** 新建项目弹窗 */
 /** 模板管理入口开关：模板编辑器就绪后置 true（列表页「模板管理」按钮 + 新建项目模板下拉） */
@@ -21,21 +22,22 @@ export function CreateProjectModal({ open, onClose, onCreated }: {
   const [busy, setBusy] = useState(false)
   const [templates, setTemplates] = useState<ProjectTemplate[]>([])
   const [workflows, setWorkflows] = useState<WorkflowOption[]>([])
-  const [datasources, setDatasources] = useState<DsOption[]>([])
+  // 运维连接（对象列表：地址+凭证+说明）——凭证平台加密托管，AI 只见引用 ID
+  const [servers, setServers] = useState<OpsServer[]>([])
+  const [databases, setDatabases] = useState<OpsDatabase[]>([])
 
   // 打开时从后端动态加载模板与已发布工作流；失败回退默认，不阻断创建
   useEffect(() => {
     if (!open) return
     let cancelled = false
+    setServers([])
+    setDatabases([])
     apiJson<ProjectTemplate[]>('/api/projects/templates')
       .then((list) => { if (!cancelled && Array.isArray(list) && list.length > 0) setTemplates(list) })
       .catch(() => { /* 加载失败保留默认 */ })
     apiJson<WorkflowOption[]>('/api/definitions')
       .then((list) => { if (!cancelled) setWorkflows((list || []).filter((x) => x.status === 'PUBLISHED')) })
       .catch(() => { /* 加载失败下拉为空 */ })
-    apiJson<DsOption[]>('/api/datasources')
-      .then((list) => { if (!cancelled) setDatasources(Array.isArray(list) ? list : []) })
-      .catch(() => { if (!cancelled) setDatasources([]) })
     return () => { cancelled = true }
   }, [open])
 
@@ -48,11 +50,14 @@ export function CreateProjectModal({ open, onClose, onCreated }: {
       // 需求阶段绑定工作流（可跳过）：创建即预设执行路径，批准规划后直接按该工作流执行
       const reqWf = (v.requirement_workflow || '').toString().trim()
       if (reqWf) body.requirement_workflow = reqWf
-      // 运维资源绑定（可跳过）：写入 OPERATE 阶段能力绑定，与模板预设 merge
-      const servers = (v.servers || []) as string[]
-      const connectors = (v.connectors || []) as string[]
-      if (servers.length > 0) body.servers = servers
-      if (connectors.length > 0) body.connectors = connectors
+      // 运维资源绑定（可跳过）：写入 OPERATE 阶段能力绑定，与模板预设 merge。
+      // 服务器/数据库为对象列表（地址+凭证+说明），凭证后端加密存储
+      const sv = cleanServers(servers)
+      const dbs = cleanDatabases(databases)
+      const deploySpec = (v.deploy_spec || '').toString().trim()
+      if (sv.length > 0) body.servers = sv
+      if (dbs.length > 0) body.databases = dbs
+      if (deploySpec) body.deploy_spec = deploySpec
       const data = await apiJson<{ id: string }>('/api/projects', 'POST', body)
       message.success('项目创建成功')
       onCreated(data.id)
@@ -109,31 +114,22 @@ export function CreateProjectModal({ open, onClose, onCreated }: {
           />
         </Form.Item>
         <Form.Item
-          name="servers"
-          label="运维服务器（可选）"
-          extra="部署 / 巡检 / 变更的目标机器，写入运维阶段能力绑定；输入后回车添加"
+          label="运维连接（可选）"
+          extra="服务器与数据库连接由平台托管凭证，AI 经工具操作（remote_shell / db_query / db_dml）；写入运维阶段能力绑定"
         >
-          <Select
-            mode="tags"
-            placeholder="如 root@1.2.3.4:22（回车确认）"
-            tokenSeparators={[' ']}
-            open={false}
+          <OpsConnLists
+            servers={servers}
+            databases={databases}
+            onServers={setServers}
+            onDatabases={setDatabases}
           />
         </Form.Item>
         <Form.Item
-          name="connectors"
-          label="可查询数据库（可选）"
-          extra="运维排障时 agent 可直接查询的数据源连接器（JDBC）；写入运维阶段能力绑定"
+          name="deploy_spec"
+          label="部署规范（可选）"
+          extra="部署目录约定、启动/回滚方式、端口与进程名等规范——AI 按规范部署，不预置目录"
         >
-          <Select
-            mode="multiple"
-            allowClear
-            placeholder={datasources.length ? '选择可用的数据库（可留空）' : '未加载数据源，请先在「数据源」页添加'}
-            options={datasources.map((d) => ({
-              value: `connector:${d.id}`,
-              label: `${d.name}（${d.platform || 'jdbc'} #${d.id}）`,
-            }))}
-          />
+          <Input.TextArea rows={3} placeholder="如：统一部署到 /data/{项目名}/，start.sh 管理启停，端口 8xxx 顺延" />
         </Form.Item>
       </Form>
     </Modal>

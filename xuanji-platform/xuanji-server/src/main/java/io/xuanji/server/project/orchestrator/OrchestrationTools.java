@@ -1010,6 +1010,10 @@ public class OrchestrationTools {
         else {
             sb.append("【需求全景】（尚无需求项——任何实施性工作前必须先 declare_requirements 落项并请用户确认）\n");
         }
+        String opsDigest = opsResourceDigest();
+        if (!opsDigest.isEmpty()) {
+            sb.append(opsDigest);
+        }
         for (StageStep s : stepRepo.findByStage(wsId, stage, iteration)) {
             sb.append("- [").append(s.seq()).append("] ").append(s.name())
                     .append("（").append(s.status()).append("）");
@@ -1035,9 +1039,90 @@ public class OrchestrationTools {
         return sb.length() == 0 ? "（本阶段尚无记录）" : sb.toString();
     }
 
+    /**
+     * 运维资源段：目标服务器 + 数据库地址 + 部署规范（读 OPERATE 阶段能力绑定，项目级事实全阶段可见）。
+     * 新项目没有平台级数据源连接器可绑——数据库只有地址（host:port/库名+说明）；
+     * 部署没有预置目录——只有服务器与部署规范（目录/启动方式由规范约定）。
+     * 主控、执行 agent、讨论参与者经 boardDigest 同见，部署/排障不再靠猜。
+     */
+    private String opsResourceDigest() {
+        List<Map<String, Object>> rows = projectRepo.findStageCapability(wsId, "OPERATE");
+        if (rows.isEmpty() || rows.get(0).get("capability_json") == null) {
+            return "";
+        }
+        Map<String, Object> cap;
+        try {
+            Object raw = rows.get(0).get("capability_json");
+            cap = raw instanceof Map<?, ?> m
+                    ? new LinkedHashMap<String, Object>((Map<String, Object>) m)
+                    : objectMapper.readValue(String.valueOf(raw), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() { });
+        } catch (Exception e) {
+            return "";
+        }
+        // 安全边界：地址与凭证都不进 AI 上下文——只给引用 ID + 用途说明。
+        // AI 拿引用 ID 调 ops_remote_shell/db_query/db_dml，连接由平台代理（OpsConnectionManager）。
+        List<Map<String, Object>> servers = mapListValue(cap.get("servers"));
+        List<Map<String, Object>> databases = mapListValue(cap.get("databases"));
+        String deploySpec = cap.get("deploy_spec") == null ? "" : String.valueOf(cap.get("deploy_spec")).trim();
+        if (servers.isEmpty() && databases.isEmpty() && deploySpec.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("【运维资源——部署/排障的目标环境，地址与凭证由平台托管，工具参数只填引用 ID】\n");
+        for (int i = 0; i < servers.size(); i++) {
+            String note = strValue(servers.get(i).get("note"));
+            sb.append("- 服务器连接 server-").append(i + 1)
+                    .append(note.isEmpty() ? "" : "（" + note + "）").append("\n");
+        }
+        for (int i = 0; i < databases.size(); i++) {
+            String note = strValue(databases.get(i).get("note"));
+            sb.append("- 数据库连接 db-").append(i + 1)
+                    .append(note.isEmpty() ? "" : "（" + note + "）").append("\n");
+        }
+        if (!deploySpec.isEmpty()) {
+            sb.append("- 部署规范：").append(truncate(deploySpec, 400)).append("\n");
+        }
+        return sb.toString();
+    }
+
+    /** capability 里的对象列表条目（servers/databases 新模型）。 */
+    private List<Map<String, Object>> mapListValue(Object raw) {
+        if (!(raw instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (Object o : list) {
+            if (o instanceof Map<?, ?> m) {
+                out.add(new LinkedHashMap<String, Object>((Map<String, Object>) m));
+            }
+        }
+        return out;
+    }
+
+    private String strValue(Object o) {
+        return o == null ? "" : String.valueOf(o).trim();
+    }
+
+    /** capability JSONB 里的字符串列表安全读取（PGobject/Map/字符串三种形态都兼容）。 */
+    private List<String> strListValue(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        if (raw instanceof List<?> l) {
+            List<String> out = new ArrayList<String>();
+            for (Object o : l) {
+                String v = o == null ? "" : String.valueOf(o).trim();
+                if (!v.isEmpty()) {
+                    out.add(v);
+                }
+            }
+            return out;
+        }
+        String s = String.valueOf(raw).trim();
+        return s.isEmpty() ? List.of() : List.of(s);
+    }
+
     /** 需求全景段：编号/状态/标题/依赖——PM 规划与执行 agent 的共同依据。 */
-    private String requirementDigest() {
-        List<RequirementRepository.Requirement> reqs = requirementRepo.findByWorkspace(wsId);
+    private String requirementDigest() {        List<RequirementRepository.Requirement> reqs = requirementRepo.findByWorkspace(wsId);
         if (reqs.isEmpty()) {
             return "";
         }

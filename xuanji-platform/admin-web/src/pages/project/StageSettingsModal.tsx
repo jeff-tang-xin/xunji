@@ -8,8 +8,7 @@ import {
 } from 'antd'
 import { apiJson } from '../../api/client'
 import { AgentOption, WorkflowOption, stageLabel } from './types'
-
-import { DsOption } from './types'
+import { OpsConnLists, OpsServer, OpsDatabase, cleanServers, cleanDatabases } from './OpsConnLists'
 
 export function StageSettingsModal({ open, projectId, stage, onClose, onSaved }: {
   open: boolean
@@ -24,33 +23,33 @@ export function StageSettingsModal({ open, projectId, stage, onClose, onSaved }:
   const [note, setNote] = useState('')
   const [workflow, setWorkflow] = useState<string | undefined>()
   const [boundAgents, setBoundAgents] = useState<string[]>([])
-  const [boundServers, setBoundServers] = useState<string[]>([])
-  const [boundConnectors, setBoundConnectors] = useState<string[]>([])
-  const [dsOpts, setDsOpts] = useState<DsOption[]>([])
+  // 运维连接（对象列表：地址+凭证+说明）——回显密码已脱敏（***），提交 *** 表示沿用旧值
+  const [servers, setServers] = useState<OpsServer[]>([])
+  const [databases, setDatabases] = useState<OpsDatabase[]>([])
+  const [deploySpec, setDeploySpec] = useState('')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open) return
     setLoading(true)
-    // 四个接口并行拉：定义列表、agent 列表、数据源候选、当前阶段绑定
+    // 三个接口并行拉：定义列表、agent 列表、当前阶段绑定
     Promise.all([
       apiJson<WorkflowOption[]>('/api/definitions'),
       apiJson<AgentOption[]>('/api/agents'),
-      apiJson<DsOption[]>('/api/datasources').catch(() => [] as DsOption[]),
       apiJson<{ capability?: Record<string, unknown>; note?: string | null }>(
         `/api/projects/${projectId}/stage/${stage}/capability`),
-    ]).then(([d, a, ds, c]) => {
+    ]).then(([d, a, c]) => {
       setDefs((d || []).filter((x) => x.status === 'PUBLISHED'))
       setAgentOpts((a || []).filter((x) => x.status === 'PUBLISHED'))
-      setDsOpts(ds || [])
       const cp = c?.capability || {}
       setCap(cp)
       setNote(c?.note || '')
       setWorkflow(cp.workflow ? String(cp.workflow) : undefined)
       setBoundAgents(Array.isArray(cp.agents) ? (cp.agents as string[]) : [])
-      setBoundServers(Array.isArray(cp.servers) ? (cp.servers as string[]) : [])
-      setBoundConnectors(Array.isArray(cp.connectors) ? (cp.connectors as string[]) : [])
+      setServers(Array.isArray(cp.servers) ? (cp.servers as OpsServer[]) : [])
+      setDatabases(Array.isArray(cp.databases) ? (cp.databases as OpsDatabase[]) : [])
+      setDeploySpec(cp.deploy_spec ? String(cp.deploy_spec) : '')
     }).catch((e: Error) => message.error(e.message))
       .finally(() => setLoading(false))
   }, [open, projectId, stage])
@@ -64,8 +63,9 @@ export function StageSettingsModal({ open, projectId, stage, onClose, onSaved }:
         ...cap,
         agents: boundAgents,
         workflow: workflow || '',
-        servers: boundServers,
-        connectors: boundConnectors,
+        servers: cleanServers(servers),
+        databases: cleanDatabases(databases),
+        deploy_spec: deploySpec,
         note,
       })
       message.success('阶段设置已保存')
@@ -124,35 +124,22 @@ export function StageSettingsModal({ open, projectId, stage, onClose, onSaved }:
           />
         </Form.Item>
         <Form.Item
-          label="运维服务器"
-          extra="部署 / 巡检 / 变更的目标机器（如 root@1.2.3.4:22），输入后回车添加；执行侧消费开发中"
+          label="运维连接"
+          extra="服务器与数据库连接由平台托管凭证，AI 经工具操作（remote_shell / db_query / db_dml）；密码回显为 ***，不改即沿用"
         >
-          <Select
-            mode="tags"
-            placeholder="如 root@1.2.3.4:22（回车确认）"
-            tokenSeparators={[' ']}
-            open={false}
-            value={boundServers}
-            onChange={(v: string[]) => setBoundServers(v)}
-            loading={loading}
+          <OpsConnLists
+            servers={servers}
+            databases={databases}
+            onServers={setServers}
+            onDatabases={setDatabases}
           />
         </Form.Item>
         <Form.Item
-          label="可查询数据库"
-          extra="运维排障时 agent 可直接查询的数据源连接器（JDBC）；执行侧消费开发中"
+          label="部署规范"
+          extra="部署目录约定、启动/回滚方式、端口与进程名等规范——AI 按规范部署，不预置目录"
         >
-          <Select
-            mode="multiple"
-            allowClear
-            placeholder={dsOpts.length ? '选择可用的数据库（可留空）' : '未加载数据源，请先在「数据源」页添加'}
-            value={boundConnectors}
-            onChange={(v: string[]) => setBoundConnectors(v)}
-            loading={loading}
-            options={dsOpts.map((d) => ({
-              value: `connector:${d.id}`,
-              label: `${d.name}（${d.platform || 'jdbc'} #${d.id}）`,
-            }))}
-          />
+          <Input.TextArea rows={3} value={deploySpec} onChange={(e) => setDeploySpec(e.target.value)}
+            placeholder="如：统一部署到 /data/{项目名}/，start.sh 管理启停，端口 8xxx 顺延" />
         </Form.Item>
         <Form.Item label="备注" extra="这批绑定给 AI 用来干什么的说明，会随上下文注入">
           <Input.TextArea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />

@@ -19,7 +19,6 @@ import {
   Input,
   Modal,
   Row,
-  Select,
   Space,
   Spin,
   Tabs,
@@ -29,6 +28,7 @@ import {
 } from 'antd'
 import {
   PlusOutlined,
+  ApiOutlined,
   ArrowLeftOutlined,
   DeleteOutlined,
   EditOutlined,
@@ -41,10 +41,11 @@ import {
 import { apiJson } from '../api/client'
 import { EXEC_LIVE_STATES, ProjectDetailData, ProjectRow, SHOW_TEMPLATE_ENTRY, StageExecution, fmtDate, projectStatusColor, stageLabel } from './project/types'
 import { CreateProjectModal } from './project/CreateProjectModal'
+import { OpsConnLists, OpsServer, OpsDatabase, cleanServers, cleanDatabases } from './project/OpsConnLists'
+import { OpsConsoleModal } from './project/OpsConsoleModal'
 import ProjectFiles from './project/ProjectFiles'
 import { StageChatPanel } from './project/StageChatPanel'
 import { MarkdownView } from './project/shared'
-import { DsOption } from './project/types'
 import { TemplateEditor } from './project/TemplateEditor'
 import { TracePanel } from './project/TracePanel'
 
@@ -68,25 +69,27 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [editOpen, setEditOpen] = useState(false)
   const [savingEdit, setSavingEdit] = useState(false)
   const [editForm] = Form.useForm()
-  const [datasources, setDatasources] = useState<DsOption[]>([])
+  // 运维连接（对象列表：地址+凭证+说明）——回显密码已脱敏（***），提交 *** 表示沿用旧值
+  const [editServers, setEditServers] = useState<OpsServer[]>([])
+  const [editDatabases, setEditDatabases] = useState<OpsDatabase[]>([])
+  /** 运维操作弹窗（用户直接执行命令/SQL，与 AI 工具共用连接底座） */
+  const [opsOpen, setOpsOpen] = useState(false)
 
-  /** 打开编辑弹窗：回显项目名 + OPERATE 阶段已绑定的服务器/数据库 */
+  /** 打开编辑弹窗：回显项目名 + OPERATE 阶段已绑定的服务器/数据库连接/部署规范 */
   const openEdit = () => {
     if (!detail) return
-    editForm.setFieldsValue({ name: detail.name, servers: [], connectors: [] })
+    editForm.setFieldsValue({ name: detail.name, deploy_spec: '' })
+    setEditServers([])
+    setEditDatabases([])
     setEditOpen(true)
     apiJson<Record<string, unknown>>(`/api/projects/${id}/stage/OPERATE/capability`)
       .then((cap) => {
-        const capObj = (cap && typeof cap === 'object' ? cap : {}) as { servers?: string[]; connectors?: string[] }
-        editForm.setFieldsValue({
-          servers: Array.isArray(capObj.servers) ? capObj.servers : [],
-          connectors: Array.isArray(capObj.connectors) ? capObj.connectors : [],
-        })
+        const capObj = (cap && typeof cap === 'object' ? cap : {}) as { servers?: OpsServer[]; databases?: OpsDatabase[]; deploy_spec?: string }
+        setEditServers(Array.isArray(capObj.servers) ? capObj.servers : [])
+        setEditDatabases(Array.isArray(capObj.databases) ? capObj.databases : [])
+        editForm.setFieldsValue({ deploy_spec: capObj.deploy_spec || '' })
       })
       .catch(() => { /* capability 拉取失败保持空值，可正常保存 */ })
-    apiJson<DsOption[]>('/api/datasources')
-      .then((list) => setDatasources(Array.isArray(list) ? list : []))
-      .catch(() => setDatasources([]))
   }
 
   const submitEdit = async () => {
@@ -96,8 +99,9 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
     try {
       await apiJson(`/api/projects/${id}`, 'PUT', {
         name: (v.name || '').trim(),
-        servers: (v.servers || []) as string[],
-        connectors: (v.connectors || []) as string[],
+        servers: cleanServers(editServers),
+        databases: cleanDatabases(editDatabases),
+        deploy_spec: (v.deploy_spec || '').toString().trim(),
       })
       message.success('项目已更新')
       setEditOpen(false)
@@ -226,10 +230,14 @@ const [rightTab, setRightTab] = useState('trace')
         </Space>
         <Space align="center">
           <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>
+          <Button size="small" icon={<ApiOutlined />} onClick={() => setOpsOpen(true)}>运维操作</Button>
           <Button size="small" icon={<EditOutlined />} onClick={openEdit}>编辑</Button>
           <Button size="small" danger icon={<DeleteOutlined />} onClick={deleteProject}>删除</Button>
         </Space>
       </div>
+
+      {/* 运维操作弹窗：用户直接操作项目绑定的服务器/数据库（与 AI 工具共用连接底座，凭证托管） */}
+      <OpsConsoleModal open={opsOpen} projectId={id} onClose={() => setOpsOpen(false)} />
 
       <Modal
         title="编辑项目"
@@ -251,31 +259,22 @@ const [rightTab, setRightTab] = useState('trace')
             <Input placeholder="项目名" maxLength={64} />
           </Form.Item>
           <Form.Item
-            name="servers"
-            label="运维服务器"
-            extra="部署 / 巡检 / 变更的目标机器，写入运维阶段能力绑定；输入后回车添加，清空即解除绑定"
+            label="运维连接"
+            extra="服务器与数据库连接由平台托管凭证，AI 经工具操作；密码回显为 ***，不改即沿用；清空即解除绑定"
           >
-            <Select
-              mode="tags"
-              placeholder="如 root@1.2.3.4:22（回车确认）"
-              tokenSeparators={[' ']}
-              open={false}
+            <OpsConnLists
+              servers={editServers}
+              databases={editDatabases}
+              onServers={setEditServers}
+              onDatabases={setEditDatabases}
             />
           </Form.Item>
           <Form.Item
-            name="connectors"
-            label="可查询数据库"
-            extra="运维排障时 agent 可直接查询的数据源连接器（JDBC）；清空即解除绑定"
+            name="deploy_spec"
+            label="部署规范"
+            extra="部署目录约定、启动/回滚方式、端口与进程名等规范——AI 按规范部署，不预置目录；清空即解除绑定"
           >
-            <Select
-              mode="multiple"
-              allowClear
-              placeholder={datasources.length ? '选择可用的数据库（可留空）' : '未加载数据源，请先在「数据源」页添加'}
-              options={datasources.map((d) => ({
-                value: `connector:${d.id}`,
-                label: `${d.name}（${d.platform || 'jdbc'} #${d.id}）`,
-              }))}
-            />
+            <Input.TextArea rows={3} placeholder="如：统一部署到 /data/{项目名}/，start.sh 管理启停，端口 8xxx 顺延" />
           </Form.Item>
         </Form>
       </Modal>

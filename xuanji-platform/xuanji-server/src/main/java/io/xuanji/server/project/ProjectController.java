@@ -43,7 +43,8 @@ public class ProjectController {
                              io.xuanji.core.runtime.AgentRuntime agentRuntime,
                              io.xuanji.server.engine.ToolApprovalStore toolApprovals,
                              io.xuanji.server.project.orchestrator.StageChatEventBus chatEventBus,
-                             io.xuanji.server.project.orchestrator.ProjectEventBus projectEventBus) {
+                             io.xuanji.server.project.orchestrator.ProjectEventBus projectEventBus,
+                             io.xuanji.server.project.orchestrator.OpsConnectionManager ops) {
         this.projects = projects;
         this.projectChat = projectChat;
         this.templates = templates;
@@ -52,6 +53,72 @@ public class ProjectController {
         this.toolApprovals = toolApprovals;
         this.chatEventBus = chatEventBus;
         this.projectEventBus = projectEventBus;
+        this.ops = ops;
+    }
+
+    /** 运维连接代理（用户操作入口与 AI 工具共用同一连接底座）。 */
+    private final io.xuanji.server.project.orchestrator.OpsConnectionManager ops;
+
+    /** 参数缺失/格式错的统一 400（消息可读，前端 message 直显）。 */
+    private static Object bad(String msg) {
+        throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.BAD_REQUEST, msg);
+    }
+
+    /**
+     * 用户在目标服务器执行命令（运维操作入口）：与 AI 工具共用 OpsConnectionManager——
+     * 凭证托管、连接复用同一套；server 为运维资源清单里的引用 ID（server-1）。
+     */
+    @PostMapping("/{id}/ops/server/exec")
+    public Object opsServerExec(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+                                @RequestBody Map<String, Object> body) {
+        String server = body.get("server") == null ? "" : String.valueOf(body.get("server")).trim();
+        String command = body.get("command") == null ? "" : String.valueOf(body.get("command")).trim();
+        if (server.isEmpty() || command.isEmpty()) {
+            return bad("server 与 command 必填");
+        }
+        int timeout = 60;
+        Object t = body.get("timeout_seconds");
+        if (t instanceof Number n && n.intValue() > 0 && n.intValue() <= 300) {
+            timeout = n.intValue();
+        }
+        try {
+            return ops.execOnServer(id, server, command, timeout);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return bad(e.getMessage());
+        }
+    }
+
+    /** 用户在目标库执行只读查询（运维操作入口）：db 为引用 ID（db-1）。 */
+    @PostMapping("/{id}/ops/db/query")
+    public Object opsDbQuery(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+                             @RequestBody Map<String, Object> body) {
+        String db = body.get("db") == null ? "" : String.valueOf(body.get("db")).trim();
+        String sql = body.get("sql") == null ? "" : String.valueOf(body.get("sql")).trim();
+        if (db.isEmpty() || sql.isEmpty()) {
+            return bad("db 与 sql 必填");
+        }
+        try {
+            return ops.queryDb(id, db, sql);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return bad(e.getMessage());
+        }
+    }
+
+    /** 用户在目标库执行单条变更（运维操作入口）：建表/初始化/修数，与 AI 工具同校验。 */
+    @PostMapping("/{id}/ops/db/exec")
+    public Object opsDbExec(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+                            @RequestBody Map<String, Object> body) {
+        String db = body.get("db") == null ? "" : String.valueOf(body.get("db")).trim();
+        String sql = body.get("sql") == null ? "" : String.valueOf(body.get("sql")).trim();
+        if (db.isEmpty() || sql.isEmpty()) {
+            return bad("db 与 sql 必填");
+        }
+        try {
+            return ops.execDb(id, db, sql);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return bad(e.getMessage());
+        }
     }
 
     /** 项目列表（数据权限过滤，仅 PROJECT 类型）。 */
@@ -173,7 +240,7 @@ public class ProjectController {
         return projects.listFiles(user, id);
     }
 
-    /** 编辑项目：body = {"name":"新名","servers":[…],"connectors":["connector:{id}"]}（servers/connectors 显式传入即覆盖，空数组=清空）。 */
+    /** 编辑项目：body = {"name":"新名","servers":[…],"db_addresses":[…],"deploy_spec":"…","connectors":[…]}（显式传入即覆盖，空数组=清空）。 */
     @PutMapping("/{id}")
     public Object update(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
                          @RequestBody Map<String, Object> body) {
