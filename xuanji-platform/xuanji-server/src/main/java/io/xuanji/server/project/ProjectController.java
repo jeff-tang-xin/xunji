@@ -225,6 +225,20 @@ public class ProjectController {
         return projects.rerunStage(user, id, stage);
     }
 
+    /** 人为终止执行中的步骤：当前 LLM 调用被取消，步骤落 SKIPPED（留痕），主控直接进入下一步。 */
+    @PostMapping("/{id}/stage/step/{seq}/terminate")
+    public Object terminateStep(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+                                @PathVariable long seq) {
+        return projects.terminateStep(user, id, seq);
+    }
+
+    /** 人工重试失败/被终止的步骤：重置后后台重跑（完成/失败经事件推送刷新，主控被唤醒继续）。 */
+    @PostMapping("/{id}/stage/step/{seq}/retry")
+    public Object retryStep(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+                            @PathVariable long seq) {
+        return projects.retryStep(user, id, seq);
+    }
+
     /** 让 PM 产出当前阶段收口总结（PENDING，待人批准）。 */
     @PostMapping("/{id}/summary/draft")
     public Object draftSummary(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {

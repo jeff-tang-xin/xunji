@@ -560,7 +560,13 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
       await readSse(r, (event, data) => {
         let payload: Record<string, unknown> = {}
         try { payload = JSON.parse(data) } catch { /* 忽略非 JSON 帧 */ }
-        if (event === 'agent.start') {
+        if (event === 'speech.echo') {
+          // 插话回显（2026-10-17 同步化）：讨论/任务执行中用户消息不起新主控轮，
+          // 后端直接落库并回提示——把 agent 占位卡转成系统提示
+          const tip = String(payload.message || '你的发言已加入讨论流')
+          setMsgs((x) => x.map((m) => (m.id === agentMsgId
+            ? { ...m, type: 'system' as const, text: `💬 ${tip}`, streaming: false, phaseText: undefined } : m)))
+        } else if (event === 'agent.start') {
           // 不设占位文本：正文完全由打字机队列驱动（占位与 delta 混排是旧瑕疵），等待期由 phaseText 提示
           const who = String(payload.agent || 'agent')
           setMsgs((x) => x.map((m) => (m.id === agentMsgId

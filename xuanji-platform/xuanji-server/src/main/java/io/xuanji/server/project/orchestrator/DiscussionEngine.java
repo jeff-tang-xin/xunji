@@ -6,225 +6,176 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.Map;
+import java.util.concurrent.Future;
 
 /**
- * 讨论型小流程引擎：结构化群聊。
+ * 讨论引擎（主席模型 v3）：串行发言 + 主控主持 + 人为终止。
  *
- * <p>协议（架构 v2 定稿）：</p>
+ * <p>形态（2026-10-17 定稿）：讨论本来就是串行的——前一个发言，后一个能看到并补充
+ * （像真实会议，不是互不可见的评审会）。主控是讨论主席：</p>
  * <ol>
- *   <li><b>第一轮并行</b>——各参与者独立发言（互不可见，像评审会先各自写意见，
- *       观点不被带偏），N 人并行 ≈ 单次发言耗时；</li>
- *   <li><b>后续轮串行</b>——每人读完整历史后发言（真讨论：看到别人观点才有交锋），
- *       轮数由主控在发起时指定（默认 1 轮）；</li>
- *   <li><b>收敛</b>——主控（或指定汇总人）读全部发言，产出共识 + 分歧 + OPEN_QUESTION；</li>
- *   <li><b>落档</b>——纪要（谁说了什么）进 step.output_full，共识进 output_summary。</li>
+ *   <li><b>discuss 发起</b>——参会人按序串行发言（每人读 DB 全量：前人观点+用户插话），
+ *       发言全文同步回流主控；</li>
+ *   <li><b>discuss_more 追加</b>——participants 传多人=再来一轮；传一人=<b>@定向</b>
+ *       （回答用户的问题或某发言者提出的问题，focusQuestion 聚焦）；</li>
+ *   <li><b>discuss_close 收口</b>——主席总结（主控自己总结，不再有 summarizer 角色），
+ *       纪要=全部发言+主席总结，落档 DONE。</li>
  * </ol>
  *
- * <p>同步机制：讨论历史由本引擎显式管理（AgentScope 记忆按 (agentId, sessionId)
- * 隔离，跨 agent 共享必须显式传递）。整场讨论在独立线程异步进行，
- * 不阻塞主控对话；完成落黑板，主控下轮对话可见。</p>
+ * <p><b>无超时</b>：模型想多久想多久（thinking 保留），做完为止——TimeoutException
+ * 这个失败形态已废除。发言 prompt 约束 300 字内（输出效率，不是阉割思考）。</p>
+ *
+ * <p><b>@ 的等待语义是结构性保证</b>：主控单线程同步——讨论进行中用户消息只走插话
+ * 落库（chat 入口互斥，见 StageOrchestrator.chat），主控拿到 transcript 后才发起
+ * discuss_more，被 @ 者读 DB 最新全量（必然含当前发言者结论与用户问题）。</p>
+ *
+ * <p><b>人为终止</b>：终止端点经 {@link StepInterruption} cancel 在跑的发言——
+ * 当前 LLM 调用被中断、半截发言不落库，步骤落 SKIPPED（留痕），主控收到终止信号
+ * 直接进入下一步。</p>
  */
 @Component
 public class DiscussionEngine {
 
     private static final Logger log = LoggerFactory.getLogger(DiscussionEngine.class);
 
-    /**
-     * 单次发言超时（秒）。实测模型单次生成可达 2-3 分钟（qwen 慢响应），90s 会把正常发言掐死
-     * （TimeoutException → 整场 FAILED）；放宽到 240s，讨论在后台跑，不占用户等待。
-     */
-    static final int SPEECH_TIMEOUT_SECONDS = 240;
-
-    /**
-     * 汇总超时（秒）。汇总要读全部发言（实测 1.5 万字 transcript），qwen 长输入处理慢，
-     * 240s 实测不够（FAILED「汇总超时」）；放宽到 480s，同时 prompt 限制输出 500 字内缩短生成。
-     */
-    static final int SUMMARY_TIMEOUT_SECONDS = 480;
-
     private final AgentInvoker invoker;
     private final AgentNodeExecutor agentNodes;
     private final StageStepRepository stepRepo;
     private final StageDocStore docStore;
-    private final StageOrchestrator orchestrator;
     private final ProjectEventBus projectEvents;
 
-    /** 发言线程池：第一轮并行度 = 参与者数（cached 池按需扩）。 */
+    /** 发言线程池：同步执行也走池——Future 注册进 StepInterruption 才有人为终止通道。 */
     private final ExecutorService speakerPool = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "stage-discuss-speaker");
         t.setDaemon(true);
         return t;
     });
 
-    /** 整场讨论的调度线程（串行轮 + 汇总在此执行）。 */
-    private final ExecutorService dispatchPool = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "stage-discuss-dispatch");
-        t.setDaemon(true);
-        return t;
-    });
-
     public DiscussionEngine(AgentInvoker invoker, AgentNodeExecutor agentNodes,
                             StageStepRepository stepRepo, StageDocStore docStore,
-                            ProjectEventBus projectEvents,
-                            @org.springframework.context.annotation.Lazy StageOrchestrator orchestrator) {
+                            ProjectEventBus projectEvents) {
         this.invoker = invoker;
         this.agentNodes = agentNodes;
         this.stepRepo = stepRepo;
         this.docStore = docStore;
         this.projectEvents = projectEvents;
-        this.orchestrator = orchestrator;
     }
 
     /**
-     * 提交一场讨论：立即返回，整场在后台进行，纪要落黑板。
+     * 串行发言一轮（同步，阻塞到全部发言完成）。
      *
-     * @param step         DISCUSS 型步骤（participants=参与者名单）
-     * @param brief        议题包（goal + 黑板摘要）
-     * @param rounds       串行轮数（0=只收集一轮独立观点；1=再加一轮互见讨论）
-     * @param summarizer   汇总人 agent 名（通常主控或 PM）
+     * @param step          DISCUSS 步（EXECUTING 态）
+     * @param brief         议题包
+     * @param participants  本轮发言人（按序串行）
+     * @param focusQuestion 定向问题（@定向时非空；普通轮 null）
+     * @return 本轮新增发言的 transcript（【发言人】内容 拼接）
+     * @throws UserInterrupted 用户终止
      */
-    public void submit(StageStep step, TopicBrief brief, int rounds, String summarizer) {
-        stepRepo.updateStatus(step.withStatus(StepStatus.EXECUTING));
-        dispatchPool.submit(() -> run(step, brief, rounds, summarizer));
-    }
-
-    private void run(StageStep step, TopicBrief brief, int rounds, String summarizer) {
-        log.info("讨论开始: ws={} {}#{} seq={} 参与者={} 轮数={}",
-                step.workspaceId(), step.stage(), step.iteration(), step.seq(),
-                step.participants(), rounds);
-        List<String> history = new ArrayList<>();
-        try {
-            // 进度行：讨论全程 10-20 分钟（qwen 每人 2-5 分钟），第一条发言落地前界面不能静默——
-            // 先落一行预期说明，让用户知道系统活着、要等多久（AI 过程可见化）
-            stepRepo.appendSpeech(step.id(),
-                    "⏱ 讨论开始：" + step.participants().size() + " 人并行发言（每人约 2-5 分钟），"
-                            + "发言逐条显示在这里，全部完成后自动汇总纪要（预计 10-20 分钟）。\n\n");
-            // 第一轮：并行独立发言（互不可见）
-            List<CompletableFuture<String>> firstRound = step.participants().stream()
-                    .map(p -> CompletableFuture.supplyAsync(() -> speak(p, brief, step, ""), speakerPool))
-                    .toList();
-            for (int i = 0; i < firstRound.size(); i++) {
-                String speaker = step.participants().get(i);
-                // 进度行：谁还在发言中（并行起跑，逐个等完成——未完成的人保持「发言中」状态可见）
-                long pending = firstRound.stream().filter(f -> !f.isDone()).count();
-                if (pending > 0) {
-                    stepRepo.appendSpeech(step.id(), "▶ " + pending + " 人发言中…\n\n");
-                }
-                String speech;
-                try {
-                    speech = firstRound.get(i).get(SPEECH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                } catch (java.util.concurrent.TimeoutException te) {
-                    firstRound.get(i).cancel(true);
-                    // 裸 TimeoutException 用户看不懂（实测 seq=7 失败只显示类名）——转成可行动的提示
-                    throw new IllegalStateException("发言超时（" + SPEECH_TIMEOUT_SECONDS + "s，" + speaker
-                            + " 单次生成过慢）——可收窄议题后重试");
-                }
-                history.add("【" + speaker + "】" + speech);
-                // 逐条落库：讨论全程可能数分钟，轮询方实时看到已收集的发言（AI 过程可见化）
-                stepRepo.appendSpeech(step.id(), "【" + speaker + "】" + speech + "\n\n");
-            }
-
-            // 后续轮：串行互见讨论。seenHistory 从 DB 读而非内存 history——
-            // 用户插话（【用户】前缀）实时落库，后续发言者能看到并回应（用户可参与讨论）
-            for (int r = 0; r < rounds; r++) {
-                for (String p : step.participants()) {
-                    stepRepo.appendSpeech(step.id(), "▶ " + p + " 发言中…\n\n");
-                    String seen = latestSpeech(step.id());
-                    // 后续轮同样包 Future.get 超时——speak 是同步阻塞调用，模型 hang 会让讨论永远挂在 EXECUTING
-                    // （汇总当初就因无超时永久挂起修过，后续轮发言是同款风险）
-                    String speech;
-                    java.util.concurrent.Future<String> speechFuture =
-                            speakerPool.submit(() -> speak(p, brief, step, seen));
-                    try {
-                        speech = speechFuture.get(SPEECH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                    } catch (java.util.concurrent.TimeoutException te) {
-                        speechFuture.cancel(true);
-                        throw new IllegalStateException("发言超时（" + SPEECH_TIMEOUT_SECONDS + "s，" + p
-                                + " 单次生成过慢）——可收窄议题后重试");
-                    }
-                    history.add("【" + p + "】" + speech);
-                    stepRepo.appendSpeech(step.id(), "【" + p + "】" + speech + "\n\n");
-                }
-            }
-
-            // 收敛：汇总人读全部发言（与发言同款超时——invoke 是同步阻塞，无超时则模型 hang 会把讨论永远挂在 EXECUTING）
-            stepRepo.appendSpeech(step.id(),
-                    "⏱ 发言收集完毕（" + history.size() + " 条），正在汇总纪要…\n\n");
-            // transcript 从 DB 读：含用户插话（【用户】）——用户参与讨论的意见必须进纪要；
-            // 进度行（⏱/▶）也在库里，prompt 里让汇总人忽略
-            String transcript = latestSpeech(step.id());
-            AgentSpec sumSpec = agentNodes.buildSpecByAgentName(summarizer, null);
-            java.util.concurrent.Future<String> sumFuture = speakerPool.submit(() -> invoker.invoke(sumSpec,
-                    brief.render(step.name(),
-                            "以下是本次讨论的全部发言（⏱/▶ 开头的是进度提示，忽略；【用户】开头的是用户本人意见，优先采纳），"
-                                    + "请汇总（控制在 500 字内）：1) 达成的共识（分点）；2) 仍存的分歧；"
-                                    + "3) 需要用户澄清的问题（OPEN_QUESTION，没有则写「无」）。\n\n" + transcript)));
-            String consensus;
+    public String runDiscussion(StageStep step, TopicBrief brief, List<String> participants, String focusQuestion) {
+        StringBuilder round = new StringBuilder();
+        for (String p : participants) {
+            stepRepo.appendSpeech(step.id(), "▶ " + p + " 发言中…\n\n");
+            // 每次发言前从 DB 读最新全量：前序发言者结论 + 用户插话都在（结论同步给它）
+            String seen = latestSpeech(step.id());
+            String speech;
+            Future<String> f = speakerPool.submit(() -> speak(p, brief, step, seen, focusQuestion));
+            StepInterruption.register(step.id(), f);
             try {
-                consensus = sumFuture.get(SUMMARY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            } catch (java.util.concurrent.TimeoutException te) {
-                sumFuture.cancel(true);
-                throw new IllegalStateException("汇总超时（" + SUMMARY_TIMEOUT_SECONDS + "s）");
+                speech = f.get(); // 无超时：想多久想多久
+            } catch (java.util.concurrent.CancellationException ce) {
+                throw new UserInterrupted();
+            } catch (Exception e) {
+                Throwable root = rootOf(e);
+                if (root instanceof UserInterrupted) {
+                    throw (UserInterrupted) root;
+                }
+                speech = "（" + p + " 发言失败: " + TaskRunner.rootMessage(e) + "）";
+            } finally {
+                StepInterruption.unregister(step.id());
             }
-
-            String summary = consensus.length() > 300 ? consensus.substring(0, 300) + "…" : consensus;
-            String full = "===== 讨论纪要 =====\n" + transcript + "\n\n===== 汇总 =====\n" + consensus;
-            stepRepo.updateStatus(step.withOutput(summary, full, null));
-            // 文档双落：纪要进项目目录（docs/{stage}/iter{n}/）+ project_artifact 索引
-            docStore.write(step.workspaceId(), step.stage(), step.iteration(), "DISCUSS",
-                    step.seq(), step.name(), full, summarizer);
-            log.info("讨论完成: ws={} seq={} 发言 {} 条", step.workspaceId(), step.seq(), history.size());
-            // 项目状态实时推送：讨论落终态
-            projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
-                    "stage", step.stage(), "seq", step.seq(), "stepType", "DISCUSS",
-                    "status", "DONE", "name", step.name()));
-            // 批次收敛唤醒：讨论落板后若无其他执行中步骤，后端直接唤醒主控消化纪要继续推进
-            orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
-                    "讨论 #" + step.seq() + "「" + step.name() + "」已完成，纪要已留档。请消化共识后继续推进。");
-        } catch (Exception e) {
-            String msg = TaskRunner.rootMessage(e);
-            // withError 会用内存里的 outputFull(null) 覆盖库里的已收发言（appendSpeech 落的），
-            // 先落失败状态，再把已收到的发言补回去——部分成果对用户/主控可见，不白等。
-            stepRepo.updateStatus(step.withError(msg));
-            if (!history.isEmpty()) {
-                stepRepo.appendSpeech(step.id(),
-                        "===== 中断前已收到 " + history.size() + " 条发言 =====\n" + String.join("\n\n", history) + "\n");
-            }
-            log.warn("讨论失败: ws={} seq={} -> {}", step.workspaceId(), step.seq(), msg);
-            // 项目状态实时推送：失败也是终态
-            projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
-                    "stage", step.stage(), "seq", step.seq(), "stepType", "DISCUSS",
-                    "status", "FAILED", "name", step.name()));
-            // 失败立即唤醒（不等批次）：主控要尽快评估重试或收窄议题
-            orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
-                    "讨论 #" + step.seq() + "「" + step.name() + "」执行失败（" + msg + "）。请评估后重试或收窄议题。");
+            round.append("【").append(p).append("】").append(speech).append("\n\n");
+            stepRepo.appendSpeech(step.id(), "【" + p + "】" + speech + "\n\n");
         }
+        return round.toString();
     }
 
-    /** 当前已落库的讨论全文（含 AI 发言与用户插话）：后续轮与汇总的输入源。 */
-    private String latestSpeech(long stepId) {
-        return stepRepo.findOutputFull(stepId).orElse("");
+    /**
+     * 主席收口：主控的总结 + 全部发言落档 DONE。
+     * 纪要结构（会议纪要三段式）：主题 → 各方观点（谁说了什么，原样保留）→ 主席总结。
+     */
+    public void closeDiscussion(StageStep step, String chairmanSummary) {
+        String transcript = latestSpeech(step.id());
+        String summary = chairmanSummary == null ? "" : chairmanSummary;
+        String briefSummary = summary.length() > 300 ? summary.substring(0, 300) + "…" : summary;
+        String full = "===== 会议纪要 =====\n【主题】" + step.name()
+                + "\n\n【各方观点】\n" + transcript
+                + "\n\n【主席总结】\n" + summary;
+        stepRepo.updateStatus(step.withOutput(briefSummary, full, null));
+        docStore.write(step.workspaceId(), step.stage(), step.iteration(), "DISCUSS",
+                step.seq(), step.name(), full, step.agent());
+        log.info("讨论收口: ws={} seq={} 总结 {} 字", step.workspaceId(), step.seq(), summary.length());
+        projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
+                "stage", step.stage(), "seq", step.seq(), "stepType", "DISCUSS",
+                "status", "DONE", "name", step.name()));
     }
 
-    /** 单人发言：读议题包（+已有历史）以角色视角发言。 */
-    private String speak(String participant, TopicBrief brief, StageStep step, String seenHistory) {
+    /** 用户终止落档：SKIPPED + 留痕（终止端点与执行体共用）。 */
+    public void markInterrupted(StageStep step) {
+        stepRepo.updateStatus(step.withStatus(StepStatus.SKIPPED).withSkip("用户终止"));
+        projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
+                "stage", step.stage(), "seq", step.seq(), "stepType", "DISCUSS",
+                "status", "SKIPPED", "name", step.name()));
+    }
+
+    /** 用户插话落库（chat 互斥路径）：【用户】前缀，后续发言者自然看到。 */
+    public void userSpeech(StageStep step, String query) {
+        stepRepo.appendSpeech(step.id(), "【用户】" + query + "\n\n");
+    }
+
+    /** 单人发言：读议题包+已有全部发言以角色视角发言；focusQuestion 非空=被 @ 定向回答。 */
+    private String speak(String participant, TopicBrief brief, StageStep step, String seenHistory, String focusQuestion) {
         try {
             AgentSpec spec = agentNodes.buildSpecByAgentName(participant, null);
             TopicBrief withHistory = new TopicBrief(brief.projectGoal(), brief.stageGoal(),
                     brief.topic(), brief.boardDigest(), seenHistory);
-            String ask = withHistory.render(step.name(),
-                    (seenHistory.isBlank()
-                            ? "请以你的角色就本议题给出独立观点：明确立场 + 依据 + 你关注的风险。"
-                            : "请基于上方讨论历史，以你的角色补充观点：认同什么、反对什么、还缺什么。不要重复他人已说的内容。"));
+            String ask;
+            if (focusQuestion != null && !focusQuestion.isBlank()) {
+                ask = withHistory.render(step.name(),
+                        "主持人 @你 定向回答以下问题（结合上方讨论现场，直接给结论与依据）：\n" + focusQuestion
+                                + "\n\n要求：直接回答，300 字内，不复述议题、不寒暄、不重复他人已说的内容。");
+            } else {
+                ask = withHistory.render(step.name(),
+                        "请基于上方讨论现场（含用户插话），以你的角色发言：补充新观点、对他人观点表态（认同什么/反对什么/还缺什么）。"
+                                + "要求：直接给观点（立场+依据+你关注的风险），300 字内，不复述议题、不寒暄、不重复他人已说的内容。"
+                                + (seenHistory.isBlank() ? "你是第一个发言人，直接给独立观点。" : ""));
+            }
             return invoker.invoke(spec, ask);
         } catch (Exception e) {
             return "（" + participant + " 发言失败: " + TaskRunner.rootMessage(e) + "）";
+        }
+    }
+
+    /** 当前已落库的讨论全文（含 AI 发言与用户插话）。 */
+    private String latestSpeech(long stepId) {
+        return stepRepo.findOutputFull(stepId).orElse("");
+    }
+
+    private static Throwable rootOf(Throwable e) {
+        Throwable cur = e;
+        while (cur.getCause() != null && cur.getCause() != cur) {
+            cur = cur.getCause();
+        }
+        return cur;
+    }
+
+    /** 用户终止信号：执行体捕获后落 SKIPPED 并上抛给主控工具层。 */
+    public static class UserInterrupted extends RuntimeException {
+        public UserInterrupted() {
+            super("用户已终止本步骤");
         }
     }
 }

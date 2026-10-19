@@ -12,22 +12,17 @@ import org.springframework.stereotype.Component;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 执行中求助（ask_peer）——讨论式开发的执行侧配套。
  *
  * <p><b>三方结构</b>：发起方（当前执行 agent）+ 目的方（target_agent，能解答的角色）
- * + PM（意图锚注入目的方 prompt 对照回答 + 问答落台账 + 主控下轮对话可见可审计）。
- * PM 不实时发言——执行 agent 总超时 8 分钟，三方实时讨论（4-6 分钟）会挤爆干活时间；
+ * + PM（意图锚注入目的方 prompt 对照回答 + 问答落台账 + 主控可见可审计）。
  * PM 的在场形态 = 锚在场 + 台账在场 + 事后审计（发现需求矛盾升级 request_decision）。</p>
  *
  * <p><b>防失控</b>：① 每个执行步最多求助 3 次（按台账 CONSULT 步计数）；
- * ② 目的方是裸 spec（不挂 ask_peer），物理上无递归；③ 目的方直答超时 240s，
- * 超时返回失败提示而不是挂死执行 agent 的 ReAct 循环。</p>
+ * ② 目的方是裸 spec（不挂 ask_peer），物理上无递归。直答无超时（2026-10-17 同步化：
+ * 做完为止，答案直接回调用方）。</p>
  *
  * <p><b>独立线程池</b>：目的方 invoke 不能用 TaskRunner.workPool——执行 agent 的
  * ReAct 循环本身占着 workPool 线程等 ask_peer 返回，复用会自我死锁。</p>
@@ -40,9 +35,6 @@ public class PeerConsultService {
     /** 单个执行步的求助次数上限。 */
     static final int MAX_PER_STEP = 3;
 
-    /** 目的方直答超时（秒）——与 DiscussionEngine 单次发言同款（qwen 单次可达 2-3 分钟）。 */
-    static final int ANSWER_TIMEOUT_SECONDS = 240;
-
     /** CONSULT 台账步的 name 前缀（计数与识别用）。 */
     static final String CONSULT_PREFIX = "求助·";
 
@@ -50,13 +42,6 @@ public class PeerConsultService {
     private final AgentNodeExecutor agentNodes;
     private final StageStepRepository stepRepo;
     private final StageDocStore docStore;
-
-    /** 求助线程池：cached 按需扩（求助低频，目的方是裸 invoke 无递归）。 */
-    private final ExecutorService consultPool = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "stage-peer-consult");
-        t.setDaemon(true);
-        return t;
-    });
 
     public PeerConsultService(AgentInvoker invoker, AgentNodeExecutor agentNodes,
                               StageStepRepository stepRepo, StageDocStore docStore) {
@@ -132,11 +117,8 @@ public class PeerConsultService {
         String answer;
         try {
             AgentSpec targetSpec = agentNodes.buildSpecByAgentName(target, null);
-            answer = CompletableFuture.supplyAsync(() -> invoker.invoke(targetSpec, prompt), consultPool)
-                    .get(ANSWER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (java.util.concurrent.TimeoutException te) {
-            return ToolResult.of(Map.of("ok", false, "message",
-                    "对方超时未答（" + ANSWER_TIMEOUT_SECONDS + "s）：可稍后重试一次，或换一个能解答的角色"));
+            // 无超时（2026-10-17）：对方想多久想多久（thinking 保留），做完为止
+            answer = invoker.invoke(targetSpec, prompt);
         } catch (Exception e) {
             return ToolResult.of(Map.of("ok", false, "message",
                     "求助失败: " + TaskRunner.rootMessage(e)));
@@ -189,44 +171,39 @@ public class PeerConsultService {
      * @param question    求助内容
      * @param brief       议题包（发起阶段意图锚 + 需求全景，供目标 agent 对照回答）
      */
-    public void askStageAsync(StageStep launchStep, StageStep supportStep, String targetAgent,
-                              String fromStage, String question, TopicBrief brief) {
-        stepRepo.updateStatus(launchStep.withStatus(StepStatus.EXECUTING));
-        consultPool.submit(() -> {
-            String prompt = "【跨阶段支援】你是 " + targetAgent + "（" + supportStep.stage()
-                    + " 阶段负责角色），另一阶段（" + fromStage + "）的团队向你求助。\n"
-                    + brief.render("解答兄弟阶段的提问", null)
-                    + "\n【求助方】" + fromStage + " 阶段主控\n"
-                    + "【求助内容】\n" + question + "\n\n"
-                    + "【回答要求】以你所在阶段的职责域直接给出可执行的结论/操作/依据，不要寒暄；"
-                    + "若求助超出你的职责域，说明该由哪个阶段接手；若与意图锚冲突，明确指出冲突点。";
-            try {
-                AgentSpec targetSpec = agentNodes.buildSpecByAgentName(targetAgent, null);
-                String answer = CompletableFuture.supplyAsync(() -> invoker.invoke(targetSpec, prompt), consultPool)
-                        .get(ANSWER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                String full = "【问】(" + fromStage + " 阶段)\n" + question + "\n\n【答】(" + targetAgent + ")\n" + answer;
-                String summary = answer.length() > 300 ? answer.substring(0, 300) + "…" : answer;
-                // 发起阶段：问答留档（聊天框 process 卡片可见，boardDigest 可见）
-                stepRepo.updateStatus(launchStep.withOutput(summary, full, null));
-                // 目标阶段：支援记录（该阶段台账/聊天框同样可见）
-                stepRepo.updateStatus(supportStep.withOutput(summary, full, null));
-                // 文档双落（落在发起阶段目录——求助产出归发起方）
-                docStore.write(launchStep.workspaceId(), launchStep.stage(), launchStep.iteration(),
-                        "CONSULT", launchStep.seq(), launchStep.name(), full, targetAgent);
-                log.info("跨阶段求助完成: ws={} {} -> {} ({} 字)", launchStep.workspaceId(),
-                        fromStage, supportStep.stage(), answer.length());
-            } catch (java.util.concurrent.TimeoutException te) {
-                stepRepo.updateStatus(launchStep.withError(
-                        "对方超时未答（" + ANSWER_TIMEOUT_SECONDS + "s）"));
-                stepRepo.updateStatus(supportStep.withError("支援超时（" + ANSWER_TIMEOUT_SECONDS + "s）"));
-            } catch (Exception e) {
-                String msg = TaskRunner.rootMessage(e);
-                stepRepo.updateStatus(launchStep.withError(msg));
-                stepRepo.updateStatus(supportStep.withError(msg));
-                log.warn("跨阶段求助失败: ws={} {} -> {} -> {}", launchStep.workspaceId(),
-                        fromStage, supportStep.stage(), msg);
-            }
-        });
+    public String askStageSync(StageStep launchStep, StageStep supportStep, String targetAgent,
+                               String fromStage, String question, TopicBrief brief) {
+        String prompt = "【跨阶段支援】你是 " + targetAgent + "（" + supportStep.stage()
+                + " 阶段负责角色），另一阶段（" + fromStage + "）的团队向你求助。\n"
+                + brief.render("解答兄弟阶段的提问", null)
+                + "\n【求助方】" + fromStage + " 阶段主控\n"
+                + "【求助内容】\n" + question + "\n\n"
+                + "【回答要求】以你所在阶段的职责域直接给出可执行的结论/操作/依据，不要寒暄；"
+                + "若求助超出你的职责域，说明该由哪个阶段接手；若与意图锚冲突，明确指出冲突点。";
+        try {
+            AgentSpec targetSpec = agentNodes.buildSpecByAgentName(targetAgent, null);
+            // 无超时（2026-10-17 同步化）：直答做完为止，答案直接回主控
+            String answer = invoker.invoke(targetSpec, prompt);
+            String full = "【问】(" + fromStage + " 阶段)\n" + question + "\n\n【答】(" + targetAgent + ")\n" + answer;
+            String summary = answer.length() > 300 ? answer.substring(0, 300) + "…" : answer;
+            // 发起阶段：问答留档（聊天框 process 卡片可见，boardDigest 可见）
+            stepRepo.updateStatus(launchStep.withOutput(summary, full, null));
+            // 目标阶段：支援记录（该阶段台账/聊天框同样可见）
+            stepRepo.updateStatus(supportStep.withOutput(summary, full, null));
+            // 文档双落（落在发起阶段目录——求助产出归发起方）
+            docStore.write(launchStep.workspaceId(), launchStep.stage(), launchStep.iteration(),
+                    "CONSULT", launchStep.seq(), launchStep.name(), full, targetAgent);
+            log.info("跨阶段求助完成: ws={} {} -> {} ({} 字)", launchStep.workspaceId(),
+                    fromStage, supportStep.stage(), answer.length());
+            return answer;
+        } catch (Exception e) {
+            String msg = TaskRunner.rootMessage(e);
+            stepRepo.updateStatus(launchStep.withError(msg));
+            stepRepo.updateStatus(supportStep.withError(msg));
+            log.warn("跨阶段求助失败: ws={} {} -> {} -> {}", launchStep.workspaceId(),
+                    fromStage, supportStep.stage(), msg);
+            throw new IllegalStateException("跨阶段求助失败: " + msg, e);
+        }
     }
 
     static String consultPrefix(int seq) {

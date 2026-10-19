@@ -70,6 +70,12 @@ public class ProjectService {
     private ProjectTemplateService templateService;
     @Autowired
     private io.xuanji.server.project.orchestrator.RequirementRepository requirementRepo;
+    @Autowired
+    private io.xuanji.server.project.orchestrator.TaskRunner taskRunner;
+    @Autowired
+    private io.xuanji.server.project.orchestrator.DiscussionEngine discussionEngine;
+    @Autowired
+    private io.xuanji.server.project.orchestrator.StageOrchestrator stageOrchestrator;
     @Value(value="${xuanji.workspace.root:./workspaces}")
     private String workspaceRoot;
     private final ExecutorService autoFlowExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -839,6 +845,88 @@ public class ProjectService {
             return out;
         }
         return this.decidePlan(user, wsId, planId, Map.of("decision", "APPROVE"));
+    }
+
+    /**
+     * 人为终止执行中的步骤（2026-10-17 同步化配套）：cancel 在跑的 LLM 调用，
+     * 步骤落 SKIPPED（留痕「用户终止」）。主控工具层收到终止信号后直接进入下一步。
+     * 若步骤已自然完成（终止晚到）按幂等返回当前状态。
+     */
+    public Map<String, Object> terminateStep(LoginUser user, String wsId, long seq) {
+        this.requireProject(user, wsId);
+        String stage = this.currentStageOf(wsId);
+        int iteration = this.currentIterationOf(wsId);
+        StageStep step = this.stepRepo.findByStage(wsId, stage, iteration).stream()
+                .filter(s -> s.seq() == seq).findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "步骤不存在: seq=" + seq));
+        if (step.status() != StepStatus.EXECUTING) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "步骤不在执行中（" + step.status() + "），无需终止");
+        }
+        boolean cancelled = io.xuanji.server.project.orchestrator.StepInterruption.terminate(step.id());
+        if (!cancelled) {
+            return Map.of("ok", true, "seq", seq, "status", String.valueOf(step.status()),
+                    "message", "步骤已不在执行中（可能刚完成），无需终止");
+        }
+        // 执行体 cancel 后自行落 SKIPPED；这里兜底直接落（同状态幂等）
+        if (step.stepType() == StepType.DISCUSS) {
+            this.discussionEngine.markInterrupted(step);
+        } else {
+            this.stepRepo.updateStatus(step.withStatus(StepStatus.SKIPPED).withSkip("用户终止"));
+        }
+        return Map.of("ok", true, "seq", seq, "status", "SKIPPED",
+                "message", "已终止，主控将直接进入下一步");
+    }
+
+    /**
+     * 人工重试失败/被终止的步骤：重置 PLANNED 后后台重跑（TASK→TaskRunner / DISCUSS→DiscussionEngine），
+     * 完成/失败经事件推送刷新前端，主控经 wakeIfSettled 被唤醒继续。
+     */
+    public Map<String, Object> retryStep(LoginUser user, String wsId, long seq) {
+        this.requireProject(user, wsId);
+        String stage = this.currentStageOf(wsId);
+        int iteration = this.currentIterationOf(wsId);
+        StageStep step = this.stepRepo.findByStage(wsId, stage, iteration).stream()
+                .filter(s -> s.seq() == seq).findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "步骤不存在: seq=" + seq));
+        if (step.status() != StepStatus.FAILED && step.status() != StepStatus.SKIPPED) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "只有失败/被终止的步骤可重试（当前 " + step.status() + "）");
+        }
+        StageStep reset = step.withStatus(StepStatus.PLANNED).withSkip(null).withError(null);
+        this.stepRepo.updateStatus(reset);
+        if (step.stepType() == StepType.DISCUSS) {
+            // 讨论重跑：清空旧发言流重新发起；发言完成后唤醒主控以主席身份收口
+            this.stepRepo.appendSpeech(step.id(), "===== 人工重试：重新发起讨论 =====\n\n");
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    this.discussionEngine.runDiscussion(reset.withId(step.id()),
+                            new io.xuanji.server.project.orchestrator.TopicBrief("", "", step.instruction(), "", ""),
+                            step.participants(), null);
+                    this.stageOrchestrator.wakeIfSettled(wsId, stage, iteration,
+                            "讨论 #" + seq + "「" + step.name() + "」人工重试发言完成，请以主席身份收口（discuss_close）或继续追加。");
+                } catch (Exception e) {
+                    this.stageOrchestrator.wakeIfSettled(wsId, stage, iteration,
+                            "讨论 #" + seq + "「" + step.name() + "」人工重试失败（" + e.getMessage() + "）。");
+                }
+            });
+        } else {
+            this.taskRunner.submit(reset.withId(step.id()),
+                    new io.xuanji.server.project.orchestrator.TopicBrief("", "", step.instruction(), "", ""));
+        }
+        return Map.of("ok", true, "seq", seq, "message", "已重新发起，完成后自动刷新（主控会被唤醒继续）");
+    }
+
+    private String currentStageOf(String wsId) {
+        Map ws = (Map)this.workspaceRepo.findById(wsId).stream().findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "项目不存在"));
+        return String.valueOf(ws.get("current_stage"));
+    }
+
+    private int currentIterationOf(String wsId) {
+        String stage = this.currentStageOf(wsId);
+        return this.stepRepo.findByStage(wsId, stage, 1).stream()
+                .filter(s -> stage.equals(s.stage()))
+                .mapToInt(StageStep::iteration).max().orElse(1);
     }
 
     @Transactional

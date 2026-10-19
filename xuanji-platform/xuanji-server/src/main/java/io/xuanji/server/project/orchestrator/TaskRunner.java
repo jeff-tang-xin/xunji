@@ -11,27 +11,23 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.Map;
 
 /**
  * 任务型小流程执行器：单 agent 后台执行，产出登记为交付物。
  *
- * <p>执行模型：主控在对话中调 execute_step → 本类立即把步骤标 EXECUTING 并提交
- * 后台线程（不阻塞主控的 ReAct 循环与 SSE 会话），完成后落黑板（DONE + 产出 +
- * 产物登记）；失败落 FAILED（主控下轮对话可见，自主决定重试或换路）。</p>
+ * <p>执行模型（2026-10-17 同步化）：主控调 execute_step → {@link #runSync} 在主控
+ * 工具调用线程内阻塞执行到完成（无超时，thinking 保留），产出经返回值直接回到主控手里；
+ * 失败原因同样直接上抛给主控——当场决策重试/换路/跳过，不再依赖唤醒链路。
+ * {@link #submit} 仅人工重试端点使用（后台跑 + 完成唤醒主控）。</p>
  *
- * <p>超时：单任务 8 分钟硬上限（Future.get）——实测 qwen 单次生成可达 2-3 分钟，
- * 3 分钟会把正常任务掐死；任务仍应设计得小，超时即任务过大或模型异常（主控下轮可见，自主重试/换路）。
- * 无状态：线程池外所有状态在黑板，多项目并发安全。</p>
+ * <p>人为终止：Future 注册进 {@link StepInterruption}，终止端点 cancel 后落 SKIPPED
+ * 并抛 {@link DiscussionEngine.UserInterrupted}，主控直接进入下一步。</p>
  */
 @Component
 public class TaskRunner {
 
     private static final Logger log = LoggerFactory.getLogger(TaskRunner.class);
-
-    /** 单任务硬超时（分钟）。 */
-    static final int TIMEOUT_MINUTES = 8;
 
     private final AgentInvoker invoker;
     private final AgentNodeExecutor agentNodes;
@@ -74,15 +70,39 @@ public class TaskRunner {
     }
 
     /**
-     * 提交后台执行：立即返回（主控继续对话），结果落黑板。
-     * 调用方保证 step 处于 PLANNED/WAITING 态。
+     * 提交后台执行（人工重试端点专用）：立即返回，结果落黑板 + 唤醒主控。
+     * 主控的 execute_step 已改走 {@link #runSync} 同步链路（产出直接回主控手里）。
      */
     public void submit(StageStep step, TopicBrief brief) {
-        stepRepo.updateStatus(step.withStatus(StepStatus.EXECUTING));
-        dispatchPool.submit(() -> run(step, brief));
+        dispatchPool.submit(() -> {
+            try {
+                runSync(step, brief);
+                orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
+                        "任务 #" + step.seq() + "「" + step.name() + "」已完成（人工重试），产出已留档。请消化后继续推进。");
+            } catch (DiscussionEngine.UserInterrupted ui) {
+                orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
+                        "任务 #" + step.seq() + "「" + step.name() + "」已被用户终止。请评估后续。");
+            } catch (Exception e) {
+                orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
+                        "任务 #" + step.seq() + "「" + step.name() + "」重试失败（" + TaskRunner.rootMessage(e) + "）。请评估后调整。");
+            }
+        });
     }
 
-    private void run(StageStep step, TopicBrief brief) {
+    /**
+     * 同步执行（主控 execute_step 链路）：阻塞到任务完成，产出直接返回主控。
+     *
+     * <p><b>无超时</b>（2026-10-17 定稿）：模型想多久想多久（thinking 保留），做完为止——
+     * TimeoutException 失败形态废除。Future 仅为人为终止留 cancel 通道
+     * （{@link StepInterruption#terminate}），终止后落 SKIPPED 并抛「用户已终止」，
+     * 主控直接进入下一步。</p>
+     *
+     * @return 产出全文
+     * @throws IllegalStateException 任务失败（message 为可读原因，主控当场决策重试/换路/跳过）
+     * @throws DiscussionEngine.UserInterrupted 用户终止
+     */
+    public String runSync(StageStep step, TopicBrief brief) {
+        stepRepo.updateStatus(step.withStatus(StepStatus.EXECUTING));
         log.info("任务执行开始: ws={} {}#{} seq={} agent={}",
                 step.workspaceId(), step.stage(), step.iteration(), step.seq(), step.agent());
         try {
@@ -92,14 +112,20 @@ public class TaskRunner {
             AgentSpec spec = withTools(base, List.of(peerConsult.askPeerDef(step, brief)));
             String prompt = brief.render(step.name(), step.instruction());
             Future<String> future = workPool.submit(() -> invoker.invoke(spec, prompt));
+            StepInterruption.register(step.id(), future);
             String output;
             try {
-                output = future.get(TIMEOUT_MINUTES, TimeUnit.MINUTES);
-            } catch (java.util.concurrent.TimeoutException te) {
-                // 超时必须 cancel：invoke 是阻塞的 LLM 调用，不取消则僵尸任务永久占住工作线程，
-                // 后续所有项目的任务型步骤全部排队饿死
-                future.cancel(true);
-                throw te;
+                output = future.get(); // 无超时：做完为止
+            } catch (java.util.concurrent.CancellationException ce) {
+                stepRepo.updateStatus(step.withStatus(StepStatus.SKIPPED).withSkip("用户终止"));
+                projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
+                        "stage", step.stage(), "seq", step.seq(), "stepType", "TASK",
+                        "status", "SKIPPED", "name", step.name()));
+                throw new DiscussionEngine.UserInterrupted();
+            } catch (java.util.concurrent.ExecutionException ee) {
+                throw new IllegalStateException(TaskRunner.rootMessage(ee), ee);
+            } finally {
+                StepInterruption.unregister(step.id());
             }
             // nodeId 带阶段与迭代：跨阶段 seq 会重合（REQUIREMENT seq4 与 DEVELOP seq4），
             // 裸 "step-{seq}" 会让追溯关联与 file_path 回填串阶段（trace 端点按全键匹配）
@@ -123,11 +149,11 @@ public class TaskRunner {
             projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
                     "stage", step.stage(), "seq", step.seq(), "stepType", "TASK",
                     "status", "DONE", "name", step.name()));
-            // 批次收敛唤醒：任务落板后若无其他执行中步骤，后端直接唤醒主控继续推进
-            // （后端是运行唯一真相，不依赖前端在线；主控承诺的「下一条汇报」由此兑现）
-            orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
-                    "任务 #" + step.seq() + "「" + step.name() + "」已完成，产出已留档（"
-                            + (summary.length() > 120 ? summary.substring(0, 120) + "…" : summary) + "）");
+            // 同步链路不唤醒：主控就阻塞在本方法调用上，产出经返回值直接回到它手里
+            return output;
+        } catch (DiscussionEngine.UserInterrupted ui) {
+            // 已落 SKIPPED，原样上抛：主控工具层收到「用户已终止」直接进入下一步
+            throw ui;
         } catch (Exception e) {
             String msg = rootMessage(e);
             stepRepo.updateStatus(step.withError(msg));
@@ -136,9 +162,8 @@ public class TaskRunner {
             projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
                     "stage", step.stage(), "seq", step.seq(), "stepType", "TASK",
                     "status", "FAILED", "name", step.name()));
-            // 失败立即唤醒（不等批次）：主控要尽快评估重试或换路
-            orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
-                    "任务 #" + step.seq() + "「" + step.name() + "」执行失败（" + msg + "）。请评估后重试或调整方案。");
+            // 失败原因上抛：主控当场拿到，立即决策（重试/换路/跳过），不停摆
+            throw new IllegalStateException(msg, e);
         }
     }
 

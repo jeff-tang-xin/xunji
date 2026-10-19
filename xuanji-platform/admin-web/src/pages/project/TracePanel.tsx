@@ -68,22 +68,40 @@ function ArtifactModal({ projectId, path, name, contentMd, onClose }: { projectI
 }
 
 /** 步骤详情弹窗：流程正义的落点——谁做的、验证成色、产出证据、错误，全部可查。 */
-function StepDetailModal({ projectId, s, onClose }: { projectId: string; s: TraceStep | null; onClose: () => void }) {
+function StepDetailModal({ projectId, s, onClose, onChanged }: { projectId: string; s: TraceStep | null; onClose: () => void; onChanged?: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null)
+  if (!s) return null
+  const act = (action: 'terminate' | 'retry') => {
+    setBusy(action)
+    apiJson<{ message?: string }>(`/api/projects/${projectId}/stage/step/${s.seq}/${action}`, 'POST')
+      .then((r) => {
+        message.success(r.message || (action === 'terminate' ? '已终止' : '已重新发起'))
+        onChanged?.()
+        onClose()
+      })
+      .catch((e: Error) => message.error(e.message))
+      .finally(() => setBusy(null))
+  }
   return (
-    <Modal open={!!s} title={<Space><Tag color={STAGE_TAG_COLOR[s?.stage || '']}>{s?.stage === 'REQUIREMENT' ? '需求' : s?.stage === 'DEVELOP' ? '开发' : '运维'}#{s?.seq}</Tag>{s?.name}</Space>} onCancel={onClose} footer={null} width={680}>
-      {s && (
-        <Space direction="vertical" size={8} style={{ width: '100%' }}>
-          <Space wrap size={6}>
-            <Tag color={STEP_STATUS_COLOR[s.status] || 'default'}>{STEP_STATUS_TEXT[s.status] || s.status}</Tag>
-            {s.verified_by === 'tool' && <Tag color="cyan">机器验证</Tag>}
-            {s.verified_by === 'human' && <Tag color="purple">人确认</Tag>}
-            {s.verified_by === 'self' && <Tooltip title="AI 自述完成——未经机器判定或人确认"><Tag>AI 自述</Tag></Tooltip>}
-          </Space>
-          {s.error && <Alert type="error" message={s.error} />}
-          {s.output_summary && <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>{s.output_summary}</Typography.Paragraph>}
-          {s.artifact && <ArtifactLink projectId={projectId} artifact={s.artifact} />}
+    <Modal open={!!s} title={<Space><Tag color={STAGE_TAG_COLOR[s.stage]}>{s.stage === 'REQUIREMENT' ? '需求' : s.stage === 'DEVELOP' ? '开发' : '运维'}#{s.seq}</Tag>{s.name}</Space>} onCancel={onClose} footer={null} width={720}>
+      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        <Space wrap size={6}>
+          <Tag color={STEP_STATUS_COLOR[s.status] || 'default'}>{STEP_STATUS_TEXT[s.status] || s.status}</Tag>
+          {s.verified_by === 'tool' && <Tag color="cyan">机器验证</Tag>}
+          {s.verified_by === 'human' && <Tag color="purple">人确认</Tag>}
+          {s.verified_by === 'self' && <Tooltip title="AI 自述完成——未经机器判定或人确认"><Tag>AI 自述</Tag></Tooltip>}
         </Space>
-      )}
+        {s.error && <Alert type="error" message={s.error} />}
+        {s.status === 'EXECUTING' && (
+          <Alert type="info" showIcon message="正在执行（同步无超时，做完为止）——不想等可以直接终止，主控会跳过它进入下一步"
+            action={<Button size="small" danger loading={busy === 'terminate'} onClick={() => act('terminate')}>终止</Button>} />
+        )}
+        {(s.status === 'FAILED' || s.status === 'SKIPPED') && (
+          <Button size="small" type="primary" ghost loading={busy === 'retry'} onClick={() => act('retry')}>重试此步骤</Button>
+        )}
+        {s.output_summary && <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>{s.output_summary}</Typography.Paragraph>}
+        {s.artifact && <ArtifactLink projectId={projectId} artifact={s.artifact} />}
+      </Space>
     </Modal>
   )
 }
@@ -217,7 +235,7 @@ export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], on
         onClose={() => setDecisionStep(null)}
         onAnswered={() => { if (onRefresh) onRefresh() }}
       />
-      <StepDetailModal projectId={projectId} s={detailStep} onClose={() => setDetailStep(null)} />
+      <StepDetailModal projectId={projectId} s={detailStep} onClose={() => setDetailStep(null)} onChanged={load} />
     </div>
   )
 }

@@ -101,9 +101,13 @@ public class OrchestrationTools {
         List<ToolDef> defs = new ArrayList<>();
         defs.add(def("plan_steps", "规划本阶段的小流程清单（做什么、顺序、谁来做）。阶段开始或需求变化时调用；会替换尚未开始执行的既有规划。必须携带 intent_anchor（全局意图锚）并为每个 TASK 步给出可判定的 acceptance 验收断言。",
                 planStepsSchema(), List.of("steps")));
-        defs.add(def("discuss", "发起一场多方讨论（结构化群聊）：参与者逐个发言（第一轮并行独立观点、后续轮互见讨论），最后由你汇总共识。讨论最少三方——你必须主持，participants 填目的方等参与方（至少 2 个角色，按问题域拉能解答的人）。异步进行，完成后结果进黑板。",
+        defs.add(def("discuss", "发起一场讨论并主持（你是主席）：参与者串行发言（每人能看到前面所有人的观点并补充），发言全文直接回到你手里。之后由你判断：观点够了用 discuss_close 收口，不够用 discuss_more 追加或 @定向提问。讨论未收口前保持进行中。",
                 discussSchema(), List.of("name", "topic", "participants")));
-        defs.add(def("execute_step", "派发一个任务型小流程给指定 agent 后台执行（产出登记为交付物，8 分钟超时）。异步进行，完成后结果进黑板。instruction 必须包含该步的 acceptance 验收口径；执行 agent 遇到需求/架构疑问会通过 ask_peer 向对应角色求助，问答留档你可见。",
+        defs.add(def("discuss_more", "追加讨论发言（主席权柄）：participants 传多人=再来一轮串行发言；传一人=@定向——就 question（用户的问题或某发言者提出的问题）让该角色回答，回答会结合全部讨论现场。",
+                discussMoreSchema(), List.of("seq", "participants")));
+        defs.add(def("discuss_close", "主席收口：给出你的总结（共识/分歧/待办/OPEN_QUESTION），纪要=各方观点+你的主席总结，落档完成。讨论必须收口才能推进后续步骤。",
+                discussCloseSchema(), List.of("seq", "summary")));
+        defs.add(def("execute_step", "同步执行一个任务型小流程（产出登记为交付物）：阻塞到完成，产出直接回到你手里，当场消化再决定下一步；失败原因也直接返回——立即决策重试/换路/跳过。instruction 必须包含该步的 acceptance 验收口径；执行 agent 遇到疑问会通过 ask_peer 向对应角色求助，问答留档。",
                 executeStepSchema(), List.of("name", "agent", "instruction")));
         defs.add(def("skip_step", "跳过某个未执行的小流程，必须写明理由（留档，用户可见）。",
                 skipStepSchema(), List.of("seq", "reason")));
@@ -356,6 +360,10 @@ public class OrchestrationTools {
         return null;
     }
 
+    /**
+     * 发起讨论（主席模型）：串行发言（每人读全部已有发言再开口），发言全文同步回流主控。
+     * 讨论步保持 EXECUTING——由主控以主席身份决定 discuss_more 追加/@定向 或 discuss_close 收口。
+     */
     private Tool discuss() {
         return tool("discuss", req -> {
             String name = str(req.input().get("name"));
@@ -365,27 +373,11 @@ public class OrchestrationTools {
             if (name.isBlank() || topic.isBlank() || participants.isEmpty()) {
                 return ToolResult.of(Map.of("ok", false, "message", "name/topic/participants 必填"));
             }
-            // 三方编制：讨论最少三人——PM（你）必须主持，其余覆盖发起方与目的方。
-            // participants 由主控填目的方等参与方（≥2），PM 自动加入发言与汇总
-            List<String> roster = new ArrayList<>(participants);
-            if (!roster.contains("project_manager")) {
-                roster.add("project_manager");
-            }
-            if (roster.size() < 3) {
-                return ToolResult.of(Map.of("ok", false, "message",
-                        "讨论最少三方（PM 主持 + 发起方 + 目的方）：participants 至少 2 个角色，"
-                                + "按问题域拉能解答的人（需求→product_analyst，架构→architect，实现→developer）"));
-            }
-            String badAgents = checkAgents(roster);
-            if (badAgents == null) {
-                badAgents = checkAgents(List.of(orDefault(str(req.input().get("summarizer")), "project_manager")));
-            }
+            String badAgents = checkAgents(participants);
             if (badAgents != null) {
                 return ToolResult.of(Map.of("ok", false, "message", badAgents));
             }
-            int rounds = parseInt(req.input().get("rounds"), 0);
-            String summarizer = orDefault(str(req.input().get("summarizer")), "project_manager");
-            StageStep step = nextStep(name, StepType.DISCUSS, summarizer, roster, topic);
+            StageStep step = nextStep(name, StepType.DISCUSS, "project_manager", participants, topic);
             List<String> codes = req.input().get("requirement_codes") instanceof List<?> rl
                     ? rl.stream().map(String::valueOf).filter(c -> !c.isBlank()).toList() : List.of();
             if (codes.isEmpty()) {
@@ -396,9 +388,98 @@ public class OrchestrationTools {
                 step = step.withRequirementCodes(codes);
             }
             long id = stepRepo.insert(step);
-            discussionEngine.submit(step.withId(id), brief(topic), rounds, summarizer);
+            StageStep exec = step.withId(id);
+            stepRepo.updateStatus(exec.withStatus(StepStatus.EXECUTING));
+            try {
+                // 串行发言：前一个发言，后一个能看到并补充；无超时，做完为止
+                String transcript = discussionEngine.runDiscussion(exec, brief(topic), participants, null);
+                return ToolResult.of(Map.of("ok", true, "seq", exec.seq(),
+                        "speeches", transcript,
+                        "message", "第一轮发言完成（" + participants.size() + " 人串行）。你是讨论主席："
+                                + "观点够了用 discuss_close(你的主席总结) 收口；不够用 discuss_more 追加"
+                                + "（participants 传多人=再来一轮，传一人=@定向回答某个问题）。"
+                                + "讨论未收口前不要推进其他步骤。"));
+            } catch (DiscussionEngine.UserInterrupted ui) {
+                discussionEngine.markInterrupted(exec);
+                return ToolResult.of(Map.of("ok", false, "seq", exec.seq(),
+                        "message", "用户已终止本讨论。请直接进入下一步，不要重试。"));
+            } catch (Exception e) {
+                stepRepo.updateStatus(exec.withError(TaskRunner.rootMessage(e)));
+                return ToolResult.of(Map.of("ok", false, "seq", exec.seq(),
+                        "message", "讨论失败: " + TaskRunner.rootMessage(e) + "——可重试或调整参会人"));
+            }
+        });
+    }
+
+    /**
+     * 追加讨论发言（主席权柄）：participants 传多人=再来一轮串行发言；
+     * 传一人=@定向——就 focusQuestion（用户的问题/某发言者提出的问题）让该角色回答。
+     * 被 @ 者读 DB 最新全量（必然含当前发言者结论与用户插话）。
+     */
+    private Tool discussMore() {
+        return tool("discuss_more", req -> {
+            long seq = parseLong(req.input().get("seq"), -1);
+            List<String> participants = req.input().get("participants") instanceof List<?> pl
+                    ? pl.stream().map(String::valueOf).filter(s -> !s.isBlank()).toList() : List.of();
+            String focus = str(req.input().get("question"));
+            if (seq < 0 || participants.isEmpty()) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "seq/participants 必填；participants 传多人=追加一轮，传一人=@定向（配 question）"));
+            }
+            StageStep step = stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .filter(s -> s.seq() == seq && s.stepType() == StepType.DISCUSS)
+                    .findFirst().orElse(null);
+            if (step == null) {
+                return ToolResult.of(Map.of("ok", false, "message", "讨论步不存在: seq=" + seq));
+            }
+            if (step.status() != StepStatus.EXECUTING) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "讨论已收口（" + step.status() + "），不能追加发言；需要新讨论就重新 discuss 发起"));
+            }
+            String badAgents = checkAgents(participants);
+            if (badAgents != null) {
+                return ToolResult.of(Map.of("ok", false, "message", badAgents));
+            }
+            try {
+                String transcript = discussionEngine.runDiscussion(step, brief(step.instruction()),
+                        participants, focus.isBlank() ? null : focus);
+                return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
+                        "speeches", transcript,
+                        "message", "追加发言完成。继续以主席身份判断：discuss_more 再追加，或 discuss_close 收口。"));
+            } catch (DiscussionEngine.UserInterrupted ui) {
+                discussionEngine.markInterrupted(step);
+                return ToolResult.of(Map.of("ok", false, "seq", step.seq(),
+                        "message", "用户已终止本讨论。请直接进入下一步，不要重试。"));
+            } catch (Exception e) {
+                stepRepo.updateStatus(step.withError(TaskRunner.rootMessage(e)));
+                return ToolResult.of(Map.of("ok", false, "seq", step.seq(),
+                        "message", "追加发言失败: " + TaskRunner.rootMessage(e)));
+            }
+        });
+    }
+
+    /** 主席收口：主控给出总结，纪要（各方观点+主席总结）落档 DONE。 */
+    private Tool discussClose() {
+        return tool("discuss_close", req -> {
+            long seq = parseLong(req.input().get("seq"), -1);
+            String summary = str(req.input().get("summary"));
+            if (seq < 0 || summary.isBlank()) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "seq/summary 必填——summary 是你的主席总结（共识/分歧/待办/OPEN_QUESTION）"));
+            }
+            StageStep step = stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .filter(s -> s.seq() == seq && s.stepType() == StepType.DISCUSS)
+                    .findFirst().orElse(null);
+            if (step == null) {
+                return ToolResult.of(Map.of("ok", false, "message", "讨论步不存在: seq=" + seq));
+            }
+            if (step.status() != StepStatus.EXECUTING) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "讨论不在进行中（" + step.status() + "），无需收口"));
+            }
+            discussionEngine.closeDiscussion(step, summary);
             return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
-                    "message", "讨论已发起（" + roster.size() + " 人含 PM 主持，后台进行中），完成后结果进黑板"));
+                    "message", "讨论已收口落档（纪要=各方观点+你的主席总结，已进留档与交付物索引）。继续推进。"));
         });
     }
 
@@ -456,11 +537,18 @@ public class OrchestrationTools {
                     StepStatus.PLANNED, question, null, null, null, null, null, null,
                     null, null, null, null, null, codes);
             long supportId = stepRepo.insert(support);
-            peerConsult.askStageAsync(launch.withId(launchId), support.withId(supportId),
-                    targetAgent, stage, question, brief(question));
-            return ToolResult.of(Map.of("ok", true, "seq", launch.seq(),
-                    "message", "已向 " + targetStage + " 阶段的 " + targetAgent + " 发起支援请求（后台处理中），"
-                            + "答复后进黑板与对话流，问答双落文档"));
+            try {
+                // 同步直答（无超时）：答案直接回到你手里
+                String answer = peerConsult.askStageSync(launch.withId(launchId), support.withId(supportId),
+                        targetAgent, stage, question, brief(question));
+                String briefAns = answer.length() > 1200 ? answer.substring(0, 1200) + "…(全文已留档)" : answer;
+                return ToolResult.of(Map.of("ok", true, "seq", launch.seq(),
+                        "answer", briefAns,
+                        "message", targetAgent + " 已答复（问答双落文档）。消化答案后继续推进。"));
+            } catch (Exception e) {
+                return ToolResult.of(Map.of("ok", false, "seq", launch.seq(),
+                        "message", "跨阶段求助失败: " + TaskRunner.rootMessage(e) + "——可重试或换路"));
+            }
         });
     }
 
@@ -522,10 +610,23 @@ public class OrchestrationTools {
                         step.requirementCodes());
             }
             long id = stepRepo.insert(step);
-            taskRunner.submit(step.withId(id), brief(""));
-            return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
-                    "message", "任务已派发给 " + agent + "（后台执行中，8 分钟超时），完成后结果进黑板"
-                            + (codes.isEmpty() ? "" : "；关联需求 " + String.join("、", codes))));
+            StageStep exec = step.withId(id);
+            try {
+                // 同步执行（无超时）：产出直接回到你手里，当场消化再决定下一步
+                String output = taskRunner.runSync(exec, brief(""));
+                String briefOut = output.length() > 1500 ? output.substring(0, 1500) + "…(全文已留档)" : output;
+                return ToolResult.of(Map.of("ok", true, "seq", exec.seq(),
+                        "output", briefOut,
+                        "message", "任务完成，产出已留档（交付物+文档）。消化产出后继续推进；"
+                                + "若产出不合格可重发 execute_step 重做该步。"));
+            } catch (DiscussionEngine.UserInterrupted ui) {
+                return ToolResult.of(Map.of("ok", false, "seq", exec.seq(),
+                        "message", "用户已终止本任务。请直接进入下一步，不要重试。"));
+            } catch (Exception e) {
+                return ToolResult.of(Map.of("ok", false, "seq", exec.seq(),
+                        "message", "任务失败: " + TaskRunner.rootMessage(e)
+                                + "——立即决策：重试（再调一次）、换路（declare_deviation）或跳过（skip_step）"));
+            }
         });
     }
 
@@ -772,6 +873,8 @@ public class OrchestrationTools {
         return switch (name) {
             case "plan_steps" -> planSteps();
             case "discuss" -> discuss();
+            case "discuss_more" -> discussMore();
+            case "discuss_close" -> discussClose();
             case "execute_step" -> executeStep();
             case "skip_step" -> skipStep();
             case "declare_deviation" -> declareDeviation();
@@ -842,11 +945,24 @@ public class OrchestrationTools {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("name", str("讨论名"));
         props.put("topic", str("讨论议题"));
-        props.put("participants", arr(str("参与方 agent 英文名名单（至少 2 个：按问题域拉能解答的目的方，如需求会诊 [\"product_analyst\",\"architect\"]；PM 会自动加入主持与汇总，不用写；禁用中文显示名）")));
-        props.put("rounds", str("互见讨论轮数，默认 0（只收集一轮独立观点）"));
-        props.put("summarizer", str("汇总人 agent 英文名，默认 project_manager（你主持并汇总）"));
+        props.put("participants", arr(str("参与方 agent 英文名名单（按问题域拉人，如需求会诊 [\"product_analyst\",\"architect\"]；串行发言每人可见前人观点；禁用中文显示名）")));
         props.put("requirement_codes", arr(str("本次讨论涉及的需求编号（如 [\"REQ-001\",\"REQ-003\"]）；讨论为了哪个需求就关联哪个，需求看板据此统计每个需求被讨论的次数")));
         return schema(props, List.of("name", "topic", "participants"));
+    }
+
+    private Map<String, Object> discussMoreSchema() {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("seq", str("要追加发言的讨论步 seq（discuss 返回的 seq）"));
+        props.put("participants", arr(str("本轮发言人 agent 英文名：传多人=再来一轮串行发言；传一人=@定向回答 question")));
+        props.put("question", str("@定向时要回答的具体问题（用户问的/某发言者提出的）；普通追加轮可省"));
+        return schema(props, List.of("seq", "participants"));
+    }
+
+    private Map<String, Object> discussCloseSchema() {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("seq", str("要收口的讨论步 seq"));
+        props.put("summary", str("你的主席总结：达成的共识（分点）/仍存的分歧/待办与责任方/需要用户澄清的问题（OPEN_QUESTION，没有写无）"));
+        return schema(props, List.of("seq", "summary"));
     }
 
     private Map<String, Object> executeStepSchema() {

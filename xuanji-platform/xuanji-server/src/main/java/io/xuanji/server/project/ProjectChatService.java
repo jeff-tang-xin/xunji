@@ -627,9 +627,9 @@ public class ProjectChatService {
     private SseEmitter startChat(AgentSpec spec, String query, String audit,
                                  LoginUser user, String wsId, String nodeId, String nodeType, String stage,
                                  List<AgentMessage.Attachment> attachments) {
-        // 单轮上限 5 分钟：阶段对话常带多轮工具调用（实测查数据源核实需求现状即耗时 >2 分钟），
-        // 原 120s 会在 tool.result 之后被切断，产出停在半截且无 stage.finish。
-        SseEmitter emitter = new SseEmitter(300_000L);
+        // 单轮上限 30 分钟（2026-10-17 同步化）：主控工具调用内同步等讨论/任务做完（无超时），
+        // 单请求可达 20 分钟+；原 300s 会把还在跑的对话掐断，产出停在半截且无 stage.finish。
+        SseEmitter emitter = new SseEmitter(1_800_000L);
         chatExecutor.submit(() -> {
             AgentHandle handle = null;
             AtomicReference<String> finalText = new AtomicReference<>();

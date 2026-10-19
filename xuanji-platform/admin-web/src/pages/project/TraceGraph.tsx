@@ -174,7 +174,7 @@ export function TraceGraph({ data, onOpenStep }: { data: TraceGraphData; onOpenS
                 const live = n.s.status === 'EXECUTING' || n.s.status === 'WAITING'
                 return (
                   <g key={`${n.s.stage}-${n.s.iteration}-${n.s.seq}`} onClick={() => onOpenStep(n.s)} style={{ cursor: 'pointer' }}>
-                    <title>{`${n.s.name}\n${n.s.status}${n.s.verified_by === 'tool' ? ' · 机器验证' : n.s.verified_by === 'human' ? ' · 人确认' : ''}${n.s.output_summary ? '\n' + n.s.output_summary.slice(0, 100) : ''}`}</title>
+                    <title>{`${n.s.name}\n${n.s.status}${n.s.verified_by === 'tool' ? ' · 机器验证' : n.s.verified_by === 'human' ? ' · 人确认' : ''}${n.s.error ? '\n❌ ' + n.s.error.slice(0, 120) : ''}${n.s.output_summary ? '\n' + n.s.output_summary.slice(0, 100) : ''}`}</title>
                     {live && (
                       <circle cx={n.x} cy={n.y} r={7} fill="none" stroke={c} strokeWidth={1.5}>
                         <animate attributeName="r" values="7;13;7" dur="1.6s" repeatCount="indefinite" />
@@ -207,7 +207,7 @@ export function TraceGraph({ data, onOpenStep }: { data: TraceGraphData; onOpenS
             </text>
             {unlinkedNodes.map((n) => (
               <g key={`${n.s.stage}-${n.s.iteration}-${n.s.seq}`} onClick={() => onOpenStep(n.s)} style={{ cursor: 'pointer' }}>
-                <title>{`${n.s.name}\n${n.s.status}`}</title>
+                <title>{`${n.s.name}\n${n.s.status}${n.s.error ? '\n❌ ' + n.s.error.slice(0, 120) : ''}`}</title>
                 <circle cx={n.x} cy={n.y + 6} r={6} fill={nodeColor(n.s)} stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="2 2" />
               </g>
             ))}
