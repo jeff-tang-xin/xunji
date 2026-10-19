@@ -147,7 +147,7 @@ export default function ProjectFiles({ projectId, refreshKey = 0 }: { projectId:
   }, [entries, search])
 
   /** 平铺 entries → antd Tree 数据：同层内目录在前、文件在后（树级形态，与 AI-Claw 一致） */
-  const { treeData, allDirKeys, topDirKeys } = useMemo(() => {
+  const { treeData, allDirKeys } = useMemo(() => {
     const root: DataNode[] = []
     const dirIndex = new Map<string, DataNode[]>()
     const dirKeys: string[] = []
@@ -183,14 +183,15 @@ export default function ProjectFiles({ projectId, refreshKey = 0 }: { projectId:
     return {
       treeData: root,
       allDirKeys: dirKeys,
-      topDirKeys: dirKeys.filter((k) => !k.includes('/')),
     }
   }, [filtered])
 
-  // 搜索时全展开（过滤后的树直接看全部命中），清空搜索回到默认只展开第一层
+  // 默认全展开（用户反馈「文件要列出所有内容」）：文件藏在 3-4 层深处（docs/{stage}/iter{n}/），
+  // 默认全展开（用户反馈「文件要列出所有内容」）：文件藏在 3-4 层深处（docs/{stage}/iter{n}/），
+  // 只展开顶层的话用户要点穿层层目录才见文件；项目条目量级（<100）全展开无压力
   useEffect(() => {
-    setExpandedKeys(search.trim() ? allDirKeys : topDirKeys)
-  }, [search, allDirKeys, topDirKeys])
+    setExpandedKeys(allDirKeys)
+  }, [allDirKeys])
 
   const selectedEntry = selected ? entries.find((e) => e.path === selected) : undefined
 

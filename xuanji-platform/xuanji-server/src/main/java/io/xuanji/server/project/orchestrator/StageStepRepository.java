@@ -103,6 +103,27 @@ public class StageStepRepository {
         }
     }
 
+    /**
+     * 重拾已销账步骤（重规划复用，2026-10-19 用户反馈「相同节点可以重拾 不能直接创建」）：
+     * 同名同 agent 的 FAILED/SKIPPED 行重置为 PLANNED——seq 保持旧值（追溯图节点
+     * key=stage-iteration-seq 不变，原地从红转灰再转绿，不再红绿两份并存误导），
+     * 执行痕迹（产出/错误/跳过原因/偏差/验收结果）全清，规划内容（instruction/
+     * acceptance/requirement_codes）按新规划覆盖。
+     *
+     * @return 是否命中重置（false=该行已不是 FAILED/SKIPPED，调用方走新建）
+     */
+    public boolean resetForReuse(long id, String instruction, String acceptanceJson, java.util.List<String> reqCodes) {
+        return jdbc.update("""
+                UPDATE project_stage_step SET status = 'PLANNED', instruction = ?,
+                    output_summary = NULL, output_full = NULL, artifact_id = NULL,
+                    skip_reason = NULL, error = NULL, started_at = NULL, finished_at = NULL,
+                    verified_by = 'self', acceptance_json = CAST(? AS jsonb),
+                    deviation_json = NULL, requirement_codes = CAST(? AS jsonb)
+                WHERE id = ? AND status IN ('FAILED', 'SKIPPED')
+                """, instruction, acceptanceJson,
+                StageStep.joinRequirementCodes(reqCodes), id) > 0;
+    }
+
     public long insert(StageStep s) {
         // RETURNING id 同连接同语句取主键——原先 INSERT 后另查 currval 是两次独立调用，
         // 无事务绑定时可能拿到不同连接（currval 是会话级），并发下报错或拿错 id

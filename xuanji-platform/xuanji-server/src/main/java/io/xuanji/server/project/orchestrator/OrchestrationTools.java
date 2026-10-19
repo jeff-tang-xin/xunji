@@ -153,6 +153,14 @@ public class OrchestrationTools {
                         "intent_anchor 不能为空：用一段话锁定本阶段的全局意图与总体验收口径，后续每步执行都会对照它防走偏"));
             }
             List<StageStep> rows = new ArrayList<>();
+            // 重拾复用（2026-10-19 用户反馈「相同节点可以重拾 不能直接创建」）：同名同类型同 agent
+            // 的 FAILED/SKIPPED 旧步骤原地重置（seq 不变，追溯图节点原地从红转灰再转绿），
+            // 不再新建——否则失败重做会在图上留一堆红色旧节点 + 灰色新节点并存，吓人且误导。
+            // DONE 行不复用（已交付不重做）；WAITING（等决策）不复用（该走决策答复）。
+            List<StageStep> settled = new ArrayList<>(stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .filter(s -> s.status() == StepStatus.FAILED || s.status() == StepStatus.SKIPPED)
+                    .toList());
+            int reused = 0;
             // seq 从已占用最大值顺延：已销账行（DONE/FAILED/SKIPPED）占住的 seq 不能复用，
             // 否则重规划撞 uk_pss_ws_stage_iter_seq 唯一键（收口死锁事故的帮凶之一）
             int seq = stepRepo.maxSeq(wsId, stage, iteration) + 1;
@@ -171,7 +179,6 @@ public class OrchestrationTools {
                     return ToolResult.of(Map.of("ok", false, "message", bad));
                 }
                 String name = str(m.get("name"));
-                StepType type = "DISCUSS".equalsIgnoreCase(str(m.get("type"))) ? StepType.DISCUSS : StepType.TASK;
                 @SuppressWarnings("unchecked")
                 List<String> participants = m.get("participants") instanceof List<?> pl
                         ? pl.stream().map(String::valueOf).toList() : List.of();
@@ -181,6 +188,19 @@ public class OrchestrationTools {
                 @SuppressWarnings("unchecked")
                 List<String> reqCodes = m.get("requirement_codes") instanceof List<?> rl
                         ? rl.stream().map(String::valueOf).toList() : List.of();
+                // 重拾命中：同名同类型同 agent 的 FAILED/SKIPPED 行原地重置（保持旧 seq），
+                // 规划内容按新规划覆盖；一行只复用一次（同名多行时逐个消费）
+                StepType type = "DISCUSS".equalsIgnoreCase(str(m.get("type"))) ? StepType.DISCUSS : StepType.TASK;
+                StageStep match = settled.stream()
+                        .filter(s -> s.name().equals(name) && s.stepType() == type
+                                && s.agent() != null && s.agent().equals(rowAgent))
+                        .findFirst().orElse(null);
+                if (match != null) {
+                    settled.remove(match);
+                    stepRepo.resetForReuse(match.id(), str(m.get("instruction")), acceptanceJson, reqCodes);
+                    reused++;
+                    continue;
+                }
                 rows.add(new StageStep(null, wsId, stage, iteration, seq++, name, type,
                         str(m.get("agent")), participants, StepStatus.PLANNED,
                         str(m.get("instruction")), null, null, null, null, null, null, null, null,
@@ -189,7 +209,9 @@ public class OrchestrationTools {
             stepRepo.replacePlanned(wsId, stage, iteration, rows);
             stepRepo.saveAnchor(wsId, stage, iteration, anchor);
             return ToolResult.of(Map.of("ok", true, "planned", rows.size(),
-                    "message", "规划已登记，共 " + rows.size() + " 个小流程；意图锚已锁定"));
+                    "message", "规划已登记，共 " + (rows.size() + reused) + " 个小流程"
+                            + (reused > 0 ? "（其中 " + reused + " 个重拾此前失败/跳过的同名步骤，原地重试）" : "")
+                            + "；意图锚已锁定"));
         });
     }
 

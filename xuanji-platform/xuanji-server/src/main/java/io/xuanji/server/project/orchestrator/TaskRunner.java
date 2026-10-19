@@ -153,12 +153,24 @@ public class TaskRunner {
                     pending.append("\n🔧 调用 ").append(tool).append(" …\n");
                     flush.accept("now");
                 }
+            } else if ("tool.result".equals(type)) {
+                // 工具执行结果帧：轨迹里只有「调用 …」没有结果的话，回放时看不出工具成败
+                String tool = evt.meta() == null ? "" : String.valueOf(evt.meta().getOrDefault("tool", ""));
+                if (!tool.isBlank()) {
+                    boolean ok = !"ERROR".equals(String.valueOf(evt.meta() == null ? "" : evt.meta().getOrDefault("state", "")));
+                    pending.append(ok ? "✅ " : "❌ ").append(tool).append(ok ? " 完成\n" : " 失败\n");
+                    flush.accept("now");
+                }
             }
         };
         try {
             // 挂 ask_peer：执行中遇到需求/架构问题可 @对应方解答（三方结构，问答留档）——
             // 讨论式开发核心：执行 agent 不清楚就问，禁止靠猜
-            AgentSpec base = agentNodes.buildSpecByAgentName(step.agent(), null);
+            // 四参重载传 workspaceId：启用内置文件工具（agent_config.builtin_tools_json 白名单，
+            // developer=fs.read+fs.write）——任务执行是「写盘交付」主路径，不启用的话 agent 想写
+            // 文件没工具，只能嘴上说「已创建」实际目录是空的（2026-10-19 用户反馈「AI 总是报没有工具」实锤）。
+            // 白名单现无 shell（DB 实况 5 agent 均 fs.*），无 ASK 挂死风险；若未来配 shell 需先做无人值守批准通道
+            AgentSpec base = agentNodes.buildSpecByAgentName(step.agent(), null, null, step.workspaceId());
             // 挂运维工具三件套（ops_remote_shell/db_query/db_dml）：地址与凭证不暴露给 AI，
             // 工具参数只收引用 ID（server-1/db-1），连接由 OpsConnectionManager 平台侧代理——
             // 用不用由 AI 按任务决定（部署/排障任务才会调）
