@@ -75,13 +75,7 @@ public class StageStepRepository {
                 .stream().findFirst();
     }
 
-    /** 本项目是否存在任何台账记录——新旧内核双轨判据。 */
-    public boolean hasAnyStep(String workspaceId) {
-        Boolean has = jdbc.queryForObject(
-                "SELECT EXISTS(SELECT 1 FROM project_stage_step WHERE workspace_id = ?)",
-                Boolean.class, workspaceId);
-        return Boolean.TRUE.equals(has);
-    }
+    
 
     /** 是否存在活跃（执行中/等待用户）步骤——收口校验与状态推导用。 */
     public boolean hasActiveStep(String workspaceId, String stage, int iteration) {

@@ -40,7 +40,6 @@ import {
 } from '@ant-design/icons'
 import { apiJson } from '../api/client'
 import { EXEC_LIVE_STATES, ProjectDetailData, ProjectRow, SHOW_TEMPLATE_ENTRY, StageExecution, fmtDate, projectStatusColor, stageLabel } from './project/types'
-import { ArtifactDrawer } from './project/ArtifactDrawer'
 import { CreateProjectModal } from './project/CreateProjectModal'
 import ProjectFiles from './project/ProjectFiles'
 import { StageChatPanel } from './project/StageChatPanel'
@@ -135,7 +134,6 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
 const [rightTab, setRightTab] = useState('trace')
 // 决策答复的前端自动续跑已下线：answer 端点置 DONE 后由后端 wakeMaster 直接唤醒主控
 //（答复内容进唤醒消息），前端经会话事件总线实时回显——与任务/讨论落板唤醒同一条后端链路。
-  const [artifactDrawer, setArtifactDrawer] = useState(false)
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -180,13 +178,19 @@ const [rightTab, setRightTab] = useState('trace')
   // 项目状态实时推送（SSE）：步骤落终态/决策答复/需求确认 → 静默刷新对应视图。
   // 后端在状态落定点 publish（TaskRunner/DiscussionEngine/DecisionSettleService/OrchestrationTools），
   // 在线前端收到即刷新，不再「状态变了要手动点刷新」；离线时数据在库里，重开页面拉全量兜底。
-  const [reqTick, setReqTick] = useState(0)
+  // 数据版本号：任何状态落定事件 +1，驱动追溯面板/文件树重拉（审计修复 2026-10-19：
+  // 此前只有 requirement.updated 驱动 TracePanel，步骤落终态后追溯图不更新——最大不实时缺口）
+  const [dataTick, setDataTick] = useState(0)
   useEffect(() => {
     const es = new EventSource(`/api/projects/${id}/events`)
-    const refresh = () => { void loadExec(); void load(true) }
-    es.addEventListener('step.updated', refresh)
-    es.addEventListener('decision.answered', refresh)
-    es.addEventListener('requirement.updated', () => { setReqTick((x) => x + 1); refresh() })
+    const refresh = () => { setDataTick((x) => x + 1); void loadExec(); void load(true) }
+    es.addEventListener('step.updated', refresh)        // 步骤落终态（含决策步创建即推）
+    es.addEventListener('decision.answered', refresh)   // 决策答复闭环
+    es.addEventListener('requirement.updated', refresh) // 需求落库/确认/推进
+    es.addEventListener('artifact.updated', refresh)    // 留档/交付物落档（CHATLOG 等）
+    // 讨论发言增量（轻事件）：只刷 exec——发言全文经 exec.steps 增量进聊天框（StageChatPanel 既有机制），
+    // 不动 dataTick：发言不是状态变化，不必重拉 trace/详情全量
+    es.addEventListener('speech.appended', () => { void loadExec() })
     return () => es.close()
   }, [id, load, loadExec])
 
@@ -202,7 +206,6 @@ const [rightTab, setRightTab] = useState('trace')
   }
 
   const currentStage = detail.current_stage || 'REQUIREMENT'
-
 
   /** 留档：过程性文档（讨论纪要/求助问答/决策记录/对话留档），与交付物分开浏览 */
   const archives = detail.artifacts.filter((a) => a.kind === 'DOC' || a.kind === 'DECISION')
@@ -309,13 +312,13 @@ const [rightTab, setRightTab] = useState('trace')
                 key: 'trace',
                 label: '追溯',
                 children: tabBody(
-                  <TracePanel projectId={id} refreshKey={reqTick} exec={exec} artifacts={detail?.artifacts || []} onRefresh={() => { void load(true); void loadExec() }} />
+                  <TracePanel projectId={id} refreshKey={dataTick} exec={exec} artifacts={detail?.artifacts || []} onRefresh={() => { void load(true); void loadExec() }} />
                 ),
               },
               {
                 key: 'files',
                 label: '文件',
-                children: tabBody(<ProjectFiles projectId={id} />),
+                children: tabBody(<ProjectFiles projectId={id} refreshKey={dataTick} />),
               },
               {
                 key: 'archives',
@@ -360,13 +363,7 @@ const [rightTab, setRightTab] = useState('trace')
       >
         {viewArtifact && <MarkdownView text={viewArtifact.content_md} />}
       </Drawer>
-      <ArtifactDrawer
-        open={artifactDrawer}
-        projectId={id}
-        nodes={detail.nodes}
-        onClose={() => setArtifactDrawer(false)}
-        onSaved={() => void load()}
-      />
+
     </div>
   )
 }

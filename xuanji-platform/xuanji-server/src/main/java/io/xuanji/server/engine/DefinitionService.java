@@ -50,13 +50,18 @@ public class DefinitionService {
 
     /** 保存草稿（新建）：归属 = 创建者组织 + 创建者（Q13 数据权限过滤基线） */
     public long create(String name, String description, String canvasJson, LoginUser user) {
+        return create(name, description, canvasJson, user, "user");
+    }
+
+    /** source：user=用户自建 / stage_plan=项目阶段规划编译产物（V37 起列表过滤，项目/工作区流程分离）。 */
+    public long create(String name, String description, String canvasJson, LoginUser user, String source) {
         // 先解析一遍：草稿也必须是合法定义（编辑器保存即校验）
         WorkflowDefinition def = CanvasJsonParser.parse(canvasJson);
         if (!def.name().equals(name)) {
             // 以 meta.name 为准，保持一致
             name = def.name();
         }
-        return repo.insertDraft(name, description, canvasJson, user.orgId(), user.username());
+        return repo.insertDraft(name, description, canvasJson, user.orgId(), user.username(), source);
     }
 
     /** 更新草稿（管理员或创建者本人） */

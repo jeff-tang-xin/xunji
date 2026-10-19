@@ -59,7 +59,9 @@ public class StageDocStore {
             }
             Path root = Paths.get(rootPath).normalize();
             String fileName = seq + "-" + kind + "-" + safeName(title) + ".md";
-            String rel = "docs/" + stage + "/iter" + iteration + "/" + fileName;
+            // 按类型分目录（2026-10-19 用户反馈：iter 目录里 CHATLOG 与 TASK/DISCUSS 混排难找）——
+            // chatlog/task/discuss/decision/consult 各归其位；存量文件路径已落库不受影响
+            String rel = "docs/" + stage + "/iter" + iteration + "/" + kind.toLowerCase() + "/" + fileName;
             Path target = root.resolve(rel).normalize();
             if (!target.startsWith(root)) {
                 log.warn("文档落盘拒绝（路径越界）: ws={} rel={}", wsId, rel);

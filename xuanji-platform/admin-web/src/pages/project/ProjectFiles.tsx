@@ -83,7 +83,7 @@ function fileIcon(path: string): ReactNode {
   }
 }
 
-export default function ProjectFiles({ projectId }: { projectId: string }) {
+export default function ProjectFiles({ projectId, refreshKey = 0 }: { projectId: string; refreshKey?: number }) {
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -107,9 +107,11 @@ export default function ProjectFiles({ projectId }: { projectId: string }) {
     }
   }, [projectId])
 
+  // refreshKey（后端状态事件计数）驱动重拉：agent 写文件/任务产出落盘后文件树自动更新，
+  // 不再「跑完任务文件 tab 还是旧的，要手动点刷新」（审计修复 2026-10-19）
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, refreshKey])
 
   const openFile = async (path: string) => {
     setSelected(path)

@@ -30,6 +30,7 @@ public class RequirementRepository {
             rs.getString("status"),
             rs.getString("depends_on"),
             rs.getString("source"),
+            rs.getString("parent_code"),
             rs.getString("created_by"),
             rs.getTimestamp("created_at") == null ? null : rs.getTimestamp("created_at").toLocalDateTime(),
             rs.getTimestamp("updated_at") == null ? null : rs.getTimestamp("updated_at").toLocalDateTime());
@@ -42,7 +43,7 @@ public class RequirementRepository {
 
     public record Requirement(Long id, String workspaceId, String code, String title,
                               String description, String acceptanceJson, String status,
-                              String dependsOn, String source, String createdBy,
+                              String dependsOn, String source, String parentCode, String createdBy,
                               java.time.LocalDateTime createdAt, java.time.LocalDateTime updatedAt) {
         public boolean active() {
             return "IN_PROGRESS".equals(status) || "CONFIRMED".equals(status);
@@ -52,7 +53,7 @@ public class RequirementRepository {
     public List<Requirement> findByWorkspace(String workspaceId) {
         return jdbc.query("""
                 SELECT id, workspace_id, code, title, description, acceptance_json::text,
-                       status, depends_on::text, source, created_by, created_at, updated_at
+                       status, depends_on::text, source, parent_code, created_by, created_at, updated_at
                 FROM project_requirement WHERE workspace_id = ? ORDER BY code
                 """, MAPPER, workspaceId);
     }
@@ -60,7 +61,7 @@ public class RequirementRepository {
     public Optional<Requirement> findByCode(String workspaceId, String code) {
         List<Requirement> rows = jdbc.query("""
                 SELECT id, workspace_id, code, title, description, acceptance_json::text,
-                       status, depends_on::text, source, created_by, created_at, updated_at
+                       status, depends_on::text, source, parent_code, created_by, created_at, updated_at
                 FROM project_requirement WHERE workspace_id = ? AND code = ?
                 """, MAPPER, workspaceId, code);
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
@@ -70,11 +71,11 @@ public class RequirementRepository {
     public void insert(Requirement r) {
         jdbc.update("""
                 INSERT INTO project_requirement (workspace_id, code, title, description,
-                    acceptance_json, status, depends_on, source, created_by)
-                VALUES (?, ?, ?, ?, CAST(? AS jsonb), ?, CAST(? AS jsonb), ?, ?)
+                    acceptance_json, status, depends_on, source, parent_code, created_by)
+                VALUES (?, ?, ?, ?, CAST(? AS jsonb), ?, CAST(? AS jsonb), ?, ?, ?)
                 """,
                 r.workspaceId(), r.code(), r.title(), r.description(),
-                r.acceptanceJson(), r.status(), r.dependsOn(), r.source(), r.createdBy());
+                r.acceptanceJson(), r.status(), r.dependsOn(), r.source(), r.parentCode(), r.createdBy());
     }
 
     /** 更新描述/验收/依赖——仅 PROPOSED 态可改（CONFIRMED 后改动走新 proposed 项，append-only）。 */

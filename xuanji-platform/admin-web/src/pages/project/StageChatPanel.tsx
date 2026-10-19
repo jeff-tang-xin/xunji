@@ -101,6 +101,15 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
   const [msgs, setMsgs] = useState<StageChatMsg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  /** 终止执行中的步骤（活跃步骤条就地终止）：后端 cancel 当前 LLM 调用，SKIPPED 留痕，主控进入下一步 */
+  const [terminating, setTerminating] = useState<number | null>(null)
+  const terminateStep = (seq: number) => {
+    setTerminating(seq)
+    apiJson<{ message?: string }>(`/api/projects/${projectId}/stage/step/${seq}/terminate`, 'POST')
+      .then((r) => message.success(r.message || '已终止'))
+      .catch((e: Error) => message.error(e.message))
+      .finally(() => setTerminating(null))
+  }
   // 流式期间的秒级重渲染驱动：状态行「已 Ns」靠它每秒刷新
   const [, setTick] = useState(0)
   const idRef = useRef(0)
@@ -718,27 +727,35 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
 
-      {/* 活跃步骤条：后台执行中的小流程实时可见（讨论已收集多少发言/任务跑多久），不再空等 */}
+      {/* 活跃步骤条：后台执行中的小流程实时可见（讨论已收集多少发言/任务跑多久），不再空等。
+          终止按钮就地可点（2026-10-19）：不想等不用开追溯面板找步骤，直接终止，主控跳到下一步 */}
       {(() => {
         const active = (exec?.steps || []).filter((s) => s.status === 'EXECUTING' || s.status === 'WAITING')
         if (active.length === 0) return null
         return (
           <div style={{ padding: '6px 10px', background: '#e6f4ff', borderRadius: 6, border: '1px solid #91caff' }}>
             {active.map((s) => (
-              <div key={s.id} style={{ fontSize: 12, lineHeight: '20px' }}>
-                <Tag color={STEP_STATUS_COLOR[s.status] || 'processing'} style={{ marginInlineEnd: 6 }}>
-                  {STEP_STATUS_LABEL[s.status] || s.status}
-                </Tag>
-                <Typography.Text style={{ fontSize: 12 }}>#{s.seq} {s.name}</Typography.Text>
-                {(s.participants || []).length > 0 && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {' '}（{(s.participants || []).join('、')}）
-                  </Typography.Text>
-                )}
-                {s.outputFull && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {' '}· 已收集 {s.outputFull.length} 字
-                  </Typography.Text>
+              <div key={s.id} style={{ fontSize: 12, lineHeight: '20px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <Tag color={STEP_STATUS_COLOR[s.status] || 'processing'} style={{ marginInlineEnd: 6 }}>
+                    {STEP_STATUS_LABEL[s.status] || s.status}
+                  </Tag>
+                  <Typography.Text style={{ fontSize: 12 }}>#{s.seq} {s.name}</Typography.Text>
+                  {(s.participants || []).length > 0 && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {' '}（{(s.participants || []).join('、')}）
+                    </Typography.Text>
+                  )}
+                  {s.outputFull && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {' '}· 已收集 {s.outputFull.length} 字
+                    </Typography.Text>
+                  )}
+                </span>
+                {s.status === 'EXECUTING' && (
+                  <Button size="small" type="text" danger style={{ fontSize: 12, flexShrink: 0 }}
+                    loading={terminating === s.seq}
+                    onClick={() => terminateStep(s.seq)}>终止</Button>
                 )}
               </div>
             ))}

@@ -195,11 +195,7 @@ public class ProjectRepository {
         return cnt != null && cnt > 0;
     }
 
-    public void deleteNodesByWorkspace(String workspaceId) {
-        jdbc.update("DELETE FROM project_work_node WHERE workspace_id = ?", workspaceId);
-    }
-
-    /* ---------- project_artifact ---------- */
+        /* ---------- project_artifact ---------- */
 
     public List<Map<String, Object>> findArtifactsByWorkspace(String workspaceId) {
         return jdbc.queryForList(
@@ -235,11 +231,7 @@ public class ProjectRepository {
                 filePath, workspaceId, nodeId);
     }
 
-    public void deleteArtifactsByWorkspace(String workspaceId) {
-        jdbc.update("DELETE FROM project_artifact WHERE workspace_id = ?", workspaceId);
-    }
-
-    /** 带阶段归属的留档登记（V27：左栏「本阶段资料」按 stage 归集）。 */
+        /** 带阶段归属的留档登记（V27：左栏「本阶段资料」按 stage 归集）。 */
     public void insertArtifact(String workspaceId, String nodeId, String kind, String name, String type,
                                String filePath, String contentMd, Integer version, String status,
                                String stage, String createdBy) {
@@ -259,48 +251,9 @@ public class ProjectRepository {
                     + "status, decided_by, decided_at, waived_by, waive_reason, created_at";
 
     /** PM 全局会话：一项目一条，重复写入只刷新 updated_at（会话密钥由调用方维护）。 */
-    public void upsertPmSession(String workspaceId, String agentName, String sessionKey) {
-        jdbc.update("INSERT INTO project_pm_session (workspace_id, agent_name, session_key) "
-                        + "VALUES (?, ?, ?) ON CONFLICT (workspace_id) DO UPDATE "
-                        + "SET agent_name = EXCLUDED.agent_name, session_key = EXCLUDED.session_key, "
-                        + "updated_at = now()",
-                workspaceId, agentName, sessionKey);
-    }
-
-    public List<Map<String, Object>> findPmSession(String workspaceId) {
-        return jdbc.queryForList("SELECT workspace_id, agent_name, session_key, created_at, updated_at "
-                + "FROM project_pm_session WHERE workspace_id = ?", workspaceId);
-    }
-
-    /** 阶段执行会话（同一 stage+iteration 一条；locked_at 非空即该阶段已结束不可再沟通）。 */
-    public List<Map<String, Object>> findStageSession(String workspaceId, String stage, int iteration) {
-        return jdbc.queryForList("SELECT id, workspace_id, stage, iteration, agent_name, session_key, "
-                + "locked_at, created_at, updated_at FROM project_stage_session "
-                + "WHERE workspace_id = ? AND stage = ? AND iteration = ?", workspaceId, stage, iteration);
-    }
-
-    public void upsertStageSession(String workspaceId, String stage, int iteration, String agentName) {
-        jdbc.update("INSERT INTO project_stage_session (workspace_id, stage, iteration, agent_name) "
-                        + "VALUES (?, ?, ?, ?) ON CONFLICT (workspace_id, stage, iteration) DO UPDATE "
-                        + "SET agent_name = EXCLUDED.agent_name, updated_at = now()",
-                workspaceId, stage, iteration, agentName);
-    }
-
-    /** 锁定阶段会话：幂等，已锁定则保留首次锁定时间（避免重复推进把时间刷没）。 */
-    public void lockStageSession(String workspaceId, String stage, int iteration) {
-        jdbc.update("INSERT INTO project_stage_session (workspace_id, stage, iteration, locked_at) "
-                        + "VALUES (?, ?, ?, now()) ON CONFLICT (workspace_id, stage, iteration) DO UPDATE "
-                        + "SET locked_at = COALESCE(project_stage_session.locked_at, now()), updated_at = now()",
-                workspaceId, stage, iteration);
-    }
-
-    public List<Map<String, Object>> findStageSessions(String workspaceId) {
-        return jdbc.queryForList("SELECT id, workspace_id, stage, iteration, agent_name, session_key, "
-                + "locked_at FROM project_stage_session WHERE workspace_id = ? ORDER BY stage, iteration",
-                workspaceId);
-    }
-
-    /** 登记 PM 阶段规划（PENDING），RETURNING id。 */
+            /** 阶段执行会话（同一 stage+iteration 一条；locked_at 非空即该阶段已结束不可再沟通）。 */
+            /** 锁定阶段会话：幂等，已锁定则保留首次锁定时间（避免重复推进把时间刷没）。 */
+            /** 登记 PM 阶段规划（PENDING），RETURNING id。 */
     public long insertStagePlan(String workspaceId, String stage, int iteration,
                                 String planJson, String deviation) {
         Long id = jdbc.queryForObject("INSERT INTO project_stage_plan (workspace_id, stage, iteration, "
@@ -333,12 +286,7 @@ public class ProjectRepository {
                 + "WHERE workspace_id = ? AND stage = ? ORDER BY iteration DESC, id DESC LIMIT 1", workspaceId, stage);
     }
 
-    public List<Map<String, Object>> findPendingStagePlans(String workspaceId) {
-        return jdbc.queryForList("SELECT " + STAGE_PLAN_COLS + " FROM project_stage_plan "
-                + "WHERE workspace_id = ? AND status = 'PENDING' ORDER BY id", workspaceId);
-    }
-
-    /** 审批规划（approve/reject 都走这里，驳回理由落库以便 PM 带理由重规划）。 */
+        /** 审批规划（approve/reject 都走这里，驳回理由落库以便 PM 带理由重规划）。 */
     public int decideStagePlan(long planId, String status, String decidedBy, String rejectReason) {
         return jdbc.update("UPDATE project_stage_plan SET status = ?, decided_by = ?, decided_at = now(), "
                         + "reject_reason = ? WHERE id = ? AND status = 'PENDING'",
@@ -413,13 +361,7 @@ public class ProjectRepository {
                 workspaceId, stage, capabilityJson, note, createdBy);
     }
 
-    public List<Map<String, Object>> findStageCapabilities(String workspaceId) {
-        return jdbc.queryForList("SELECT id, workspace_id, stage, capability_json::text AS capability_json, "
-                + "note, created_by, created_at, updated_at FROM project_stage_capability WHERE workspace_id = ?",
-                workspaceId);
-    }
-
-    public List<Map<String, Object>> findStageCapability(String workspaceId, String stage) {
+        public List<Map<String, Object>> findStageCapability(String workspaceId, String stage) {
         return jdbc.queryForList("SELECT id, workspace_id, stage, capability_json::text AS capability_json, "
                 + "note, created_by, created_at, updated_at FROM project_stage_capability "
                 + "WHERE workspace_id = ? AND stage = ?", workspaceId, stage);

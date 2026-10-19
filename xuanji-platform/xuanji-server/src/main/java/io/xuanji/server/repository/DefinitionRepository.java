@@ -25,10 +25,15 @@ public class DefinitionRepository {
 
     /** 插入草稿，RETURNING id。 */
     public long insertDraft(String name, String description, String canvasJson, Long orgId, String createdBy) {
+        return insertDraft(name, description, canvasJson, orgId, createdBy, "user");
+    }
+
+    /** source：user=用户自建（定义列表可见） / stage_plan=项目阶段规划编译产物（内部执行细节，列表过滤）。 */
+    public long insertDraft(String name, String description, String canvasJson, Long orgId, String createdBy, String source) {
         Long id = jdbc.queryForObject(
-                "INSERT INTO wf_definition (name, description, canvas_json, status, org_id, created_by) "
-                        + "VALUES (?, ?, ?::jsonb, 'DRAFT', ?, ?) RETURNING id",
-                Long.class, name, description, canvasJson, orgId, createdBy);
+                "INSERT INTO wf_definition (name, description, canvas_json, status, org_id, created_by, source) "
+                        + "VALUES (?, ?, ?::jsonb, 'DRAFT', ?, ?, ?) RETURNING id",
+                Long.class, name, description, canvasJson, orgId, createdBy, source);
         return id;
     }
 
@@ -92,9 +97,11 @@ public class DefinitionRepository {
 
     /** 数据权限过滤后的列表（whereClause/args 由 Service 经 DataScopeFilter 生成）。 */
     public List<Map<String, Object>> findByScope(String whereClause, Object[] args) {
+        // source='user'：项目阶段规划编译产物（stage_plan）是内部执行细节，不进工作流定义列表
+        //（项目流程与工作区流程分离，2026-10-19 审计结论）
         return jdbc.queryForList(
                 "SELECT id, name, description, current_version, status, org_id, created_by, updated_at "
-                        + "FROM wf_definition WHERE " + whereClause + " ORDER BY id",
+                        + "FROM wf_definition WHERE source = 'user' AND " + whereClause + " ORDER BY id",
                 args);
     }
 }

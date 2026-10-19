@@ -70,6 +70,10 @@ public class ProjectService {
     private ProjectTemplateService templateService;
     @Autowired
     private io.xuanji.server.project.orchestrator.RequirementRepository requirementRepo;
+    @org.springframework.beans.factory.annotation.Autowired
+    private io.xuanji.server.project.orchestrator.TestCaseRepository testCaseRepo;
+    @org.springframework.beans.factory.annotation.Autowired
+    private io.xuanji.server.project.orchestrator.BugRepository bugRepo;
     @Autowired
     private io.xuanji.server.project.orchestrator.TaskRunner taskRunner;
     @Autowired
@@ -99,7 +103,7 @@ public class ProjectService {
         String wsId = "ws_" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
         String rootPath = (String)(this.workspaceRoot.endsWith("/") || this.workspaceRoot.endsWith("\\") ? this.workspaceRoot : this.workspaceRoot + "/") + name;
         this.workspaceRepo.insertProject(wsId, name, rootPath, user.orgId(), user.username(), template, currentStage, mode);
-        this.repo.upsertPmSession(wsId, PM_AGENT, null);
+        
         this.createProjectDirectories(rootPath);
         // 不再自动生成规划草稿——规划由主控在对话里通过 plan_steps 发起（对话触发原则）：
         // 用户还没给需求就出现「批准规划」操作，是流程被人肉按钮驱动，违背 AI 驱动内核的设计。
@@ -155,7 +159,7 @@ public class ProjectService {
         result.put("template", template);
         result.put("project_mode", mode);
         result.put("current_stage", currentStage);
-        result.put("nodes", List.of());
+       
         result.put("plan_id", null);
         result.put("plan_status", "NONE");
         if (boundWf != null) {
@@ -189,58 +193,13 @@ public class ProjectService {
         String currentStage = this.resolveCurrentStage(ws.get("current_stage"), nodes);
         result.put("current_stage", currentStage);
         result.put("stages", this.buildStageViews(id, currentStage, nodes));
-        result.put("nodes", nodes);
         result.put("artifacts", artifacts);
         return result;
     }
 
-    public Map<String, Object> runNode(LoginUser user, String wsId, String nodeId) {
-        this.requireWorkspaceVisible(user, wsId);
-        Map<String, Object> node = this.requireNodeInWorkspace(wsId, nodeId);
-        List<String> dependsOn = parseStringList(objectMapper, node.get("depends_on"));
-        for (String depId : dependsOn) {
-            Map dep = this.repo.findNodeById(depId).stream().findFirst().orElse(null);
-            if (dep != null && "DONE".equals(dep.get("status"))) continue;
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.CONFLICT, "前置节点未完成，无法执行该节点（依赖节点: " + depId + "）");
-        }
-        this.repo.updateNodeStatus(nodeId, "RUNNING");
-        Long definitionId = this.parseWorkflowRefDefinitionId(node.get("workflow_ref"));
-        if (definitionId != null) {
-            Map<String, Object> input = this.parseInputRefs(node.get("input_refs"));
-            Map<String, Object> run = this.runService.createRunAsync(definitionId, null, input, "PROJECT_NODE");
-            LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
-            result.put("node_id", nodeId);
-            result.put("runId", run.get("runId"));
-            result.put("status", "RUNNING");
-            result.put("message", "节点已启动，阶段工作流异步执行中（runId=" + String.valueOf(run.get("runId")) + "）");
-            return result;
-        }
-        LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
-        result.put("node_id", nodeId);
-        result.put("status", "RUNNING");
-        result.put("message", "节点已启动（未绑定阶段工作流，仅置 RUNNING）");
-        return result;
-    }
-
+    
     @Transactional
-    public Map<String, Object> bindWorkflowRef(LoginUser user, String wsId, String nodeId, Long definitionId) {
-        this.requireWorkspaceVisible(user, wsId);
-        this.requireNodeInWorkspace(wsId, nodeId);
-        if (definitionId == null || definitionId <= 0L) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "definitionId is required");
-        }
-        if (!this.repo.isDefinitionPublished(definitionId)) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "工作流 #" + definitionId + " 不存在或未发布（须 status=PUBLISHED）");
-        }
-        String refJson = toJson(objectMapper, Map.of("definitionId", definitionId));
-        this.repo.updateNodeWorkflowRef(nodeId, refJson);
-        LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
-        result.put("node_id", nodeId);
-        result.put("workflow_ref", Map.of("definitionId", definitionId));
-        result.put("bound", true);
-        return result;
-    }
-
+    
     public void onNodeRunFinished(String wsId, String nodeId, String runStatus) {
         if (nodeId == null || nodeId.isBlank()) {
             log.warn("onNodeRunFinished: nodeId is blank, skip (wsId={} runStatus={})", (Object)wsId, (Object)runStatus);
@@ -299,49 +258,10 @@ public class ProjectService {
         return Map.of();
     }
 
-    public Map<String, Object> completeNode(LoginUser user, String wsId, String nodeId) {
-        this.requireWorkspaceVisible(user, wsId);
-        this.requireNodeInWorkspace(wsId, nodeId);
-        this.repo.updateNodeStatus(nodeId, "DONE");
-        return Map.of("node_id", nodeId, "status", "DONE");
-    }
-
-    public List<Map<String, Object>> nodeArtifacts(LoginUser user, String wsId, String nodeId) {
-        this.requireWorkspaceVisible(user, wsId);
-        this.requireNodeInWorkspace(wsId, nodeId);
-        return this.repo.findArtifactsByNode(nodeId);
-    }
-
+    
+    
     @Transactional
-    public Map<String, Object> addArtifact(LoginUser user, String wsId, String nodeId, Map<String, Object> body) {
-        Map node;
-        String name;
-        String kind;
-        this.requireWorkspaceVisible(user, wsId);
-        this.requireNodeInWorkspace(wsId, nodeId);
-        String string = kind = body.get("kind") == null ? "DELIVERABLE" : body.get("kind").toString();
-        if (!"PROCESS".equals(kind) && !"DELIVERABLE".equals(kind)) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "kind must be PROCESS | DELIVERABLE");
-        }
-        String string2 = name = body.get("name") == null ? null : body.get("name").toString().trim();
-        if (name == null || name.isBlank()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "name is required");
-        }
-        String type = body.get("type") == null ? "DOC" : body.get("type").toString();
-        String filePath = body.get("file_path") == null ? null : body.get("file_path").toString();
-        String contentMd = body.get("content_md") == null ? null : body.get("content_md").toString();
-        String status = body.get("status") == null ? "FINAL" : body.get("status").toString();
-        Integer version = parseVersion(body.get("version"));
-        this.repo.insertArtifact(wsId, nodeId, kind, name, type, filePath, contentMd, version, status, user.username());
-        if ("DELIVERABLE".equals(kind) && (node = (Map)this.repo.findNodeById(nodeId).stream().findFirst().orElse(null)) != null) {
-            List<String> inputs = parseStringList(objectMapper, node.get("input_refs"));
-            List<String> outputs = parseStringList(objectMapper, node.get("output_refs"));
-            outputs.add(name + "@" + String.valueOf(version == null ? "latest" : version));
-            this.repo.updateNodeRefs(nodeId, toJson(objectMapper, inputs), toJson(objectMapper, outputs));
-        }
-        return Map.of("registered", true, "kind", kind, "name", name);
-    }
-
+    
     private Map<String, Object> requireProject(LoginUser user, String wsId) {
         Map ws = (Map)this.workspaceRepo.findById(wsId).stream().findFirst().orElseThrow(() -> new ResponseStatusException((HttpStatusCode)HttpStatus.NOT_FOUND, "project not found"));
         this.requireOwner(user, ws);
@@ -515,7 +435,7 @@ public class ProjectService {
             this.repo.waiveStageSummary(((Number)summary.get("id")).longValue(), user.username(), reason);
         }
         this.workspaceRepo.updateCurrentStage(wsId, next);
-        this.repo.lockStageSession(wsId, current, iteration);
+        
         // 不再自动生成下一阶段规划草稿——下一阶段的规划同样由主控在对话里 plan_steps 发起，
         // 否则推进后立刻又出现「批准规划」操作，用户被迫批准一份自己没参与过的规划。
         LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
@@ -653,79 +573,6 @@ public class ProjectService {
         out.put("summary_id", summaryId);
         out.put("status", status);
         return out;
-    }
-
-    /*
-     * WARNING - void declaration
-     */
-    @Transactional
-    public Map<String, Object> openIteration(LoginUser user, String wsId, Map<String, Object> body) {
-        Map<String, Object> ws = this.requireProject(user, wsId);
-        List<Map<String, Object>> exist = this.repo.findNodesByWorkspace(wsId);
-        String current = this.resolveCurrentStage(ws.get("current_stage"), exist);
-        if (!STAGE_OPERATE.equals(current)) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "仅运维阶段可发起迭代，当前处于「" + stageLabel(current) + "」阶段");
-        }
-        Object rawTemplate = ws.get("template_code");
-        if (rawTemplate == null || String.valueOf(rawTemplate).isBlank()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "该项目未关联模板，无法按模板生成迭代节点链");
-        }
-        Map<String, Object> tpl = templateService.requireTemplate(String.valueOf(rawTemplate));
-        long templateId = ((Number)tpl.get("id")).longValue();
-        ArrayList<Map<String, Object>> pick = new ArrayList<Map<String, Object>>();
-        for (Map<String, Object> tn : this.repo.findTemplateNodes(templateId)) {
-            String st = resolveStage(tn.get("stage"), tn.get("type"));
-            if (!STAGE_REQUIREMENT.equals(st) && !"DEVELOP".equals(st)) continue;
-            pick.add(tn);
-        }
-        if (pick.isEmpty()) {
-            throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "模板「" + String.valueOf(tpl.get("name")) + "」没有需求/开发阶段节点，无法生成迭代链");
-        }
-        int iteration = this.repo.maxIteration(wsId) + 1;
-        int maxSeq = 0;
-        for (Map map : exist) {
-            maxSeq = Math.max(maxSeq, ((Number)map.get("seq")).intValue());
-        }
-        LinkedHashMap<Integer, Integer> seqMap = new LinkedHashMap<Integer, Integer>();
-        int n = maxSeq;
-        for (Map map : pick) {
-            seqMap.put(((Number)map.get("seq")).intValue(), ++n);
-        }
-        String name = body == null || body.get("name") == null ? "" : body.get("name").toString().trim();
-        String string = String.valueOf(tpl.get("code"));
-        ArrayList created = new ArrayList();
-        for (Map map : pick) {
-            int oldSeq = ((Number)map.get("seq")).intValue();
-            int newSeq = (Integer)seqMap.get(oldSeq);
-            ArrayList<Integer> deps = new ArrayList<Integer>();
-            for (Integer dep : parseIntList(objectMapper, map.get("depends_on"))) {
-                Integer mapped = (Integer)seqMap.get(dep);
-                if (mapped == null) continue;
-                deps.add(mapped);
-            }
-            String scope = name.isEmpty() ? blankToNull(map.get("deliverable")) : name;
-            Map<String, Object> workflowRef = this.snapshotWorkflowRef(map.get("workflow_def_id"), string, oldSeq);
-            this.repo.insertNode(depId(wsId, newSeq), wsId, (String)map.get("type"), newSeq, "NOT_STARTED", toJson(objectMapper, mapSeqToIds(wsId, deps)), toJson(objectMapper, parseStringList(objectMapper, map.get("preconditions"))), toJson(objectMapper, workflowRef), toJson(objectMapper, List.of()), toJson(objectMapper, List.of()), (String)map.get("owner_role"), scope, STAGE_OPERATE, iteration, user.username());
-            LinkedHashMap<String, Object> n2 = new LinkedHashMap<String, Object>();
-            n2.put("id", depId(wsId, newSeq));
-            n2.put("type", map.get("type"));
-            n2.put("seq", newSeq);
-            n2.put("status", "NOT_STARTED");
-            n2.put("depends_on", mapSeqToIds(wsId, deps));
-            n2.put("owner_role", map.get("owner_role"));
-            n2.put("stage", STAGE_OPERATE);
-            n2.put("iteration", iteration);
-            n2.put("workflow_ref", workflowRef);
-            n2.put("scope", scope);
-            created.add(n2);
-        }
-        LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>();
-        result.put("iteration", iteration);
-        result.put("stage", STAGE_OPERATE);
-        result.put("name", name);
-        result.put("node_count", created.size());
-        result.put("nodes", created);
-        return result;
     }
 
     @Transactional
@@ -1027,7 +874,7 @@ public class ProjectService {
         }
         StagePlanCompiler.Compiled compiled = this.planCompiler.compile(projectName, stage, iteration, plan, parseJsonMap(objectMapper, capability.get("capability")));
         String flowName = trimTo("[阶段] " + projectName + " · " + stage + " 第" + iteration + "轮", 128);
-        long definitionId = this.definitionService.create(flowName, "PM 阶段规划编译生成（plan_id=" + planId + "）", compiled.canvasJson(), user);
+        long definitionId = this.definitionService.create(flowName, "PM 阶段规划编译生成（plan_id=" + planId + "）", compiled.canvasJson(), user, "stage_plan");
         try {
             published = this.definitionService.publish(definitionId, user);
             runId = String.valueOf(this.runService.createRunAsync(definitionId, null, this.stageRunInput(ws, stage, iteration, plan, compiled, capability), STAGE_TRIGGER).get("runId"));
@@ -1298,6 +1145,8 @@ public class ProjectService {
                     am.put("name", a.get("name"));
                     am.put("file_path", a.get("file_path"));
                     am.put("kind", a.get("kind"));
+                    // 纪要/问答全文随 trace 返回：StepDetailModal 就地渲染，不用再点一层文件弹窗
+                    am.put("content_md", a.get("content_md"));
                     stepArts.put(full, am);
                 }
             }
@@ -1317,6 +1166,11 @@ public class ProjectService {
             item.put("status", r.status());
             item.put("depends_on", jsonStringList(r.dependsOn()));
             item.put("depth", depth.getOrDefault(r.code(), 0));
+            // 需求详情弹窗（2026-10-19 用户反馈「点击需求没有内容」）：描述/验收/来源随 trace 返回
+            item.put("description", r.description());
+            item.put("acceptance", r.acceptanceJson());
+            item.put("source", r.source());
+            item.put("parent_code", r.parentCode());
             item.put("chain", new java.util.ArrayList<>());
             reqItems.add(item);
         }
@@ -1335,6 +1189,8 @@ public class ProjectService {
             node.put("verified_by", s.verifiedBy());
             node.put("error", s.error());
             node.put("output_summary", s.outputSummary());
+            node.put("instruction", s.instruction());
+            node.put("requirement_codes", s.requirementCodes());
             node.put("artifact", stepArts.get("step-" + s.stage() + "-" + s.iteration() + "-" + s.seq()));
             boolean linked = false;
             for (String code : s.requirementCodes()) {
@@ -1354,6 +1210,31 @@ public class ProjectService {
         out.put("stages", stages);
         out.put("requirements", reqItems);
         out.put("unlinked", unlinked);
+        // V36 交付图：用例/bug 随 trace 返回（前端平面交付图据此画「需求→任务→用例→bug」链）
+        java.util.ArrayList<Map<String, Object>> tcItems = new java.util.ArrayList<>();
+        for (io.xuanji.server.project.orchestrator.TestCaseRepository.TestCase tc : testCaseRepo.findByWorkspace(wsId)) {
+            java.util.LinkedHashMap<String, Object> item = new java.util.LinkedHashMap<>();
+            item.put("code", tc.code());
+            item.put("title", tc.title());
+            item.put("status", tc.status());
+            item.put("requirement_code", tc.requirementCode());
+            item.put("content", tc.contentMd());
+            tcItems.add(item);
+        }
+        out.put("test_cases", tcItems);
+        java.util.ArrayList<Map<String, Object>> bugItems = new java.util.ArrayList<>();
+        for (io.xuanji.server.project.orchestrator.BugRepository.Bug b : bugRepo.findByWorkspace(wsId)) {
+            java.util.LinkedHashMap<String, Object> item = new java.util.LinkedHashMap<>();
+            item.put("code", b.code());
+            item.put("title", b.title());
+            item.put("severity", b.severity());
+            item.put("status", b.status());
+            item.put("requirement_code", b.requirementCode());
+            item.put("test_case_code", b.testCaseCode());
+            item.put("content", b.contentMd());
+            bugItems.add(item);
+        }
+        out.put("bugs", bugItems);
         return out;
     }
 

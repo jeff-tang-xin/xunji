@@ -54,6 +54,9 @@ public class OrchestrationTools {
     private final PeerConsultService peerConsult;
     private final DecisionSettleService decisionSettler;
     private final ProjectEventBus projectEvents;
+    private final TestCaseRepository testCaseRepo;
+    private final BugRepository bugRepo;
+    private final DeliverySettleService deliverySettler;
 
     /** 需求编号形态（REQ-001）：requirement_codes 漏传时从决策/任务文本兜底提取。 */
     private static final Pattern REQ_CODE = Pattern.compile("\\b(REQ-\\d+)\\b");
@@ -76,7 +79,9 @@ public class OrchestrationTools {
                               StageAdvancer advancer, io.xuanji.server.engine.AgentNodeExecutor agentNodes,
                               com.fasterxml.jackson.databind.ObjectMapper objectMapper,
                               RequirementRepository requirementRepo, PeerConsultService peerConsult,
-                              DecisionSettleService decisionSettler, ProjectEventBus projectEvents) {
+                              DecisionSettleService decisionSettler, ProjectEventBus projectEvents,
+                              TestCaseRepository testCaseRepo, BugRepository bugRepo,
+                              DeliverySettleService deliverySettler) {
         this.user = user;
         this.wsId = wsId;
         this.stage = stage;
@@ -94,6 +99,9 @@ public class OrchestrationTools {
         this.peerConsult = peerConsult;
         this.decisionSettler = decisionSettler;
         this.projectEvents = projectEvents;
+        this.testCaseRepo = testCaseRepo;
+        this.bugRepo = bugRepo;
+        this.deliverySettler = deliverySettler;
     }
 
     /** 主控可见的全部编排工具（BEAN 形态 ToolDef）。 */
@@ -121,6 +129,10 @@ public class OrchestrationTools {
                 recordAnswerSchema(), List.of("seq", "answer")));
         defs.add(def("complete_stage", "宣告本阶段完成并推进到下一阶段。前提：无执行中/等待中的小流程；收口总结会留档。交付物有缺口时必须先补齐或说明豁免理由。",
                 completeStageSchema(), List.of("summary")));
+        defs.add(def("declare_test_cases", "落测试用例（测试设计步骤必调）：用例挂需求项，需求交付树据此呈现「需求→用例→bug」链路。", declareTestCasesSchema(), List.of("cases")));
+        defs.add(def("settle_test_cases", "回写用例执行结果（测试执行步骤必调）：PASSED/FAILED/BLOCKED；全部通过且无未了结 bug 的需求自动机器判定 DONE，存在未通过的已 DONE 需求会被拉回 IN_PROGRESS。", settleTestCasesSchema(), List.of("results")));
+        defs.add(def("report_bug", "上报 bug（测试发现缺陷必调，禁止只在回复文本里说发现 bug）：挂需求与用例，需求交付树可见。", reportBugSchema(), List.of("bugs")));
+        defs.add(def("settle_bugs", "流转 bug 状态（FIXING/FIXED/CLOSED/REJECTED）：全部了结且用例全通过的需求自动机器判定 DONE。", settleBugsSchema(), List.of("updates")));
         defs.add(def("ask_stage", "跨阶段求助：向另一个阶段的负责角色发起支援请求（如 REQUIREMENT 阶段请 OPERATE 的 devops 确认服务器现状、DEVELOP 阶段请 REQUIREMENT 的 product_analyst 澄清需求）。异步进行——发起后本阶段可继续工作，对方答复后结果进黑板与对话流，问答双落文档。仅限跨阶段协作；本阶段内的疑问用 discuss 或让执行步走 ask_peer。",
                 askStageSchema(), List.of("target_stage", "name", "question")));
         return defs;
@@ -244,7 +256,8 @@ public class OrchestrationTools {
                         requirementRepo.insert(new RequirementRepository.Requirement(
                                 null, wsId, code, title, str(m.get("description")),
                                 m.get("acceptance") == null ? null : toJson(m.get("acceptance")),
-                                "PROPOSED", depsJson, "INCUBATION", user.username(), null, null));
+                                "PROPOSED", depsJson, "INCUBATION", str(m.get("parent_code")).isBlank() ? null : str(m.get("parent_code")),
+                                user.username(), null, null));
                         results.add(code + " PROPOSED「" + title + "」");
                     }
                     case "confirm" -> {
@@ -283,7 +296,7 @@ public class OrchestrationTools {
                                 m.get("acceptance") == null ? existing.acceptanceJson() : toJson(m.get("acceptance")),
                                 existing.status(),
                                 depsJson == null ? existing.dependsOn() : depsJson,
-                                existing.source(), existing.createdBy(), existing.createdAt(), existing.updatedAt()));
+                                existing.source(), existing.parentCode(), existing.createdBy(), existing.createdAt(), existing.updatedAt()));
                         results.add(code + " UPDATED");
                     }
                     case "drop" -> {
@@ -319,6 +332,265 @@ public class OrchestrationTools {
     }
 
     /** 自动生成下一个需求编号：REQ-001 起，取现有最大序号 +1。 */
+    // ---------- V36 需求交付树：测试用例 / bug ----------
+
+    /** 用例编号自增（TC-001）。 */
+    private String nextTestCaseCode() {
+        int max = testCaseRepo.findByWorkspace(wsId).stream()
+                .map(TestCaseRepository.TestCase::code)
+                .filter(c -> c.matches("TC-\\d+"))
+                .mapToInt(c -> Integer.parseInt(c.substring(3)))
+                .max().orElse(0);
+        return String.format("TC-%03d", max + 1);
+    }
+
+    /** bug 编号自增（BUG-001）。 */
+    private String nextBugCode() {
+        int max = bugRepo.findByWorkspace(wsId).stream()
+                .map(BugRepository.Bug::code)
+                .filter(c -> c.matches("BUG-\\d+"))
+                .mapToInt(c -> Integer.parseInt(c.substring(4)))
+                .max().orElse(0);
+        return String.format("BUG-%03d", max + 1);
+    }
+
+    private Tool declareTestCases() {
+        return tool("declare_test_cases", req -> {
+            if (!(req.input().get("cases") instanceof List<?> items) || items.isEmpty()) {
+                return ToolResult.of(Map.of("ok", false, "message", "cases 不能为空"));
+            }
+            List<String> results = new ArrayList<>();
+            List<String> touchedReqs = new ArrayList<>();
+            for (Object o : items) {
+                if (!(o instanceof Map<?, ?> m)) {
+                    continue;
+                }
+                String title = str(m.get("title"));
+                if (title.isBlank()) {
+                    return ToolResult.of(Map.of("ok", false, "message", "每条用例必须有 title"));
+                }
+                String code = str(m.get("code"));
+                if (code.isBlank()) {
+                    code = nextTestCaseCode();
+                }
+                String reqCode = str(m.get("requirement_code"));
+                if (!reqCode.isBlank() && requirementRepo.findByCode(wsId, reqCode).isEmpty()) {
+                    return ToolResult.of(Map.of("ok", false, "message", "需求不存在: " + reqCode));
+                }
+                testCaseRepo.upsert(new TestCaseRepository.TestCase(
+                        null, wsId, code, title, "ACTIVE", reqCode.isBlank() ? null : reqCode,
+                        null, str(m.get("content")), user.username(), null, null));
+                results.add(code + "「" + title + "」" + (reqCode.isBlank() ? "" : " → " + reqCode));
+                if (!reqCode.isBlank() && !touchedReqs.contains(reqCode)) {
+                    touchedReqs.add(reqCode);
+                }
+            }
+            projectEvents.publish(wsId, "testcase.updated", Map.of("stage", stage, "count", results.size()));
+            return ToolResult.of(Map.of("ok", true, "message", "已落用例: " + String.join("、", results)));
+        });
+    }
+
+    private Tool settleTestCases() {
+        return tool("settle_test_cases", req -> {
+            if (!(req.input().get("results") instanceof List<?> items) || items.isEmpty()) {
+                return ToolResult.of(Map.of("ok", false, "message", "results 不能为空"));
+            }
+            List<String> results = new ArrayList<>();
+            List<String> touchedReqs = new ArrayList<>();
+            for (Object o : items) {
+                if (!(o instanceof Map<?, ?> m)) {
+                    continue;
+                }
+                String code = str(m.get("code"));
+                String result = str(m.get("result")).toUpperCase();
+                if (code.isBlank() || !List.of("PASSED", "FAILED", "BLOCKED").contains(result)) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "每条结果必须有 code 与 result（PASSED/FAILED/BLOCKED）: " + code));
+                }
+                var found = testCaseRepo.findByCode(wsId, code);
+                if (found.isEmpty()) {
+                    return ToolResult.of(Map.of("ok", false, "message", "用例不存在: " + code));
+                }
+                testCaseRepo.updateStatus(wsId, code, result);
+                String note = str(m.get("note"));
+                results.add(code + " → " + result + (note.isBlank() ? "" : "（" + note + "）"));
+                String reqCode = found.get().requirementCode();
+                if (reqCode != null && !touchedReqs.contains(reqCode)) {
+                    touchedReqs.add(reqCode);
+                }
+            }
+            // 机器判定门禁：全通过且无未了结 bug → 需求 DONE；有未通过 → 已 DONE 的拉回
+            List<String> settled = touchedReqs.stream()
+                    .map(c -> deliverySettler.settleRequirement(wsId, c))
+                    .filter(java.util.Objects::nonNull).toList();
+            projectEvents.publish(wsId, "testcase.updated", Map.of("stage", stage, "count", results.size()));
+            return ToolResult.of(Map.of("ok", true,
+                    "message", "已回写: " + String.join("、", results)
+                            + (settled.isEmpty() ? "" : "；需求联动: " + String.join("；", settled))));
+        });
+    }
+
+    private Tool reportBug() {
+        return tool("report_bug", req -> {
+            if (!(req.input().get("bugs") instanceof List<?> items) || items.isEmpty()) {
+                return ToolResult.of(Map.of("ok", false, "message", "bugs 不能为空"));
+            }
+            List<String> results = new ArrayList<>();
+            List<String> touchedReqs = new ArrayList<>();
+            for (Object o : items) {
+                if (!(o instanceof Map<?, ?> m)) {
+                    continue;
+                }
+                String title = str(m.get("title"));
+                if (title.isBlank()) {
+                    return ToolResult.of(Map.of("ok", false, "message", "每条 bug 必须有 title"));
+                }
+                String code = str(m.get("code"));
+                if (code.isBlank()) {
+                    code = nextBugCode();
+                }
+                String severity = str(m.get("severity")).toUpperCase();
+                if (severity.isBlank()) {
+                    severity = "P2";
+                }
+                if (!List.of("P0", "P1", "P2", "P3").contains(severity)) {
+                    return ToolResult.of(Map.of("ok", false, "message", "severity 只允许 P0/P1/P2/P3: " + severity));
+                }
+                String reqCode = str(m.get("requirement_code"));
+                if (!reqCode.isBlank() && requirementRepo.findByCode(wsId, reqCode).isEmpty()) {
+                    return ToolResult.of(Map.of("ok", false, "message", "需求不存在: " + reqCode));
+                }
+                String tcCode = str(m.get("test_case_code"));
+                if (!tcCode.isBlank() && testCaseRepo.findByCode(wsId, tcCode).isEmpty()) {
+                    return ToolResult.of(Map.of("ok", false, "message", "用例不存在: " + tcCode));
+                }
+                bugRepo.upsert(new BugRepository.Bug(
+                        null, wsId, code, title, severity, "OPEN",
+                        reqCode.isBlank() ? null : reqCode, tcCode.isBlank() ? null : tcCode,
+                        null, str(m.get("content")), user.username(), null, null));
+                results.add(code + "（" + severity + "）「" + title + "」");
+                if (!reqCode.isBlank() && !touchedReqs.contains(reqCode)) {
+                    touchedReqs.add(reqCode);
+                }
+            }
+            projectEvents.publish(wsId, "bug.updated", Map.of("stage", stage, "count", results.size()));
+            return ToolResult.of(Map.of("ok", true, "message", "已上报: " + String.join("、", results)
+                    + "——修复后用 settle_bugs 流转状态"));
+        });
+    }
+
+    private Tool settleBugs() {
+        return tool("settle_bugs", req -> {
+            if (!(req.input().get("updates") instanceof List<?> items) || items.isEmpty()) {
+                return ToolResult.of(Map.of("ok", false, "message", "updates 不能为空"));
+            }
+            List<String> results = new ArrayList<>();
+            List<String> touchedReqs = new ArrayList<>();
+            for (Object o : items) {
+                if (!(o instanceof Map<?, ?> m)) {
+                    continue;
+                }
+                String code = str(m.get("code"));
+                String status = str(m.get("status")).toUpperCase();
+                if (code.isBlank() || !List.of("FIXING", "FIXED", "CLOSED", "REJECTED").contains(status)) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "每条更新必须有 code 与 status（FIXING/FIXED/CLOSED/REJECTED）: " + code));
+                }
+                var found = bugRepo.findByCode(wsId, code);
+                if (found.isEmpty()) {
+                    return ToolResult.of(Map.of("ok", false, "message", "bug 不存在: " + code));
+                }
+                bugRepo.updateStatus(wsId, code, status);
+                String note = str(m.get("note"));
+                results.add(code + " → " + status + (note.isBlank() ? "" : "（" + note + "）"));
+                String reqCode = found.get().requirementCode();
+                if (reqCode != null && !touchedReqs.contains(reqCode)) {
+                    touchedReqs.add(reqCode);
+                }
+            }
+            List<String> settled = touchedReqs.stream()
+                    .map(c -> deliverySettler.settleRequirement(wsId, c))
+                    .filter(java.util.Objects::nonNull).toList();
+            projectEvents.publish(wsId, "bug.updated", Map.of("stage", stage, "count", results.size()));
+            return ToolResult.of(Map.of("ok", true,
+                    "message", "已流转: " + String.join("、", results)
+                            + (settled.isEmpty() ? "" : "；需求联动: " + String.join("；", settled))));
+        });
+    }
+
+    /** declare_test_cases 入参 schema：cases 数组（title 必填，code/requirement_code/content 可选）。 */
+    private static Map<String, Object> declareTestCasesSchema() {
+        return Map.of(
+                "type", "object",
+                "properties", Map.of(
+                        "cases", Map.of(
+                                "type", "array",
+                                "description", "用例清单",
+                                "items", Map.of(
+                                        "type", "object",
+                                        "properties", Map.of(
+                                                "code", Map.of("type", "string", "description", "用例编号（TC-001），留空自动分配"),
+                                                "title", Map.of("type", "string", "description", "用例标题"),
+                                                "requirement_code", Map.of("type", "string", "description", "挂哪条需求（REQ-001），全局用例留空"),
+                                                "content", Map.of("type", "string", "description", "用例正文：前置/步骤/预期")),
+                                        "required", List.of("title")))),
+                "required", List.of("cases"));
+    }
+
+    private static Map<String, Object> settleTestCasesSchema() {
+        return Map.of(
+                "type", "object",
+                "properties", Map.of(
+                        "results", Map.of(
+                                "type", "array",
+                                "description", "执行结果清单",
+                                "items", Map.of(
+                                        "type", "object",
+                                        "properties", Map.of(
+                                                "code", Map.of("type", "string", "description", "用例编号"),
+                                                "result", Map.of("type", "string", "description", "PASSED/FAILED/BLOCKED"),
+                                                "note", Map.of("type", "string", "description", "结果说明（失败原因/阻塞原因）")),
+                                        "required", List.of("code", "result")))),
+                "required", List.of("results"));
+    }
+
+    private static Map<String, Object> reportBugSchema() {
+        return Map.of(
+                "type", "object",
+                "properties", Map.of(
+                        "bugs", Map.of(
+                                "type", "array",
+                                "description", "bug 清单",
+                                "items", Map.of(
+                                        "type", "object",
+                                        "properties", Map.of(
+                                                "code", Map.of("type", "string", "description", "bug 编号（BUG-001），留空自动分配"),
+                                                "title", Map.of("type", "string", "description", "bug 标题"),
+                                                "severity", Map.of("type", "string", "description", "严重度 P0/P1/P2/P3，默认 P2"),
+                                                "requirement_code", Map.of("type", "string", "description", "归属需求（REQ-001）"),
+                                                "test_case_code", Map.of("type", "string", "description", "发现自哪个用例（TC-001）"),
+                                                "content", Map.of("type", "string", "description", "现象/复现步骤/根因")),
+                                        "required", List.of("title")))),
+                "required", List.of("bugs"));
+    }
+
+    private static Map<String, Object> settleBugsSchema() {
+        return Map.of(
+                "type", "object",
+                "properties", Map.of(
+                        "updates", Map.of(
+                                "type", "array",
+                                "description", "状态流转清单",
+                                "items", Map.of(
+                                        "type", "object",
+                                        "properties", Map.of(
+                                                "code", Map.of("type", "string", "description", "bug 编号"),
+                                                "status", Map.of("type", "string", "description", "FIXING/FIXED/CLOSED/REJECTED"),
+                                                "note", Map.of("type", "string", "description", "流转说明（根因/修复方式/误报理由）")),
+                                        "required", List.of("code", "status")))),
+                "required", List.of("updates"));
+    }
+
     private String nextRequirementCode() {
         int max = requirementRepo.findByWorkspace(wsId).stream()
                 .map(RequirementRepository.Requirement::code)
@@ -670,6 +942,11 @@ public class OrchestrationTools {
             StageStep step = nextStep("决策：" + truncate(question, 40), StepType.DECISION,
                     "user", List.of(), question).withRequirementCodes(codes);
             stepRepo.insert(step);
+            // 实时性（2026-10-19）：决策步落库即推送——否则决策卡要等 30s 轮询才出现，
+            // 用户不知道 AI 在等什么（审计实锤缺口 #3）
+            projectEvents.publish(wsId, "step.updated", Map.of(
+                    "stage", stage, "seq", step.seq(), "stepType", "DECISION",
+                    "status", "PLANNED", "name", step.name()));
             return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
                     "message", "已向用户提出决策请求，等待答复（答复后需求自动确认并生成决策记录；也可用 record_answer 落档）"));
         });
@@ -883,6 +1160,10 @@ public class OrchestrationTools {
             case "record_answer" -> recordAnswer();
             case "complete_stage" -> completeStage();
             case "ask_stage" -> askStage();
+            case "declare_test_cases" -> declareTestCases();
+            case "settle_test_cases" -> settleTestCases();
+            case "report_bug" -> reportBug();
+            case "settle_bugs" -> settleBugs();
             default -> throw new IllegalArgumentException("unknown orchestration tool: " + name);
         };
     }
@@ -912,6 +1193,7 @@ public class OrchestrationTools {
         reqProps.put("description", str("需求描述：背景、边界、约束"));
         reqProps.put("acceptance", obj(acceptanceProps()));
         reqProps.put("depends_on", arr(str("依赖的需求编号列表（如 [\"REQ-001\"]）：被依赖需求完成前，本需求不得排实施步骤")));
+        reqProps.put("parent_code", str("父需求编号（REQ-001）：本条是父需求拆出的子需求时填——交付图据此画「原始需求→拆分点」父子连线，顶层需求留空"));
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("action", str("propose=落新需求（PROPOSED）/ confirm=用户已同意后置 CONFIRMED / update=改 PROPOSED 草稿 / drop=废弃"));
         props.put("requirements", arr(obj(reqProps)));

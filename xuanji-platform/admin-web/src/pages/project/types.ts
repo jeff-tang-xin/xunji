@@ -50,7 +50,6 @@ export interface PlanTask {
   depends?: number[]
 }
 
-
 /**
  * 模板节点 —— 阶段「通用层」知识（跨项目复用，作为 AI 的工作指导）。
  * 注意：不含项目任务边界（scope），scope 属于项目层，在新建项目时按节点填写。
@@ -187,21 +186,6 @@ export interface ProjectRow {
   created_at?: string
 }
 
-/** 工作节点 */
-export interface WorkNode {
-  id: string
-  workspace_id: string
-  type: string
-  seq: number
-  status: string
-  depends_on?: string | string[] | null
-  preconditions?: string | string[] | null
-  workflow_ref?: string | null
-  input_refs?: string | string[] | null
-  output_refs?: string | string[] | null
-  owner_role?: string
-}
-
 /** 留档 */
 export interface Artifact {
   id: number
@@ -230,34 +214,7 @@ export interface ProjectDetailData {
   created_at?: string
   /** 当前阶段（V27 阶段生命周期） */
   current_stage?: string
-  nodes: WorkNode[]
   artifacts: Artifact[]
-}
-
-/** 节点类型 → 中文名（产品语言） */
-export const NODE_TYPE_LABEL: Record<string, string> = {
-  DISCUSS: '讨论',
-  REQUIREMENT: '需求',
-  ARCHITECTURE: '架构',
-  DESIGN: '详设',
-  TEST_CASE: '测试用例',
-  DEVELOP: '开发',
-  SMOKE: '冒烟',
-  SUBMIT: '提测',
-  TEST: '测试执行',
-  RELEASE: '发布',
-}
-
-/** 节点状态 → 颜色与文案 */
-export function nodeStatusView(s?: string): { color: string; text: string } {
-  switch (s) {
-    case 'DONE': return { color: 'green', text: '已完成' }
-    case 'RUNNING': return { color: 'blue', text: '执行中' }
-    case 'BLOCKED': return { color: 'orange', text: '阻塞' }
-    case 'WAITING_APPROVAL': return { color: 'orange', text: '待审批' }
-    case 'REJECTED': return { color: 'red', text: '已驳回' }
-    default: return { color: 'default', text: '未开始' }
-  }
 }
 
 /** 项目状态 → 颜色 */
@@ -272,22 +229,8 @@ export function fmtDate(v?: string): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString()
 }
 
-/** 解析 JSON 字符串或数组为字符串数组 */
-export function parseList(v: string | string[] | null | undefined): string[] {
-  if (!v) return []
-  if (Array.isArray(v)) return v.map(String)
-  try {
-    const parsed = JSON.parse(v)
-    return Array.isArray(parsed) ? parsed.map(String) : []
-  } catch {
-    return []
-  }
-}
-
-
 /** 模板管理入口开关：模板编辑器就绪后置 true（列表页「模板管理」按钮 + 新建项目模板下拉） */
 export const SHOW_TEMPLATE_ENTRY = true
-
 
 /** 数据源候选（GET /api/datasources） */
 export interface DsOption {

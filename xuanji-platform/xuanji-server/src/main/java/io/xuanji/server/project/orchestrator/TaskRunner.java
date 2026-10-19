@@ -213,6 +213,19 @@ public class TaskRunner {
         while (cur.getCause() != null && cur.getCause() != cur) {
             cur = cur.getCause();
         }
-        return cur.getMessage() == null ? cur.toString() : cur.getMessage();
+        if (cur.getMessage() != null) {
+            return cur.getMessage();
+        }
+        // 裸类名用户看不懂（2026-10-19 反馈）：常见无 message 异常给可读文案
+        if (cur instanceof InterruptedException) {
+            return "执行被中断（服务重启或人为终止）——可重试";
+        }
+        if (cur instanceof java.util.concurrent.TimeoutException) {
+            return "执行超时";
+        }
+        if (cur instanceof java.net.ConnectException) {
+            return "连接不上上游服务（模型网关/网络）";
+        }
+        return cur.toString();
     }
 }

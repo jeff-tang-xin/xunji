@@ -123,17 +123,7 @@ public class ProjectController {
         return projects.advanceStage(user, id, body);
     }
 
-    /**
-     * 运维阶段发起迭代（body 可选 {"name":"新需求：xxx"}）。
-     * 大阶段不回退，迭代可重复；仅 current_stage=OPERATE 时可用。
-     */
-    @PostMapping("/{id}/iterations")
-    public Object openIteration(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                                @PathVariable String id,
-                                @RequestBody(required = false) Map<String, Object> body) {
-        return projects.openIteration(user, id, body);
-    }
-
+    
     /* ---------- V27：PM 阶段规划 / 收口总结 / 阶段能力与资源绑定 ---------- */
 
     /** 当前阶段的 PM 规划（生效那份 + 能力绑定）；尚无规划时后端自动补一份待审草稿。 */
@@ -271,54 +261,12 @@ public class ProjectController {
         return projects.saveCapability(user, id, stage, body);
     }
 
-    /** 执行某节点（校验 DAG 依赖）。 */
-    @PostMapping("/{id}/nodes/{nodeId}/run")
-    public Object runNode(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                          @PathVariable String id, @PathVariable String nodeId) {
-        return projects.runNode(user, id, nodeId);
-    }
-
-    /** 节点完成（显式置 DONE，驱动 DAG 链推进）。 */
-    @PostMapping("/{id}/nodes/{nodeId}/complete")
-    public Object completeNode(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                               @PathVariable String id, @PathVariable String nodeId) {
-        return projects.completeNode(user, id, nodeId);
-    }
-
-    /** 绑定阶段工作流到节点（body 里 definitionId），绑定后 runNode 真正触发子工作流异步执行。 */
-    @PostMapping("/{id}/nodes/{nodeId}/bind-workflow")
-    public Object bindWorkflow(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                               @PathVariable String id, @PathVariable String nodeId,
-                               @RequestBody Map<String, Object> body) {
-        Long definitionId = body.get("definitionId") == null ? null
-                : Long.valueOf(body.get("definitionId").toString().trim());
-        return projects.bindWorkflowRef(user, id, nodeId, definitionId);
-    }
-
-    /** 查看节点留档。 */
-    @GetMapping("/{id}/nodes/{nodeId}/artifacts")
-    public List<Map<String, Object>> nodeArtifacts(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                                                   @PathVariable String id, @PathVariable String nodeId) {
-        return projects.nodeArtifacts(user, id, nodeId);
-    }
-
-    /** 登记节点留档（过程/交付两形态）。 */
-    @PostMapping("/{id}/nodes/{nodeId}/artifacts")
-    public Object addArtifact(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                              @PathVariable String id, @PathVariable String nodeId,
-                              @RequestBody Map<String, Object> body) {
-        return projects.addArtifact(user, id, nodeId, body);
-    }
-
-    /** 节点内对话（SSE 流式）：按 owner_role 匹配内置 agent，结束后自动登记 DELIVERABLE 留档。 */
-    @PostMapping(value = "/{id}/nodes/{nodeId}/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chat(@RequestAttribute(LoginUser.ATTR) LoginUser user,
-                           @PathVariable String id, @PathVariable String nodeId,
-                           @RequestBody(required = false) Map<String, Object> body) {
-        String query = body == null || body.get("query") == null ? null : body.get("query").toString();
-        return projectChat.chatByNode(user, id, nodeId, query);
-    }
-
+    
+    
+    
+    
+    
+    
     /**
      * 阶段级对话（SSE 流式）：对话对象是「当前阶段的子任务」，不依赖 {@code project_work_node} 台账。
      * V27 起规划不再落台账，新项目一个节点都没有，上面那条节点内对话在界面上已无入口，

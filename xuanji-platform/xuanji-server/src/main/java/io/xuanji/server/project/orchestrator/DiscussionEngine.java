@@ -79,6 +79,7 @@ public class DiscussionEngine {
         StringBuilder round = new StringBuilder();
         for (String p : participants) {
             stepRepo.appendSpeech(step.id(), "▶ " + p + " 发言中…\n\n");
+                projectEvents.publish(step.workspaceId(), "speech.appended", Map.of("stage", step.stage(), "seq", step.seq(), "speaker", p));
             // 每次发言前从 DB 读最新全量：前序发言者结论 + 用户插话都在（结论同步给它）
             String seen = latestSpeech(step.id());
             String speech;
@@ -99,6 +100,7 @@ public class DiscussionEngine {
             }
             round.append("【").append(p).append("】").append(speech).append("\n\n");
             stepRepo.appendSpeech(step.id(), "【" + p + "】" + speech + "\n\n");
+                projectEvents.publish(step.workspaceId(), "speech.appended", Map.of("stage", step.stage(), "seq", step.seq(), "speaker", p));
         }
         return round.toString();
     }
@@ -134,6 +136,7 @@ public class DiscussionEngine {
     /** 用户插话落库（chat 互斥路径）：【用户】前缀，后续发言者自然看到。 */
     public void userSpeech(StageStep step, String query) {
         stepRepo.appendSpeech(step.id(), "【用户】" + query + "\n\n");
+        projectEvents.publish(step.workspaceId(), "speech.appended", Map.of("stage", step.stage(), "seq", step.seq(), "speaker", "用户"));
     }
 
     /** 单人发言：读议题包+已有全部发言以角色视角发言；focusQuestion 非空=被 @ 定向回答。 */

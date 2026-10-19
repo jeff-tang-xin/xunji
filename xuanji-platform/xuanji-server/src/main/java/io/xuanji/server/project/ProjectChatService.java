@@ -87,54 +87,11 @@ public class ProjectChatService {
         this.runRepo = runRepo;
     }
 
-    /**
-     * 项目节点内对话（SSE）：查节点 → 校验归属 → 按 owner_role 匹配 agent →
-     * 流式对话 → 结束后把最终文本登记为 DELIVERABLE 留档。
-     */
-    public SseEmitter chatByNode(LoginUser user, String wsId, String nodeId, String query) {
-        if (query == null || query.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query is required");
-        }
-        requireWorkspaceVisible(user, wsId);
-        Map<String, Object> node = requireNodeInWorkspace(wsId, nodeId);
-
-        String ownerRole = node.get("owner_role") == null ? null : node.get("owner_role").toString();
-        // 阶段模板节点只查一次，同时供「选智能体」与「注入阶段知识」使用（活引用：改模板即生效）
-        TemplateStage stage = resolveTemplateStage(wsId, node);
-
-        // 智能体优先级：模板阶段显式指定的 agent_name > owner_role 硬编码映射（老项目/老模板回退）。
-        // 显式指定让「这个阶段用哪个智能体」成为模板里可见可改的配置，而不是藏在代码 switch 里。
-        String templateAgent = stage == null ? null : (String) stage.node().get("agent_name");
-        String agentName = (templateAgent != null && !templateAgent.isBlank())
-                ? templateAgent.trim()
-                : matchAgent(ownerRole);
-        if (agentName == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "节点未匹配到内置 agent（模板 agent_name 为空，owner_role=" + ownerRole
-                            + " 也未映射到内置 agent；请在模板编辑器的「执行智能体」里指定）");
-        }
-
-        String sessionId = "proj-" + wsId + "-node-" + nodeId;
-        String nodeType = node.get("type") == null ? "NODE" : node.get("type").toString();
-        // 阶段通用知识（模板的规范/要求/方法论/交付物）+ 本项目该节点任务边界 → 注入 system prompt
-        String stageGuidance = buildStageGuidance(wsId, stage, node);
-        log.info("project-node stage guidance: project={} node={} seq={} chars={} head=[{}]",
-                wsId, nodeId, node.get("seq"),
-                stageGuidance == null ? 0 : stageGuidance.length(),
-                stageGuidance == null ? "-" : stageGuidance.replace('\n', ' ').substring(0,
-                        Math.min(120, stageGuidance.length())));
-        AgentSpec spec = agentNodes.buildSpecByAgentName(agentName, sessionId, stageGuidance, wsId);
-        String audit = "project-node=" + wsId + "/" + nodeId + " agent=" + agentName
-                + " session=" + sessionId
-                + " guidance=" + (stageGuidance == null ? "none" : stageGuidance.length() + "chars");
-
-        return startChat(spec, query, audit, user, wsId, nodeId, nodeType, null, List.of());
-    }
-
+    
     /**
      * 阶段级对话（V28）：对话对象是「当前阶段的子任务」，不再依赖 {@code project_work_node} 台账。
      *
-     * <p>为什么必须另开一条路：{@link #chatByNode} 依赖两样 V27 之后不再存在的东西——
+     * <p>为什么必须另开一条路：旧节点内对话路径依赖两样 V27 之后不再存在的东西——
      * ① 台账节点（V27 起规划不再落 {@code project_work_node}，新项目 0 节点，前端连对话入口都点不出来）；
      * ② {@code project_template} 的 seq 匹配（模板已停用，阶段知识迁为 3 份 stage-spec skill）。
      * 结果是新项目 agent 选择恒失败，硬拼 nodeId 调用也只拿到 400「节点未匹配到内置 agent」。</p>
@@ -516,76 +473,9 @@ public class ProjectChatService {
      * 模板阶段（活引用）：模板显示名 + 本项目节点 seq 对应的模板节点行。
      * 项目无 template_code、模板已删、或 seq 在模板里不存在时整体返回 null（调用方降级）。
      */
-    /** 模板阶段快照：模板显示名（供指导文本与日志）+ 该 seq 的模板节点行（含 agent_name/workflow_def_id）。 */
-    private record TemplateStage(String templateName, Map<String, Object> node) {
-    }
 
-    private TemplateStage resolveTemplateStage(String wsId, Map<String, Object> node) {
-        try {
-            String templateCode = workspaceRepo.findTemplateCode(wsId);
-            if (templateCode == null || templateCode.isBlank()) {
-                return null;
-            }
-            Map<String, Object> tpl = repo.findTemplateByCode(templateCode)
-                    .stream().findFirst().orElse(null);
-            if (tpl == null || tpl.get("id") == null) {
-                return null;
-            }
-            int seq = node.get("seq") == null ? -1 : ((Number) node.get("seq")).intValue();
-            Map<String, Object> tn = repo.findTemplateNodes(((Number) tpl.get("id")).longValue())
-                    .stream()
-                    .filter(r -> r.get("seq") != null && ((Number) r.get("seq")).intValue() == seq)
-                    .findFirst().orElse(null);
-            if (tn == null) {
-                return null;
-            }
-            return new TemplateStage(String.valueOf(tpl.get("name")), tn);
-        } catch (Exception e) {
-            log.warn("template stage lookup skipped: project={} -> {}", wsId, e.toString());
-            return null;
-        }
-    }
-
-    private String buildStageGuidance(String wsId, TemplateStage stage, Map<String, Object> node) {
-        if (stage == null) {
-            return null;
-        }
-        try {
-            Map<String, Object> tn = stage.node();
-            int seq = node.get("seq") == null ? -1 : ((Number) node.get("seq")).intValue();
-            StringBuilder sb = new StringBuilder();
-            sb.append("## 本阶段工作规范（来自项目模板「").append(stage.templateName())
-                    .append("」的阶段定义，跨项目复用的通用要求，你必须遵循）\n\n");
-            sb.append("- 阶段类型：").append(tn.get("type"))
-                    .append("（第 ").append(seq).append(" 步）\n");
-            if (tn.get("owner_role") != null) {
-                sb.append("- 负责角色：").append(tn.get("owner_role")).append('\n');
-            }
-
-            appendBulletList(sb, "产出必须满足的规范（standards）", tn.get("standards"));
-            appendBulletList(sb, "本阶段要求覆盖（requirements）", tn.get("requirements"));
-            appendBulletList(sb, "前置条件（preconditions）", tn.get("preconditions"));
-
-            if (tn.get("methodology") != null && !tn.get("methodology").toString().isBlank()) {
-                sb.append("\n### 建议方法论（methodology）\n").append(tn.get("methodology")).append('\n');
-            }
-            if (tn.get("deliverable") != null && !tn.get("deliverable").toString().isBlank()) {
-                sb.append("\n### 本阶段交付物形态\n").append(tn.get("deliverable")).append('\n');
-            }
-            if (node.get("scope") != null && !node.get("scope").toString().isBlank()) {
-                sb.append("\n### 本项目该节点的任务边界（由项目决定，边界外内容不要擅自纳入）\n")
-                        .append(node.get("scope")).append('\n');
-            }
-
-            sb.append("\n请严格按上述规范与方法论开展本阶段工作；若用户的要求与上述规范冲突，")
-                    .append("先指出冲突并给出你的建议，再按用户决定执行。");
-            return sb.toString();
-        } catch (Exception e) {
-            log.warn("stage guidance skipped: project={} -> {}", wsId, e.toString());
-            return null;
-        }
-    }
-
+    
+    
     /** JSONB 字符串数组列（::text）渲染为小节 + bullet 列表；空值跳过。 */
     private void appendBulletList(StringBuilder sb, String title, Object jsonArray) {
         List<String> items = parseStringList(jsonArray);
@@ -717,27 +607,7 @@ public class ProjectChatService {
 
     /* ---------- owner_role → agent 映射 ---------- */
 
-    /**
-     * owner_role → 内置 agent name。模板 owner_role 取值：产品/PM、产品/BA、架构师、
-     * 开发、测试、测试/开发、运维；DB 为扩展预留。未匹配返回 null。
-     */
-    private String matchAgent(String ownerRole) {
-        if (ownerRole == null || ownerRole.isBlank()) {
-            return null;
-        }
-        return switch (ownerRole.trim()) {
-            case "产品/PM" -> "project_manager";
-            case "产品/BA" -> "product_analyst";
-            case "架构师" -> "architect";
-            case "开发" -> "developer";
-            case "测试" -> "tester";
-            case "测试/开发" -> "tester";
-            case "运维" -> "devops";
-            case "DB" -> "dba";
-            default -> null;
-        };
-    }
-
+    
     /* ---------- 归属校验（复制自 ProjectService，避免改动该文件） ---------- */
 
     private void requireWorkspaceVisible(LoginUser user, String wsId) {
@@ -746,16 +616,7 @@ public class ProjectChatService {
         requireOwner(user, ws);
     }
 
-    /** 校验 nodeId 属于 wsId，返回节点记录（防越权读写他人项目节点）。 */
-    private Map<String, Object> requireNodeInWorkspace(String wsId, String nodeId) {
-        Map<String, Object> node = repo.findNodeById(nodeId)
-                .stream().findFirst().orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "node not found"));
-        if (!wsId.equals(node.get("workspace_id"))) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "node 不属于该项目");
-        }
-        return node;
-    }
-
+    
     private void requireOwner(LoginUser user, Map<String, Object> row) {
         if (user.isPlatformAdmin() || "ALL".equals(user.dataScope())) {
             return;

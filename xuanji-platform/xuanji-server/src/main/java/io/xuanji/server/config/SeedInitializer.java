@@ -77,13 +77,13 @@ public class SeedInitializer implements CommandLineRunner {
             log.warn("seed agent skipped: OpenAI provider not found");
             return;
         }
-        insertAgent("project_manager", "项目经理", openaiProviderId, PROMPT_PROJECT_MANAGER);
-        insertAgent("product_analyst", "产品需求", openaiProviderId, PROMPT_PRODUCT_ANALYST);
-        insertAgent("architect", "架构设计", openaiProviderId, PROMPT_ARCHITECT);
-        insertAgent("developer", "开发", openaiProviderId, PROMPT_DEVELOPER);
-        insertAgent("tester", "测试", openaiProviderId, PROMPT_TESTER);
-        insertAgent("devops", "运维", openaiProviderId, PROMPT_DEVOPS);
-        insertAgent("dba", "DB", openaiProviderId, PROMPT_DBA);
+        insertAgent("project_manager", "项目经理", openaiProviderId, PROMPT_PROJECT_MANAGER, "fs.read");
+        insertAgent("product_analyst", "产品需求", openaiProviderId, PROMPT_PRODUCT_ANALYST, "fs.read");
+        insertAgent("architect", "架构设计", openaiProviderId, PROMPT_ARCHITECT, "fs.read");
+        insertAgent("developer", "开发", openaiProviderId, PROMPT_DEVELOPER, "fs.read", "fs.write");
+        insertAgent("tester", "测试", openaiProviderId, PROMPT_TESTER, "fs.read");
+        insertAgent("devops", "运维", openaiProviderId, PROMPT_DEVOPS, "fs.read");
+        insertAgent("dba", "DB", openaiProviderId, PROMPT_DBA, "fs.read");
         publishBuiltinAgents();
     }
 
@@ -110,21 +110,41 @@ public class SeedInitializer implements CommandLineRunner {
         }
     }
 
-    private void insertAgent(String name, String description, Long providerId, String systemPrompt) {
+    private void insertAgent(String name, String description, Long providerId, String systemPrompt,
+                             String... builtinTools) {
         Integer exists = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM agent_config WHERE name = ?", Integer.class, name);
+        String builtinJson = builtinTools.length == 0 ? null
+                : toJsonArray(java.util.Arrays.asList(builtinTools));
         if (exists != null && exists > 0) {
+            // 存量升级（幂等）：只补 NULL——用户已配置的不动
+            if (builtinJson != null) {
+                jdbc.update("UPDATE agent_config SET builtin_tools_json = CAST(? AS jsonb) "
+                        + "WHERE name = ? AND builtin_tools_json IS NULL", builtinJson, name);
+            }
             log.info("seed agent skipped (already exists): name={}", name);
             return;
         }
         jdbc.update("INSERT INTO agent_config "
                         + "(name, description, model_provider_id, system_prompt, tools_json, "
-                        + " permission_json, params_json, skills_json, version, status, "
+                        + " permission_json, params_json, skills_json, builtin_tools_json, version, status, "
                         + " org_id, created_by, updated_by, updated_at) "
-                        + "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, 1, 'PUBLISHED', "
+                        + "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, CAST(? AS jsonb), 1, 'PUBLISHED', "
                         + " NULL, 'system', 'system', now())",
-                name, description, providerId, systemPrompt);
-        log.info("seed agent created: name={}, description={}", name, description);
+                name, description, providerId, systemPrompt, builtinJson);
+        log.info("seed agent created: name={}, description={}, builtin={}", name, description, builtinJson);
+    }
+
+    /** 字符串列表 → JSON 数组文本（builtin_tools_json 是 JSONB 字符串数组）。 */
+    private String toJsonArray(java.util.List<String> items) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(items.get(i)).append("\"");
+        }
+        return sb.append("]").toString();
     }
 
     // ---------- 阶段规范 skill（模板去掉后，"每阶段必须满足什么"迁到这里） ----------
