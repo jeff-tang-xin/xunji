@@ -111,10 +111,7 @@ public class WorkspaceRepository {
         jdbc.update("DELETE FROM project_requirement WHERE workspace_id = ?", id);
         jdbc.update("DELETE FROM project_artifact WHERE workspace_id = ?", id);
         jdbc.update("DELETE FROM project_stage_capability WHERE workspace_id = ?", id);
-        jdbc.update("DELETE FROM project_pm_session WHERE workspace_id = ?", id);
-        jdbc.update("DELETE FROM project_stage_session WHERE workspace_id = ?", id);
         jdbc.update("DELETE FROM project_stage_summary WHERE workspace_id = ?", id);
-        jdbc.update("DELETE FROM project_work_node WHERE workspace_id = ?", id);
         jdbc.update("DELETE FROM project_stage_plan WHERE workspace_id = ?", id);
         jdbc.update("DELETE FROM workspace WHERE id = ?", id);
     }
