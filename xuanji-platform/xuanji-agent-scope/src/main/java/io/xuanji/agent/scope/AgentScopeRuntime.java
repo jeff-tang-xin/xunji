@@ -51,7 +51,7 @@ public class AgentScopeRuntime implements AgentRuntime {
     private static final Logger log = LoggerFactory.getLogger(AgentScopeRuntime.class);
 
     private static final String PROTOCOL_OPENAI = "OPENAI_PROTOCOL";
-    private static final int DEFAULT_MAX_ITERS = 10;
+    private static final int DEFAULT_MAX_ITERS = 40;
 
     /**
      * 会话状态存储（多轮记忆，docs/detail/04 §1）：所有 Agent 实例共享——
@@ -396,6 +396,8 @@ public class AgentScopeRuntime implements AgentRuntime {
         return b.build();
     }
 
+    // 40 轮（2026-10-20 全链路诊断）：10 轮对「读现状+写文档+修错」类任务不够，
+    // architect 复杂任务被掐半成品（seq4「因迭代上限中断」实锤）；无超时灭绝下这是唯一护栏，40 轮 × qwen 2-3 分钟 ≈ 上限 2 小时，用户可随时终止
     private int maxIters(AgentSpec spec) {
         Object v = spec.runtime().get("maxIterations");
         return v instanceof Number n ? n.intValue() : DEFAULT_MAX_ITERS;

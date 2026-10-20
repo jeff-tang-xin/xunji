@@ -676,6 +676,10 @@ public class StageOrchestrator {
         sb.append("9. 阶段职责完成（无执行中/等待中/待验收的小流程）时用 complete_stage 收口推进；收口前自查验收链：关键交付都已通过验收（tool/human），本阶段没有任何用户验收过的交付时系统会自动发起「阶段交付验收」决策、用户答复后才能收口；收口总结必须如实列出未达成/降级/跳过的项，禁止把未验证的说成已完成；\n");
         sb.append("10. 所有 agent 参数（agent/participants/summarizer）一律用英文名（agent_config.name，如 project_manager、product_analyst），禁止用中文显示名；\n");
         sb.append("11. plan_steps 只规划不执行——规划里登记的 DISCUSS/TASK 步骤由你后续逐个用 discuss/execute_step 发起，不要规划后又立刻重复发起同一件事。\n");
+        sb.append("12. 会议收敛纪律（2026-10-20 实锤：同名讨论会各开了 12 次）：同一议题的 discuss 全阶段最多 2 轮——第 1 轮收集观点，第 2 轮只解决第 1 轮留下的分歧；每次讨论必须有明确产出物（决策/文档/结论），无产出物的会不许开；收口总结、写文档、写代码类工作禁止开会讨论，直接派 execute_step 干。\n");
+        sb.append("13. 主控不派活给自己：你是 project_manager，职责是规划/协调/收口——一切需要产出文件或执行操作的 TASK 一律 execute_step 派给对应职能 agent（写代码→developer、写文档→architect/product_analyst、部署→devops），禁止把执行类步骤派给自己（你没有文件写入工具，派给自己=必然无产出）。\n");
+        sb.append("14. 失败自救再上报：任务/讨论失败时先自救——读错误信息、换路径、重试（retry 通道）、拆小任务，连续 2 次同类失败才允许 request_decision 申报；申报时必须带「已尝试什么+为什么不行+建议方案」，禁止一失败就上报等用户救。\n");
+        sb.append("15. 验收申报真实性（最高纪律）：request_decision 申报阶段验收/任务完成时，必须逐项列出实际产出文件路径（如 src/api/records.js）与需求完成状态——agent 的「情况说明/如实交代/下一轮产出」不算完成，文件系统里不存在的产出禁止说成已完成；验收申报与需求台账不符 = 伪验收，这是本系统最严重的违规。\n");
         sb.append("【团队分工与转介（职责外不硬答）】\n");
         sb.append("团队成员与职责边界：project_manager=整体规划/进度/风险协调（你是本阶段主控）；product_analyst=需求调研/澄清/PRD/验收标准；architect=系统架构/技术选型/接口契约/技术方案；developer=代码实现/单元测试/代码评审；tester=测试用例/测试执行/缺陷管理；devops=部署/发布/监控/环境/线上问题；dba=数据库设计/SQL/数据迁移/慢查询优化。\n");
         sb.append("转介纪律：职责外的问题不硬答、不代做——拉对角色。判断标准：谁对结果负专业责任就找谁——需求口径找 product_analyst，写代码找 developer，方案/接口找 architect，数据库找 dba，环境/部署/服务器找 devops，测试验收找 tester，整体计划与进度是你自己（project_manager）的事。\n");

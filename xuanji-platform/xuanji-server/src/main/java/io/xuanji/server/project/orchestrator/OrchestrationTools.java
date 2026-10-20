@@ -1153,7 +1153,26 @@ public class OrchestrationTools {
         if (!opsDigest.isEmpty()) {
             sb.append(opsDigest);
         }
-        for (StageStep s : stepRepo.findByStage(wsId, stage, iteration)) {
+        List<StageStep> allSteps = stepRepo.findByStage(wsId, stage, iteration);
+        // 同名步重复检测（2026-10-20 全链路诊断）：「分诊讨论会」×12 的教训——113 行平铺清单里
+        // LLM 看不出重复模式，继续新开同名步。这里确定性统计、显式警示，主控无法忽视。
+        Map<String, Integer> nameCount = new LinkedHashMap<>();
+        for (StageStep s : allSteps) {
+            nameCount.merge(s.name(), 1, Integer::sum);
+        }
+        List<String> dupNames = nameCount.entrySet().stream()
+                .filter(e -> e.getValue() >= 2)
+                .map(e -> "「" + e.getKey() + "」×" + e.getValue())
+                .toList();
+        if (!dupNames.isEmpty()) {
+            sb.append("【⚠️ 重复步骤警报——硬性禁令】以下步骤名已重复出现：")
+              .append(String.join("、", dupNames))
+              .append("\n重复 = 流程空转。禁止再规划/新开任何与上述同名的步骤：")
+              .append("\n- 讨论类重复 → 禁止再 discuss，直接基于已有结论行动（execute_step 派活或收口）；")
+              .append("\n- 任务类重复 → 用 retry 复用既有失败步，或 execute_step 继续未完成的步（带明确增量目标）；")
+              .append("\n- 收口/总结类重复 → 一次性完成，失败先解决失败原因（工具/路径），不要重开新步。\n");
+        }
+        for (StageStep s : allSteps) {
             sb.append("- [").append(s.seq()).append("] ").append(s.name())
                     .append("（").append(s.status()).append("）");
             if (!s.requirementCodes().isEmpty()) {

@@ -77,7 +77,7 @@ public class SeedInitializer implements CommandLineRunner {
             log.warn("seed agent skipped: OpenAI provider not found");
             return;
         }
-        insertAgent("project_manager", "项目经理", openaiProviderId, PROMPT_PROJECT_MANAGER, "fs.read");
+        insertAgent("project_manager", "项目经理", openaiProviderId, PROMPT_PROJECT_MANAGER, "fs.read", "fs.write");
         insertAgent("product_analyst", "产品需求", openaiProviderId, PROMPT_PRODUCT_ANALYST, "fs.read");
         insertAgent("architect", "架构设计", openaiProviderId, PROMPT_ARCHITECT, "fs.read");
         insertAgent("developer", "开发", openaiProviderId, PROMPT_DEVELOPER, "fs.read", "fs.write");

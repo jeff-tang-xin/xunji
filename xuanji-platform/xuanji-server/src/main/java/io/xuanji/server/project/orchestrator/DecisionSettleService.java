@@ -52,6 +52,9 @@ public class DecisionSettleService {
     /** 需求编号形态：REQ-001（declare_requirements 生成）。 */
     private static final Pattern REQ_CODE = Pattern.compile("\\b(REQ-\\d+)\\b");
 
+    /** 验收类决策名形态：阶段交付验收/交付确认/阶段收口。 */
+    private static final Pattern ACCEPT_NAME = Pattern.compile("验收|交付确认|阶段收口");
+
     private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final RequirementRepository requirementRepo;
@@ -75,6 +78,7 @@ public class DecisionSettleService {
      */
     public List<String> settle(StageStep decisionStep, String answer, String answeredBy) {
         List<String> confirmed = confirmRequirements(decisionStep);
+        List<String> accepted = acceptRequirements(decisionStep, answer);
         writeDecisionDoc(decisionStep, answer, answeredBy, confirmed);
         // 项目状态实时推送：决策闭环 + 需求确认，在线前端收到即刷新台账与需求看板
         try {
@@ -84,6 +88,10 @@ public class DecisionSettleService {
             if (!confirmed.isEmpty()) {
                 projectEvents.publish(decisionStep.workspaceId(), "requirement.updated", Map.of(
                         "stage", decisionStep.stage(), "codes", confirmed, "action", "CONFIRMED"));
+            }
+            if (!accepted.isEmpty()) {
+                projectEvents.publish(decisionStep.workspaceId(), "requirement.updated", Map.of(
+                        "stage", decisionStep.stage(), "codes", accepted, "action", "DONE"));
             }
         } catch (Exception e) {
             log.warn("决策闭环事件推送失败（不影响落库）: ws={} -> {}",
@@ -120,6 +128,49 @@ public class DecisionSettleService {
             log.info("决策 #{} 答复联动: 需求自动确认 {}", step.seq(), confirmed);
         }
         return confirmed;
+    }
+
+    /**
+     * 验收回写（2026-10-20 全链路诊断）：交付验收类决策获用户批准时，把决策关联的需求
+     * （显式 requirement_codes + 决策文本正则兜底）置 DONE——用户批准验收 = human 确认，
+     * 符合信任链 verified_by=human 语义。此前需求永远停在 IN_PROGRESS（机器判定器未做、
+     * self 不算数），验收卡宣称完成而需求台账全未完成 = 两个真相打架。
+     * 仅对名字含「验收/交付确认/阶段收口」的决策生效，且答复不含拒绝语义；失败只记日志。
+     */
+    private static final Pattern REJECT_WORDS = Pattern.compile("拒绝|不同意|驳回|不通过|打回|重做|不确认|暂不");
+
+    private List<String> acceptRequirements(StageStep step, String answer) {
+        if (!ACCEPT_NAME.matcher(step.name() + " " + step.instruction()).find()) {
+            return List.of();
+        }
+        if (answer != null && REJECT_WORDS.matcher(answer).find()) {
+            return List.of();
+        }
+        List<String> codes = new ArrayList<>(step.requirementCodes());
+        Matcher m = REQ_CODE.matcher(step.name() + " " + step.instruction());
+        while (m.find()) {
+            String c = m.group(1);
+            if (!codes.contains(c)) {
+                codes.add(c);
+            }
+        }
+        List<String> accepted = new ArrayList<>();
+        for (String code : codes) {
+            try {
+                requirementRepo.findByCode(step.workspaceId(), code).ifPresent(r -> {
+                    if (!"DONE".equals(r.status()) && !"DROPPED".equals(r.status())) {
+                        requirementRepo.updateStatus(step.workspaceId(), code, "DONE");
+                        accepted.add(code);
+                    }
+                });
+            } catch (Exception e) {
+                log.warn("验收回写需求失败: ws={} code={} -> {}", step.workspaceId(), code, e.getMessage());
+            }
+        }
+        if (!accepted.isEmpty()) {
+            log.info("决策 #{} 验收联动: 需求置 DONE {}", step.seq(), accepted);
+        }
+        return accepted;
     }
 
     /** 决策记录落档：docs/{stage}/iter{n}/ 双落（文件 + DOC 索引），失败不抛。 */
