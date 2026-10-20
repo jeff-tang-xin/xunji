@@ -51,7 +51,7 @@ public class AgentScopeRuntime implements AgentRuntime {
     private static final Logger log = LoggerFactory.getLogger(AgentScopeRuntime.class);
 
     private static final String PROTOCOL_OPENAI = "OPENAI_PROTOCOL";
-    private static final int DEFAULT_MAX_ITERS = 40;
+    private static final int DEFAULT_MAX_ITERS = 300;
 
     /**
      * 会话状态存储（多轮记忆，docs/detail/04 §1）：所有 Agent 实例共享——
@@ -369,9 +369,10 @@ public class AgentScopeRuntime implements AgentRuntime {
         GenerateOptions.Builder b = GenerateOptions.builder();
         // 模型执行配置：AgentScope MODEL_DEFAULTS 超时 5 分钟（ExecutionConfig 字节码实锤），
         // qwen 慢生成单次可超 5 分钟 → Flux.timeout 触发 cancel → interrupt 任务线程 →
-        // 步骤被误标「执行被中断」。提到 30 分钟（与 SSE 上限 1800s 对齐），其余字段复刻 MODEL_DEFAULTS。
+        // 步骤被误标「执行被中断」（「勘探完成产物未落盘」×5 实锤）。
+        // 2026-10-20 用户定调「没有时间限制」：24h 为防句柄泄漏的工程上限，实际等于不设限。
         b.executionConfig(io.agentscope.core.model.ExecutionConfig.builder()
-                .timeout(java.time.Duration.ofMinutes(30))
+                .timeout(java.time.Duration.ofHours(24))
                 .maxAttempts(2)
                 .initialBackoff(java.time.Duration.ofSeconds(2))
                 .maxBackoff(java.time.Duration.ofSeconds(30))
@@ -396,8 +397,9 @@ public class AgentScopeRuntime implements AgentRuntime {
         return b.build();
     }
 
-    // 40 轮（2026-10-20 全链路诊断）：10 轮对「读现状+写文档+修错」类任务不够，
-    // architect 复杂任务被掐半成品（seq4「因迭代上限中断」实锤）；无超时灭绝下这是唯一护栏，40 轮 × qwen 2-3 分钟 ≈ 上限 2 小时，用户可随时终止
+    // 300 轮统一上限（2026-10-20 用户定调「步数统一 300 最大，没有时间限制」）：
+    // 10 轮曾把 architect 复杂任务掐成半成品（seq4「因迭代上限中断」实锤）；所有 agent 统一走此默认
+    //（无调用方设置 maxIterations），用户可随时人为终止，步数是唯一护栏
     private int maxIters(AgentSpec spec) {
         Object v = spec.runtime().get("maxIterations");
         return v instanceof Number n ? n.intValue() : DEFAULT_MAX_ITERS;
