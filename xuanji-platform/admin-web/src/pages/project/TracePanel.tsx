@@ -11,8 +11,8 @@
  * 复用父组件 requirement.updated/step.updated 事件刷新机制由 refreshKey 驱动）。
  */
 import { useEffect, useState } from 'react'
-import { Alert, Button, Card, Collapse, Empty, message, Modal, Space, Spin, Steps, Tag, Tooltip, Typography } from 'antd'
-import { FileTextOutlined, LockOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Collapse, Empty, Input, message, Modal, Space, Spin, Steps, Tag, Tooltip, Typography } from 'antd'
+import { AuditOutlined, FileTextOutlined, LockOutlined } from '@ant-design/icons'
 import type { StageExecution, StageStepRow } from './types'
 import { TraceGraph } from './TraceGraph'
 import { DecisionAnswerModal } from './DecisionAnswerModal'
@@ -273,12 +273,60 @@ export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], on
   const pendingDecisions = (exec?.steps || []).filter(
     (s) => s.stepType === 'DECISION' && s.status !== 'DONE' && s.status !== 'SKIPPED',
   )
+  // 验收责任链（P0）：human 验收步执行完停在 WAITING_ACCEPT——用户通过才 DONE，打回带原因重做
+  const pendingAccepts = (exec?.steps || []).filter((s) => s.status === 'WAITING_ACCEPT')
+  const [acceptBusy, setAcceptBusy] = useState(false)
+  const [rejectStep, setRejectStep] = useState<StageStepRow | null>(null)
+  const [rejectComment, setRejectComment] = useState('')
+
+  /** 用户验收：通过=DONE(verified_by=human) 主控被唤醒继续；打回=FAILED 带原因，主控组织重做。 */
+  const submitAccept = async (seq: number, pass: boolean, comment: string) => {
+    setAcceptBusy(true)
+    try {
+      await apiJson(`/api/projects/${projectId}/stage/step/${seq}/accept`, 'POST', { pass, comment })
+      message.success(pass ? '验收通过，主控继续推进' : '已打回，主控会组织重做')
+      setRejectStep(null)
+      setRejectComment('')
+      if (onRefresh) onRefresh()
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAcceptBusy(false)
+    }
+  }
   const deliverables = artifacts.filter((a) => a.kind === 'DELIVERABLE')
 
   return (
     <div>
       {/* 三阶段流水线：项目走到哪儿了，一眼可见 */}
       <Steps size="small" items={stepItems} style={{ marginBottom: 16 }} />
+
+      {/* 待验收区（P0 验收责任链）：human 验收步停在 WAITING_ACCEPT，用户裁决后才算 DONE */}
+      {pendingAccepts.length > 0 && (
+        <Card size="small" style={{ marginBottom: 10, borderColor: '#722ed1' }}>
+          <Space wrap size={6} style={{ marginBottom: 6 }}>
+            <AuditOutlined style={{ color: '#722ed1' }} />
+            <Typography.Text strong>{pendingAccepts.length} 个交付待验收</Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>验收通过后主控继续推进；不合规打回并写明问题</Typography.Text>
+          </Space>
+          {pendingAccepts.map((s) => (
+            <div key={s.id} style={{ padding: '4px 0', borderTop: '1px solid #f5f5f5' }}>
+              <Space wrap size={6}>
+                <Tag style={{ marginInlineEnd: 0 }} color="purple">验收 #{s.seq}</Tag>
+                <Typography.Text style={{ fontSize: 13 }}>{s.name}</Typography.Text>
+                <Button size="small" onClick={() => setDetailStep(s as never)}>看产出</Button>
+                <Button size="small" type="primary" loading={acceptBusy}
+                  onClick={() => submitAccept(s.seq, true, '')}>
+                  验收通过
+                </Button>
+                <Button size="small" danger onClick={() => { setRejectStep(s); setRejectComment('') }}>
+                  打回
+                </Button>
+              </Space>
+            </div>
+          ))}
+        </Card>
+      )}
 
       {/* 待决策区：链路上的活结——不处理，主控就停在这里（对话输入同时被锁定） */}
       {pendingDecisions.length > 0 && (
@@ -347,6 +395,26 @@ export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], on
         onClose={() => setDecisionStep(null)}
         onAnswered={() => { if (onRefresh) onRefresh() }}
       />
+      {/* 打回验收：原因必填——主控拿打回原因组织重做（原地重试，追溯图节点不变） */}
+      <Modal
+        open={!!rejectStep}
+        title={`打回：${rejectStep?.name || ''}`}
+        okText="确认打回"
+        okButtonProps={{ danger: true, disabled: !rejectComment.trim(), loading: acceptBusy }}
+        cancelText="取消"
+        onOk={() => rejectStep && submitAccept(rejectStep.seq, false, rejectComment.trim())}
+        onCancel={() => setRejectStep(null)}
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          打回后该步骤置为失败，主控会带着你的打回原因组织重做。
+        </Typography.Paragraph>
+        <Input.TextArea
+          rows={3}
+          value={rejectComment}
+          onChange={(e) => setRejectComment(e.target.value)}
+          placeholder="写明打回原因（必填）：哪里不合规、期望改成什么样"
+        />
+      </Modal>
       <RequirementDetailModal
         r={detailReq}
         onOpenStep={(s) => { setDetailReq(null); setDetailStep(s) }}

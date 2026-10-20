@@ -37,7 +37,21 @@ public record StageStep(
         String verifiedBy,
         String acceptanceJson,
         String deviationJson,
-        List<String> requirementCodes) {
+        List<String> requirementCodes,
+        String acceptanceOwner) {
+
+    /** 23 参兼容构造器：acceptance_owner 默认 tool（机器验收）——存量调用点不用改。 */
+    public StageStep(Long id, String workspaceId, String stage, int iteration, int seq, String name,
+                     StepType stepType, String agent, List<String> participants, StepStatus status,
+                     String instruction, String outputSummary, String outputFull, Long artifactId,
+                     String skipReason, String error, LocalDateTime createdAt, LocalDateTime startedAt,
+                     LocalDateTime finishedAt, String verifiedBy, String acceptanceJson,
+                     String deviationJson, List<String> requirementCodes) {
+        this(id, workspaceId, stage, iteration, seq, name, stepType, agent, participants, status,
+                instruction, outputSummary, outputFull, artifactId, skipReason, error,
+                createdAt, startedAt, finishedAt, verifiedBy, acceptanceJson, deviationJson,
+                requirementCodes, "tool");
+    }
 
     public StageStep {
         participants = participants == null ? List.of() : List.copyOf(participants);
@@ -45,6 +59,8 @@ public record StageStep(
         requirementCodes = requirementCodes == null ? List.of() : List.copyOf(requirementCodes);
         // 信任链：验证来源默认 self（AI 自述）——tool/human 只能由平台判定器与人工确认路径写入
         verifiedBy = verifiedBy == null || verifiedBy.isBlank() ? "self" : verifiedBy;
+        // 验收责任链（P0）：验收人默认 tool（机器验收）；human=执行完进 WAITING_ACCEPT 等用户通过
+        acceptanceOwner = "human".equalsIgnoreCase(acceptanceOwner) ? "human" : "tool";
     }
 
     /** 换 id（insert 后回填），其余不变。 */
@@ -52,7 +68,7 @@ public record StageStep(
         return new StageStep(newId, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, status, instruction, outputSummary, outputFull, artifactId,
                 skipReason, error, createdAt, startedAt, finishedAt,
-                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
     }
 
     /** 是否活跃（执行中或等待用户）——收口校验：存在活跃步骤则不可收口。 */
@@ -75,7 +91,7 @@ public record StageStep(
                 status == StepStatus.PLANNED && next == StepStatus.EXECUTING ? now : startedAt,
                 next == StepStatus.DONE || next == StepStatus.SKIPPED
                         || next == StepStatus.FAILED ? now : finishedAt,
-                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
     }
 
     /** 任务/讨论完成：状态 DONE + 产出摘要与全文 + 关联产物。 */
@@ -83,7 +99,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.DONE, instruction, summary, full, artifactId,
                 skipReason, error, createdAt, startedAt, LocalDateTime.now(),
-                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
     }
 
     /** 执行失败：状态 FAILED + 错误信息（主控下轮对话可见，自主决定重试或换路）。 */
@@ -91,7 +107,23 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.FAILED, instruction, outputSummary, outputFull,
                 artifactId, skipReason, message, createdAt, startedAt, LocalDateTime.now(),
-                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
+    }
+
+    /** 验收主体变更：tool=机器判定通过 / human=人确认（self=AI 自述，不作为需求闭环依据）。 */
+    public StageStep withVerifiedBy(String verifier) {
+        return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
+                participants, status, instruction, outputSummary, outputFull,
+                artifactId, skipReason, error, createdAt, startedAt, finishedAt,
+                verifier, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
+    }
+
+    /** seq 变更（重拾复用：新派单步骤对齐到被复用旧步骤的 seq，追溯图节点 key 保持稳定）。 */
+    public StageStep withSeq(int newSeq) {
+        return new StageStep(id, workspaceId, stage, iteration, newSeq, name, stepType, agent,
+                participants, status, instruction, outputSummary, outputFull,
+                artifactId, skipReason, error, createdAt, startedAt, finishedAt,
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
     }
 
     /** 主控跳过：状态 SKIPPED + 理由留档（能跳就跳，但必须说清为什么）。 */
@@ -99,7 +131,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.SKIPPED, instruction, outputSummary, outputFull,
                 artifactId, reason, error, createdAt, startedAt, LocalDateTime.now(),
-                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
     }
 
     /** 用户答复决策：状态 DONE + 答复留档。 */
@@ -107,7 +139,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, StepStatus.DONE, instruction, answer, outputFull,
                 artifactId, skipReason, error, createdAt, startedAt, LocalDateTime.now(),
-                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
     }
 
     /**
@@ -118,7 +150,7 @@ public record StageStep(
         return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
                 participants, status, instruction, outputSummary, outputFull,
                 artifactId, skipReason, error, createdAt, startedAt, finishedAt,
-                verifiedBy, acceptanceJson, deviationJson, requirementCodes);
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, acceptanceOwner);
     }
 
     /** 关联需求编号（ask_peer/discuss 留痕到需求：需求看板据此统计讨论/澄清次数）。 */
@@ -127,11 +159,19 @@ public record StageStep(
                 participants, status, instruction, outputSummary, outputFull,
                 artifactId, skipReason, error, createdAt, startedAt, finishedAt,
                 verifiedBy, acceptanceJson, deviationJson,
-                codes == null || codes.isEmpty() ? List.of() : codes);
+                codes == null || codes.isEmpty() ? List.of() : codes, acceptanceOwner);
     }
 
     /** participants 列的存储形态（逗号分隔），解析与序列化收敛在此。 */
-    public static List<String> parseParticipants(String stored) {
+        /** 声明验收人（'tool'=机器验收 | 'human'=用户验收）——规划时锁定。 */
+    public StageStep withAcceptanceOwner(String owner) {
+        return new StageStep(id, workspaceId, stage, iteration, seq, name, stepType, agent,
+                participants, status, instruction, outputSummary, outputFull,
+                artifactId, skipReason, error, createdAt, startedAt, finishedAt,
+                verifiedBy, acceptanceJson, deviationJson, requirementCodes, owner);
+    }
+
+public static List<String> parseParticipants(String stored) {
         if (stored == null || stored.isBlank()) {
             return List.of();
         }

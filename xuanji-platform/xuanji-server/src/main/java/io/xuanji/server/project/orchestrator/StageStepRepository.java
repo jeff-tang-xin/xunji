@@ -18,10 +18,20 @@ import java.util.Optional;
 @Repository
 public class StageStepRepository {
 
-    private final JdbcTemplate jdbc;
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(StageStepRepository.class);
 
-    public StageStepRepository(JdbcTemplate jdbc) {
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
+
+    public StageStepRepository(org.springframework.jdbc.core.JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    /** 项目是否仍存在（删除后异步任务落库守卫用）。 */
+    private boolean workspaceExists(String wsId) {
+        Boolean exists = jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM workspace WHERE id = ?)", Boolean.class, wsId);
+        return Boolean.TRUE.equals(exists);
     }
 
     private static final RowMapper<StageStep> MAPPER = (rs, i) -> new StageStep(
@@ -47,7 +57,8 @@ public class StageStepRepository {
             rs.getString("verified_by"),
             rs.getString("acceptance_json"),
             rs.getString("deviation_json"),
-            StageStep.parseRequirementCodes(rs.getString("requirement_codes")));
+            StageStep.parseRequirementCodes(rs.getString("requirement_codes")),
+            rs.getString("acceptance_owner"));
 
     private static LocalDateTime toLocal(Timestamp ts) {
         return ts == null ? null : ts.toLocalDateTime();
@@ -77,18 +88,25 @@ public class StageStepRepository {
 
     
 
-    /** 是否存在活跃（执行中/等待用户）步骤——收口校验与状态推导用。 */
+    /** 是否存在未了结步骤（执行中/等待用户/规划未动）——收口校验与状态推导用。
+     * PLANNED 必须拦（2026-10-20 审计修正）：SQL 原来漏了 PLANNED，主控可以在还有
+     * 未执行步骤时收口推进（跳步）、决策未答复也能收口（决策悬空）。 */
     public boolean hasActiveStep(String workspaceId, String stage, int iteration) {
         Boolean has = jdbc.queryForObject("""
                 SELECT EXISTS(SELECT 1 FROM project_stage_step
-                WHERE workspace_id = ? AND stage = ? AND iteration = ? AND status IN ('EXECUTING','WAITING'))
+                WHERE workspace_id = ? AND stage = ? AND iteration = ? AND status IN ('PLANNED','EXECUTING','WAITING','WAITING_ACCEPT'))
                 """, Boolean.class, workspaceId, stage, iteration);
         return Boolean.TRUE.equals(has);
     }
 
+    /** 重拾时同步刷新验收人（重规划可能改变验收安排）。 */
+    public void updateAcceptanceOwner(long id, String owner) {
+        jdbc.update("UPDATE project_stage_step SET acceptance_owner = ? WHERE id = ?",
+                "human".equalsIgnoreCase(owner) ? "human" : "tool", id);
+    }
+
     /** 本阶段本迭代已占用的最大 seq（含已销账行）——重规划时新步骤从 maxSeq+1 顺延，避免撞 uk_pss_ws_stage_iter_seq。 */
-    public int maxSeq(String workspaceId, String stage, int iteration) {
-        Integer max = jdbc.queryForObject(
+    public int maxSeq(String workspaceId, String stage, int iteration) {        Integer max = jdbc.queryForObject(
                 "SELECT COALESCE(MAX(seq), 0) FROM project_stage_step WHERE workspace_id = ? AND stage = ? AND iteration = ?",
                 Integer.class, workspaceId, stage, iteration);
         return max == null ? 0 : max;
@@ -125,6 +143,12 @@ public class StageStepRepository {
     }
 
     public long insert(StageStep s) {
+        // 项目已删除守卫（2026-10-20）：删除项目后异步任务（主控轮/ask_peer/讨论线程）还会存活几分钟，
+        // 落库会复活脏数据（实锤：删除后 CONSULT 步 seq 从 1 重新编号复活 7 行）——workspace 行不在即静默丢弃
+        if (!workspaceExists(s.workspaceId())) {
+            log.warn("步骤落库丢弃（项目已删除）: ws={} seq={} name={}", s.workspaceId(), s.seq(), s.name());
+            return -1L;
+        }
         // RETURNING id 同连接同语句取主键——原先 INSERT 后另查 currval 是两次独立调用，
         // 无事务绑定时可能拿到不同连接（currval 是会话级），并发下报错或拿错 id
         // JSONB 列传 String 须显式 CAST（否则 PG 报类型不匹配）；verified_by 空时落默认 self
@@ -132,8 +156,8 @@ public class StageStepRepository {
                 INSERT INTO project_stage_step (workspace_id, stage, iteration, seq, name, step_type,
                     agent, participants, status, instruction, output_summary, output_full,
                     artifact_id, skip_reason, error, started_at, finished_at,
-                    verified_by, acceptance_json, deviation_json, requirement_codes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb), CAST(? AS jsonb))
+                    verified_by, acceptance_json, deviation_json, requirement_codes, acceptance_owner)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb), CAST(? AS jsonb), ?)
                 RETURNING id
                 """,
                 Long.class,
@@ -144,7 +168,7 @@ public class StageStepRepository {
                 s.startedAt() == null ? null : Timestamp.valueOf(s.startedAt()),
                 s.finishedAt() == null ? null : Timestamp.valueOf(s.finishedAt()),
                 s.verifiedBy(), s.acceptanceJson(), s.deviationJson(),
-                StageStep.joinRequirementCodes(s.requirementCodes()));
+                StageStep.joinRequirementCodes(s.requirementCodes()), s.acceptanceOwner());
         return id == null ? 0L : id;
     }
 

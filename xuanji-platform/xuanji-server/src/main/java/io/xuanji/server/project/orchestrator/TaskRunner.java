@@ -41,6 +41,20 @@ public class TaskRunner {
     private final StageChatEventBus chatEvents;
     private final OpsConnectionManager ops;
 
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+
+    /** 自主执行纪律（2026-10-19「每个智能体都在敷衍」）：追加在每个执行任务 prompt 末尾——
+     * 先探索再动手、产出必须真实落盘、交付前自检、产出会被机器验收。 */
+    private static final String AUTONOMY_DISCIPLINE = """
+
+            【自主执行纪律——违反=任务失败】
+            1. 动手前先探索：先 list_directory 看项目结构，读相关文件了解现状与既有约定，不要凭空猜接口和格式。
+            2. 一切产出必须真实落盘：写文件用 write_text_file，写完读回确认内容完整。没调工具=没做——
+               禁止声称做了没做的事（「已创建」「已完成」必须以真实工具调用为前提）。
+            3. 交付前自检：对照任务验收断言逐条自查；能跑测试/构建就跑（execute_shell_command），失败先修再交。
+            4. 你的产出会被平台机器验收（产物存在性与内容核对），验收不过=任务失败打回——敷衍等于白干。
+            """;
+
     /** 双池防自等死锁：调度池跑 run（含限时等待），工作池跑阻塞的 invoke。
      * 工作池 4 线程：单线程时一个 8 分钟任务就把全平台任务型步骤串成队，多项目并发必排队。 */
     private final ExecutorService dispatchPool = Executors.newSingleThreadExecutor(r -> {
@@ -60,6 +74,7 @@ public class TaskRunner {
                       PeerConsultService peerConsult, RequirementRepository requirementRepo,
                       StageDocStore docStore, ProjectEventBus projectEvents,
                       StageChatEventBus chatEvents, OpsConnectionManager ops,
+                      com.fasterxml.jackson.databind.ObjectMapper objectMapper,
                       @org.springframework.context.annotation.Lazy StageOrchestrator orchestrator) {
         this.invoker = invoker;
         this.agentNodes = agentNodes;
@@ -71,6 +86,7 @@ public class TaskRunner {
         this.projectEvents = projectEvents;
         this.chatEvents = chatEvents;
         this.ops = ops;
+        this.objectMapper = objectMapper;
         this.orchestrator = orchestrator;
     }
 
@@ -79,19 +95,23 @@ public class TaskRunner {
      * 主控的 execute_step 已改走 {@link #runSync} 同步链路（产出直接回主控手里）。
      */
     public void submit(StageStep step, TopicBrief brief) {
-        dispatchPool.submit(() -> {
-            try {
-                runSync(step, brief);
-                orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
-                        "任务 #" + step.seq() + "「" + step.name() + "」已完成（人工重试），产出已留档。请消化后继续推进。");
-            } catch (DiscussionEngine.UserInterrupted ui) {
-                orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
-                        "任务 #" + step.seq() + "「" + step.name() + "」已被用户终止。请评估后续。");
-            } catch (Exception e) {
-                orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
-                        "任务 #" + step.seq() + "「" + step.name() + "」重试失败（" + TaskRunner.rootMessage(e) + "）。请评估后调整。");
-            }
-        });
+        java.util.concurrent.CompletableFuture<Void> f = java.util.concurrent.CompletableFuture
+                .runAsync(() -> {
+                    try {
+                        runSync(step, brief);
+                        orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
+                                "任务 #" + step.seq() + "「" + step.name() + "」已完成（人工重试），产出已留档。请消化后继续推进。");
+                    } catch (DiscussionEngine.UserInterrupted ui) {
+                        orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
+                                "任务 #" + step.seq() + "「" + step.name() + "」已被用户终止。请评估后续。");
+                    } catch (Exception e) {
+                        orchestrator.wakeIfSettled(step.workspaceId(), step.stage(), step.iteration(),
+                                "任务 #" + step.seq() + "「" + step.name() + "」重试失败（" + TaskRunner.rootMessage(e) + "）。请评估后调整。");
+                    }
+                }, dispatchPool);
+        // 项目级注册：删除项目时 terminateAll 一键终止（含人工重试后台任务）
+        TaskRegistry.register(step.workspaceId(), f);
+        f.whenComplete((v, e) -> TaskRegistry.unregister(step.workspaceId(), f));
     }
 
     /**
@@ -177,7 +197,8 @@ public class TaskRunner {
             AgentSpec spec = withTools(base, java.util.stream.Stream.concat(
                     List.of(peerConsult.askPeerDef(step, brief)).stream(),
                     OpsTools.defsFor(step.workspaceId(), ops).stream()).toList());
-            String prompt = brief.render(step.name(), step.instruction());
+            String prompt = brief.render(step.name(), step.instruction())
+                    + AUTONOMY_DISCIPLINE;
             Future<String> future = workPool.submit(() -> invoker.invoke(spec, prompt, onEvent));
             StepInterruption.register(step.id(), future);
             String output;
@@ -202,7 +223,38 @@ public class TaskRunner {
             projectRepo.insertArtifact(step.workspaceId(), stepNodeId,
                     "DELIVERABLE", step.name(), "TEXT", null, output, 1, "ACTIVE", step.stage(), step.agent());
             String summary = output.length() > 300 ? output.substring(0, 300) + "…" : output;
-            stepRepo.updateStatus(step.withOutput(summary, output, null));
+            // 机器验收（质量闸，2026-10-19「没有人为代码/质量负责」）：acceptance 里 type=artifact
+            // 的断言由平台逐条核对（产物存在且非空）——AI 自述「已创建」而文件不存在 = 验收失败，
+            // 任务落 FAILED（产出照留档），主控拿到失败明细自主重试。全过则 verified_by=tool
+            // （机器判定），需求闭环只认 tool/human，self 自述不再算数。
+            List<String> failedChecks = verifyArtifactAssertions(step);
+            if (!failedChecks.isEmpty()) {
+                String detail = "机器验收未通过（" + failedChecks.size() + " 项）："
+                        + String.join("；", failedChecks);
+                stepRepo.updateStatus(step.withError(detail));
+                log.warn("任务机器验收失败: ws={} seq={} -> {}", step.workspaceId(), step.seq(), detail);
+                projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
+                        "stage", step.stage(), "seq", step.seq(), "stepType", "TASK",
+                        "status", "FAILED", "name", step.name()));
+                throw new IllegalStateException(detail + "——产出已留档但产物未落盘/不合规，"
+                        + "重试时在 instruction 里带上本验收明细");
+            }
+            // 验收责任链（P0）：human 验收步执行完不直接 DONE——进 WAITING_ACCEPT 等用户
+            // 通过（验收端点）才 DONE（verified_by=human）；打回=FAILED 带原因可重试。
+            // tool 验收步走原机器验收通道直接 DONE。
+            if ("human".equals(step.acceptanceOwner())) {
+                stepRepo.updateStatus(step.withOutput(summary, output, null)
+                        .withStatus(StepStatus.WAITING_ACCEPT));
+                log.info("任务执行完成待用户验收: ws={} seq={}", step.workspaceId(), step.seq());
+                projectEvents.publish(step.workspaceId(), "step.updated", Map.of(
+                        "stage", step.stage(), "seq", step.seq(), "stepType", "TASK",
+                        "status", "WAITING_ACCEPT", "name", step.name()));
+                // 同步链路不唤醒：主控就阻塞在本方法调用上，产出经返回值直接回到它手里
+                return output + "\n\n[系统提示] 本步骤验收人=用户：产出已留档，等待用户在验收卡通过后才算 DONE；"
+                        + "请继续推进与验收无关的后续步骤，不要重复等待。";
+            }
+            stepRepo.updateStatus(step.withOutput(summary, output, null)
+                    .withVerifiedBy(hasArtifactAssertion(step) ? "tool" : "self"));
             // 执行轨迹留档（每步可视的回放通道）：output_full 已被纯产出覆盖，
             // 轨迹落 CHATLOG 文件——前端过程留档区可点击回看完整执行轨迹
             flush.accept("now");
@@ -255,11 +307,144 @@ public class TaskRunner {
     }
 
     /**
+     * 机器验收：acceptance 断言里 type=artifact 的条目由平台逐条核对——
+     * 产物（文件/目录）存在且非空才过。返回失败明细（空列表=全过或无可机器判断言）。
+     *
+     * <p>判定口径：target 相对项目根解析（normalize 后必须仍在根内，防越界）；
+     * 文件 size&gt;0、目录含至少 1 个条目视为「存在且非空」。解析异常按无断言处理
+     * （验收是闸不是雷，格式坏了不能把正常任务打失败——弱断言治理后续批次做标记）。</p>
+     */
+    private List<String> verifyArtifactAssertions(StageStep step) {
+        List<Map<String, Object>> assertions = parseAcceptance(step.acceptanceJson());
+        if (assertions.isEmpty()) {
+            return List.of();
+        }
+        String root = agentNodes.workspaceRoot(step.workspaceId());
+        if (root == null) {
+            log.warn("机器验收跳过（工作区根缺失）: ws={} seq={}", step.workspaceId(), step.seq());
+            return List.of();
+        }
+        java.nio.file.Path base = java.nio.file.Path.of(root).toAbsolutePath().normalize();
+        List<String> failed = new java.util.ArrayList<>();
+        for (Map<String, Object> a : assertions) {
+            String type = String.valueOf(a.get("type"));
+            // shell 断言（P0）：{"type":"shell","command":"...","expect_contains":"..."}——
+            // 在项目根目录真跑命令核对输出（测试/构建/健康检查），输出含期望串=过。
+            // 超时 120s；命令执行失败或输出不含期望=验收失败（明细进 error 供重试）
+            if ("shell".equalsIgnoreCase(type)) {
+                String command = String.valueOf(a.getOrDefault("command", "")).trim();
+                String expect = String.valueOf(a.getOrDefault("expect_contains", "")).trim();
+                if (command.isEmpty()) {
+                    continue;
+                }
+                String check = runShellAssertion(base, command, expect);
+                if (check != null) {
+                    failed.add("shell[" + command + "]：" + check);
+                }
+                continue;
+            }
+            if (!"artifact".equalsIgnoreCase(type)) {
+                continue;
+            }
+            String target = String.valueOf(a.getOrDefault("target", "")).trim();
+            if (target.isEmpty()) {
+                continue;
+            }
+            java.nio.file.Path p = base.resolve(target).normalize();
+            if (!p.startsWith(base)) {
+                failed.add(target + "（路径越界）");
+                continue;
+            }
+            if (!java.nio.file.Files.exists(p)) {
+                failed.add(target + "（产物不存在——声称创建但未落盘）");
+            } else if (isPathEmpty(p)) {
+                failed.add(target + "（产物为空）");
+            }
+        }
+        return failed;
+    }
+
+    /** acceptance 里是否存在 artifact/shell 断言（决定 verified_by=tool 还是 self）。 */
+    private boolean hasArtifactAssertion(StageStep step) {
+        return parseAcceptance(step.acceptanceJson()).stream()
+                .anyMatch(a -> ("artifact".equalsIgnoreCase(String.valueOf(a.get("type")))
+                        && String.valueOf(a.getOrDefault("target", "")).trim().isEmpty() == false)
+                        || ("shell".equalsIgnoreCase(String.valueOf(a.get("type")))
+                        && String.valueOf(a.getOrDefault("command", "")).trim().isEmpty() == false));
+    }
+
+    /**
+     * shell 断言执行：项目根目录跑命令，核对输出含期望串。
+     *
+     * @return null=通过；非 null=失败原因（命令失败/超时/输出不含期望）
+     */
+    private String runShellAssertion(java.nio.file.Path base, String command, String expect) {
+        try {
+            Process proc = new ProcessBuilder("sh", "-c", command)
+                    .directory(base.toFile())
+                    .redirectErrorStream(true)
+                    .start();
+            boolean finished = proc.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                proc.destroyForcibly();
+                return "执行超时（120s）";
+            }
+            String out = new String(proc.getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            if (proc.exitValue() != 0) {
+                String tail = out.length() > 300 ? out.substring(out.length() - 300) : out;
+                return "退出码 " + proc.exitValue() + "——" + tail.replace('\n', ' ');
+            }
+            if (!expect.isEmpty() && !out.contains(expect)) {
+                String tail = out.length() > 300 ? out.substring(out.length() - 300) : out;
+                return "输出不含期望串「" + expect + "」——末尾输出：" + tail.replace('\n', ' ');
+            }
+            return null;
+        } catch (Exception e) {
+            return "执行异常：" + TaskRunner.rootMessage(e);
+        }
+    }
+
+    /** acceptance_json（JSONB 数组 [{type,target,expect}]）→ List；解析失败按无断言处理。 */
+    private List<Map<String, Object>> parseAcceptance(String acceptanceJson) {
+        if (acceptanceJson == null || acceptanceJson.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<?> raw = objectMapper.readValue(acceptanceJson, List.class);
+            List<Map<String, Object>> out = new java.util.ArrayList<>();
+            for (Object o : raw) {
+                if (o instanceof Map<?, ?> m) {
+                    Map<String, Object> row = new java.util.LinkedHashMap<>();
+                    m.forEach((k, v) -> row.put(String.valueOf(k), v));
+                    out.add(row);
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    private boolean isPathEmpty(java.nio.file.Path p) {
+        try {
+            if (java.nio.file.Files.isDirectory(p)) {
+                try (var s = java.nio.file.Files.list(p)) {
+                    return s.findFirst().isEmpty();
+                }
+            }
+            return java.nio.file.Files.size(p) == 0;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    /**
      * 需求状态回写：步骤完成时，检查其声明的需求项——若该需求全部关联步骤均已产出
      * （无 PLANNED/EXECUTING/WAITING），置 DONE；首个关联步骤开工时置 IN_PROGRESS。
      * 回写失败只记日志（需求状态是看板信息，不阻塞任务完成）。
      */
-    private void settleRequirements(StageStep doneStep) {
+    public void settleRequirements(StageStep doneStep) {
         try {
             for (String code : doneStep.requirementCodes()) {
                 requirementRepo.findByCode(doneStep.workspaceId(), code).ifPresent(r -> {
@@ -270,10 +455,16 @@ public class TaskRunner {
                             doneStep.stage(), doneStep.iteration()).stream()
                             .filter(s -> s.requirementCodes().contains(code))
                             .toList();
-                    boolean allSettled = linked.stream().allMatch(StageStep::produced);
-                    if (allSettled && !linked.isEmpty()) {
+                    // 需求闸（2026-10-19「没有人为需求负责」）：DONE = 关联步骤全产出 且
+                    // TASK 步全部经机器/人工验收（verified_by=tool/human）——AI 自述（self）
+                    // 不算数，产出≠满足需求。DISCUSS 步无断言合理，不参与 verified 判定。
+                    boolean allProduced = linked.stream().allMatch(StageStep::produced);
+                    boolean allVerified = linked.stream()
+                            .filter(s -> s.stepType() == StepType.TASK)
+                            .allMatch(s -> "tool".equals(s.verifiedBy()) || "human".equals(s.verifiedBy()));
+                    if (allProduced && allVerified && !linked.isEmpty()) {
                         requirementRepo.updateStatus(doneStep.workspaceId(), code, "DONE");
-                        log.info("需求项完成回写: ws={} {} DONE（{} 个关联步骤全部产出）",
+                        log.info("需求项完成回写: ws={} {} DONE（{} 个关联步骤全部产出且经验收）",
                                 doneStep.workspaceId(), code, linked.size());
                     }
                 });

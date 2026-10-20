@@ -47,6 +47,26 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
   const [decisionStep, setDecisionStep] = useState<StageStepRow | null>(null)
   const [decisionAnswer, setDecisionAnswer] = useState('')
   const [decisionSubmitting, setDecisionSubmitting] = useState(false)
+  // 验收责任链（P0）：human 验收步（kind=ACCEPT）的通过/打回交互
+  const [acceptSubmitting, setAcceptSubmitting] = useState(false)
+  const [rejectStep, setRejectStep] = useState<{ seq: number; name: string } | null>(null)
+  const [rejectComment, setRejectComment] = useState('')
+
+  /** 用户验收：通过=DONE(verified_by=human)，主控被唤醒继续；打回=FAILED 带原因，主控组织重做。 */
+  const submitAccept = async (seq: number, pass: boolean, comment: string) => {
+    setAcceptSubmitting(true)
+    try {
+      await apiJson(`/api/projects/${projectId}/stage/step/${seq}/accept`, 'POST', { pass, comment })
+      message.success(pass ? '验收通过，主控继续推进' : '已打回，主控会组织重做')
+      onRefresh?.()
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAcceptSubmitting(false)
+      setRejectStep(null)
+      setRejectComment('')
+    }
+  }
 
   // 决策指令按行防御性解析（LLM 自由文本格式会漂，识别不了就按普通段落渲染）：
   // 选项行「- A1. xxx」→ 可点击；决策标题行「A. xxx」/「决策 N」→ 加粗分块；【推荐】→ 高亮
@@ -375,8 +395,21 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
               key={String(w.node_run_id)}
               size="small"
               type="inner"
-              title={<Space><LockOutlined /><span>待决策：{w.node_name || w.node_id}</span></Space>}
-              extra={orchestrated ? (
+              title={<Space><LockOutlined /><span>{w.kind === 'ACCEPT' ? '待验收' : '待决策'}：{w.node_name || w.node_id}</span></Space>}
+              extra={w.kind === 'ACCEPT' ? (
+                // 验收卡：通过/打回（打回必须写原因）——human 验收步停在 WAITING_ACCEPT，用户裁决后才算 DONE
+                <Space>
+                  <Button type="primary" size="small" icon={<CheckCircleOutlined />}
+                    loading={acceptSubmitting}
+                    onClick={() => submitAccept(Number(w.node_id) || 0, true, '')}>
+                    验收通过
+                  </Button>
+                  <Button danger size="small"
+                    onClick={() => { setRejectStep({ seq: Number(w.node_id) || 0, name: w.node_name || '' }); setRejectComment('') }}>
+                    打回
+                  </Button>
+                </Space>
+              ) : orchestrated ? (
                 <Button type="primary" size="small" onClick={() => {
                   // waiting_decisions 里的 DECISION 步（后端 orchestrationView：node_id=seq / node_name / output=instruction）
                   setDecisionStep({
@@ -398,7 +431,9 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
               )}
             >
               <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
-                {orchestrated
+                {w.kind === 'ACCEPT'
+                  ? '该步骤验收人是你：产出已留档（下方查看），验收通过后主控继续推进；不合规请打回并写明问题，主控会组织重做。'
+                  : orchestrated
                   ? '主控 AI 在等待你的决定——点右上「处理」直接答复（左侧对话输入在决策处理前会锁定）。答复后主控继续推进。'
                   : '该节点已产出并挂起等待人工决策。通过后继续执行后续节点（后台跑，页面会自动刷新）；驳回必须写批注。'}
               </Typography.Paragraph>
@@ -611,6 +646,27 @@ export function StageExecutionPanel({ projectId, exec, busy, onRefresh, onChange
           value={decisionAnswer}
           onChange={(e) => setDecisionAnswer(e.target.value)}
           placeholder="点上方选项快速填入编号（如 A1 B1 C1 D1），也可直接输入文字；全部采纳推荐可点「采纳全部推荐」。主控会按答复继续推进，答复留档可追溯"
+        />
+      </Modal>
+
+      {/* 打回验收：原因必填——主控拿打回原因组织重做 */}
+      <Modal
+        open={!!rejectStep}
+        title={`打回：${rejectStep?.name || ''}`}
+        okText="确认打回"
+        okButtonProps={{ danger: true, disabled: !rejectComment.trim(), loading: acceptSubmitting }}
+        cancelText="取消"
+        onOk={() => rejectStep && submitAccept(rejectStep.seq, false, rejectComment.trim())}
+        onCancel={() => setRejectStep(null)}
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          打回后该步骤置为失败，主控会带着你的打回原因组织重做（原地重试，追溯图节点不变）。
+        </Typography.Paragraph>
+        <Input.TextArea
+          rows={3}
+          value={rejectComment}
+          onChange={(e) => setRejectComment(e.target.value)}
+          placeholder="写明打回原因（必填）：哪里不合规、期望改成什么样"
         />
       </Modal>
     </>

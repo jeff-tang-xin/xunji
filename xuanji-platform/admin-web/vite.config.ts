@@ -8,7 +8,9 @@ export default defineConfig({
   plugins: [react()],
   base: './',
   build: {
-    outDir: '../xuanji-server/src/main/resources/static',
+    // 2026-10-20：直写 static 会撞 GraalPy 运行时句柄泄漏的 delete-pending 锁
+    // （run_python open() 读过 bundle 后文件永久 EPERM），改为先出 dist 再由构建脚本拷入 static
+    outDir: 'dist',
     emptyOutDir: true,
   },
   server: {

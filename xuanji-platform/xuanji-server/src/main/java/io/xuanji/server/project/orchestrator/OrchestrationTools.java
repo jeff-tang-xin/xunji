@@ -57,6 +57,9 @@ public class OrchestrationTools {
     private final TestCaseRepository testCaseRepo;
     private final BugRepository bugRepo;
     private final DeliverySettleService deliverySettler;
+    /** 阶段收口自动续跑钩子（StageOrchestrator::autoStartStage，函数接口解耦避免循环依赖）：
+     * complete_stage 成功后自动启动下一阶段首轮主控对话——流程不断链。 */
+    private final java.util.function.BiConsumer<String, String> stageAutoStart;
 
     /** 需求编号形态（REQ-001）：requirement_codes 漏传时从决策/任务文本兜底提取。 */
     private static final Pattern REQ_CODE = Pattern.compile("\\b(REQ-\\d+)\\b");
@@ -81,7 +84,8 @@ public class OrchestrationTools {
                               RequirementRepository requirementRepo, PeerConsultService peerConsult,
                               DecisionSettleService decisionSettler, ProjectEventBus projectEvents,
                               TestCaseRepository testCaseRepo, BugRepository bugRepo,
-                              DeliverySettleService deliverySettler) {
+                              DeliverySettleService deliverySettler,
+                              java.util.function.BiConsumer<String, String> stageAutoStart) {
         this.user = user;
         this.wsId = wsId;
         this.stage = stage;
@@ -102,6 +106,7 @@ public class OrchestrationTools {
         this.testCaseRepo = testCaseRepo;
         this.bugRepo = bugRepo;
         this.deliverySettler = deliverySettler;
+        this.stageAutoStart = stageAutoStart;
     }
 
     /** 主控可见的全部编排工具（BEAN 形态 ToolDef）。 */
@@ -182,7 +187,7 @@ public class OrchestrationTools {
                 @SuppressWarnings("unchecked")
                 List<String> participants = m.get("participants") instanceof List<?> pl
                         ? pl.stream().map(String::valueOf).toList() : List.of();
-                // acceptance 断言：可判定的验收标准（test/artifact/api），规划时锁定，执行链不可改
+                // acceptance 断言：可判定的验收标准（test/artifact/api/shell），规划时锁定，执行链不可改
                 String acceptanceJson = toJson(m.get("acceptance"));
                 // 需求先行：步骤声明服务哪些需求项（code 列表，可空）
                 @SuppressWarnings("unchecked")
@@ -191,6 +196,17 @@ public class OrchestrationTools {
                 // 重拾命中：同名同类型同 agent 的 FAILED/SKIPPED 行原地重置（保持旧 seq），
                 // 规划内容按新规划覆盖；一行只复用一次（同名多行时逐个消费）
                 StepType type = "DISCUSS".equalsIgnoreCase(str(m.get("type"))) ? StepType.DISCUSS : StepType.TASK;
+                // 验收责任链（P0）：每步声明验收人——'tool'=机器验收（默认）| 'human'=用户验收
+                // （执行完进 WAITING_ACCEPT，用户通过才 DONE）。交付型步骤（TASK）必填，
+                // 缺失拒绝规划——验收人缺位=没人对结果负责（敷衍产出一路绿灯的根因）
+                String acceptanceOwner = str(m.get("acceptance_owner"));
+                if (type != StepType.DISCUSS && !"human".equalsIgnoreCase(acceptanceOwner)
+                        && !"tool".equalsIgnoreCase(acceptanceOwner)) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "步骤「" + name + "」缺 acceptance_owner：交付型步骤必须声明验收人——"
+                                    + "\"tool\"=平台机器验收（产物断言/验证命令），\"human\"=用户验收（关键交付：PRD/架构设计/上线报告）。"
+                                    + "验收人缺位=没人对结果负责，敷衍产出会一路绿灯"));
+                }
                 StageStep match = settled.stream()
                         .filter(s -> s.name().equals(name) && s.stepType() == type
                                 && s.agent() != null && s.agent().equals(rowAgent))
@@ -198,13 +214,16 @@ public class OrchestrationTools {
                 if (match != null) {
                     settled.remove(match);
                     stepRepo.resetForReuse(match.id(), str(m.get("instruction")), acceptanceJson, reqCodes);
+                    // 重拾同步刷新验收人（重规划可能改变验收安排）
+                    stepRepo.updateAcceptanceOwner(match.id(), acceptanceOwner);
                     reused++;
                     continue;
                 }
                 rows.add(new StageStep(null, wsId, stage, iteration, seq++, name, type,
                         str(m.get("agent")), participants, StepStatus.PLANNED,
                         str(m.get("instruction")), null, null, null, null, null, null, null, null,
-                        null, acceptanceJson, null, reqCodes));
+                        null, acceptanceJson, null, reqCodes,
+                        "human".equalsIgnoreCase(acceptanceOwner) ? "human" : "tool"));
             }
             stepRepo.replacePlanned(wsId, stage, iteration, rows);
             stepRepo.saveAnchor(wsId, stage, iteration, anchor);
@@ -903,8 +922,23 @@ public class OrchestrationTools {
                         step.finishedAt(), step.verifiedBy(), step.acceptanceJson(), step.deviationJson(),
                         step.requirementCodes());
             }
-            long id = stepRepo.insert(step);
-            StageStep exec = step.withId(id);
+            // 重拾复用（2026-10-19「相同节点可以重拾 不能直接创建」）：同名同 agent 的
+            // FAILED/SKIPPED 旧步骤原地重置（seq 不变，追溯图节点原地转绿）——execute_step
+            // 是即席派单，失败重试若每次都新建，图上会堆一堆红色旧节点 + 灰色新节点
+            Optional<StageStep> stale = stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .filter(s -> s.status() == StepStatus.FAILED || s.status() == StepStatus.SKIPPED)
+                    .filter(s -> s.name().equals(name) && s.agent() != null && s.agent().equals(agent))
+                    .findFirst();
+            long id;
+            StageStep exec;
+            if (stale.isPresent()) {
+                stepRepo.resetForReuse(stale.get().id(), step.instruction(), step.acceptanceJson(), codes);
+                id = stale.get().id();
+                exec = step.withId(id).withSeq(stale.get().seq());
+            } else {
+                id = stepRepo.insert(step);
+                exec = step.withId(id);
+            }
             try {
                 // 同步执行（无超时）：产出直接回到你手里，当场消化再决定下一步
                 String output = taskRunner.runSync(exec, brief(""));
@@ -963,12 +997,17 @@ public class OrchestrationTools {
             }
             StageStep step = nextStep("决策：" + truncate(question, 40), StepType.DECISION,
                     "user", List.of(), question).withRequirementCodes(codes);
+            // 创建即 WAITING（2026-10-20 审计修正）：决策步的生命周期是 WAITING→DONE，
+            // 此前创建后一直 PLANNED（WAITING 从未被写入，状态机注释与实现不符）——
+            // 后果：autoPilot 把它当待办唤醒主控空转（当晚实锤）、收口校验拦不住决策悬空。
+            // WAITING=active：收口被拦、autoPilot 不抢跑、决策卡照常收集，全链路自洽。
+            step = step.withStatus(StepStatus.WAITING);
             stepRepo.insert(step);
             // 实时性（2026-10-19）：决策步落库即推送——否则决策卡要等 30s 轮询才出现，
             // 用户不知道 AI 在等什么（审计实锤缺口 #3）
             projectEvents.publish(wsId, "step.updated", Map.of(
                     "stage", stage, "seq", step.seq(), "stepType", "DECISION",
-                    "status", "PLANNED", "name", step.name()));
+                    "status", "WAITING", "name", step.name()));
             return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
                     "message", "已向用户提出决策请求，等待答复（答复后需求自动确认并生成决策记录；也可用 record_answer 落档）"));
         });
@@ -982,6 +1021,13 @@ public class OrchestrationTools {
                     .filter(s -> s.seq() == seq && s.stepType() == StepType.DECISION).findFirst();
             if (found.isEmpty()) {
                 return ToolResult.of(Map.of("ok", false, "message", "决策序号不存在: " + seq));
+            }
+            // 与用户答复端点同一条校验：已处理（DONE/SKIPPED）的决策拒绝重复落档——
+            // 否则主控重复答复会覆盖用户原答复（审计发现与 answerDecision 不一致）
+            StepStatus cur = found.get().status();
+            if (cur == StepStatus.DONE || cur == StepStatus.SKIPPED) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "决策 #" + seq + " 已处理（" + cur + "），无需重复落档"));
             }
             stepRepo.updateStatus(found.get().withAnswer(answer));
             // 决策答复闭环：关联需求自动确认 + 决策记录落档（与答复端点同一条确定性联动）
@@ -997,13 +1043,43 @@ public class OrchestrationTools {
             String summary = str(req.input().get("summary"));
             if (stepRepo.hasActiveStep(wsId, stage, iteration)) {
                 return ToolResult.of(Map.of("ok", false,
-                        "message", "仍有执行中/等待中的小流程，不能收口；先等它们完成或处理掉"));
+                        "message", "仍有未了结的小流程（执行中/等待答复/待验收/规划未执行），不能收口；"
+                                + "先逐个执行或 skip_step 处理掉，等待答复的决策等用户答复后再收口"));
+            }
+            // 验收责任链（P0）：本阶段没有任何用户验收过的交付 → 自动插一道「阶段交付验收」
+            // 决策（等用户答复）并拒绝收口——用户不点头，阶段不推进（结构性保证，不靠 PM 自觉）
+            List<StageStep> steps = stepRepo.findByStage(wsId, stage, iteration);
+            boolean humanAccepted = steps.stream()
+                    .anyMatch(s -> s.status() == StepStatus.DONE && "human".equals(s.verifiedBy()));
+            if (!humanAccepted) {
+                StageStep gate = nextStep("阶段交付验收：" + truncate(summary, 40), StepType.DECISION,
+                        "user", List.of(),
+                        "本阶段交付是否验收通过？通过后进入下一阶段；有问题请直接说明，PM 会组织整改。")
+                        .withStatus(StepStatus.WAITING);
+                stepRepo.insert(gate);
+                projectEvents.publish(wsId, "step.updated", Map.of(
+                        "stage", stage, "seq", gate.seq(), "stepType", "DECISION",
+                        "status", "WAITING", "name", gate.name()));
+                return ToolResult.of(Map.of("ok", false,
+                        "seq", gate.seq(),
+                        "message", "本阶段还没有任何用户验收过的交付（verified_by=human 的步骤为 0）——"
+                                + "已自动发起「阶段交付验收」决策（#" + gate.seq() + "），等用户答复后再收口。"
+                                + "不要重复发起，直接告知用户在决策卡验收即可"));
             }
             try {
                 Map<String, Object> advanced = advancer.complete(wsId, stage, summary);
+                String nextStage = String.valueOf(advanced.getOrDefault("current_stage", ""));
+                // 阶段收口自动续跑（2026-10-19「后续阶段一会儿就没后续了」）：收口即自动启动
+                // 下一阶段首轮主控对话（系统唤醒轮，走事件总线实时回显）——流程不断链，
+                // 用户不需要再发一条消息才动。下一阶段是 OPERATE 且项目无该阶段时 advancer 已兜底。
+                if (!nextStage.isBlank() && !"DONE".equalsIgnoreCase(nextStage)) {
+                    stageAutoStart.accept(wsId, nextStage);
+                }
                 return ToolResult.of(Map.of("ok", true,
-                        "next_stage", String.valueOf(advanced.getOrDefault("current_stage", "")),
-                        "message", "阶段已收口并推进到 " + advanced.getOrDefault("current_stage", "下一阶段")));
+                        "next_stage", nextStage,
+                        "message", "阶段已收口并推进到 " + nextStage
+                                + (nextStage.isBlank() || "DONE".equalsIgnoreCase(nextStage)
+                                        ? "（项目全部阶段完成）" : "，下一阶段已自动启动（系统唤醒轮，右侧追溯可见）")));
             } catch (Exception e) {
                 return ToolResult.of(Map.of("ok", false,
                         "message", "收口失败: " + TaskRunner.rootMessage(e)));
@@ -1285,6 +1361,7 @@ public class OrchestrationTools {
         stepProps.put("participants", arr(str("DISCUSS 参与者 agent 英文名名单（如 [\"product_analyst\",\"architect\"]；禁用中文显示名）")));
         stepProps.put("instruction", str("任务说明/讨论议题"));
         stepProps.put("acceptance", arr(obj(acceptanceProps)));
+        stepProps.put("acceptance_owner", str("验收人（TASK 必填）：\"tool\"=平台机器验收（产物断言/验证命令，默认）；\"human\"=用户验收（关键交付必用：PRD/架构设计/上线报告——执行完停在待验收，用户通过才 DONE）"));
         stepProps.put("requirement_codes", arr(str("本步服务的需求项编号列表（如 [\"REQ-001\"]）——需求先行的锚定：实施步骤应声明为了哪个需求")));
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("intent_anchor", str("意图锚：一段话锁定本阶段全局意图与总体验收口径（用户要什么、成功长什么样）。规划后锁定，后续每步执行都对照它防走偏；重规划时才可更新"));
@@ -1310,8 +1387,10 @@ public class OrchestrationTools {
     /** 验收断言字段（plan_steps 与 declare_requirements 共用同一套口径）。 */
     private Map<String, Object> acceptanceProps() {
         Map<String, Object> acceptanceProps = new LinkedHashMap<>();
-        acceptanceProps.put("type", str("验收方式：test=测试通过 / artifact=产物存在且合规 / api=接口响应符合预期"));
+        acceptanceProps.put("type", str("验收方式：test=测试通过 / artifact=产物存在且合规 / shell=真跑命令核对输出（command+expect_contains，超时120s）/ api=接口响应符合预期"));
         acceptanceProps.put("target", str("判定对象：测试类名/产物路径/接口端点"));
+        acceptanceProps.put("command", str("shell 断言专用：要在项目根目录执行的命令（如 mvn -q test、node --version）"));
+        acceptanceProps.put("expect_contains", str("shell 断言专用：命令输出必须包含的期望串（如 \"Tests run: 0, Failures: 0\"）"));
         acceptanceProps.put("expect", str("可判定的预期：如 pass、含某章节、返回 200 且含某字段——禁止写「质量良好」这类不可判定描述"));
         return acceptanceProps;
     }

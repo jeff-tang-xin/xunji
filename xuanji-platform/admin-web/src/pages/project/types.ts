@@ -37,6 +37,8 @@ export interface WaitingDecision {
   node_id: string
   node_name: string
   output?: string | null
+  /** DECISION=决策答复框；ACCEPT=验收卡（通过/打回按钮，human 验收步停在 WAITING_ACCEPT） */
+  kind?: 'DECISION' | 'ACCEPT'
 }
 
 /** 规划子任务（plan_json.tasks 元素，由 StagePlanCompiler 编译成串行节点） */
@@ -137,7 +139,7 @@ export interface StageStepRow {
   stepType: 'TASK' | 'DISCUSS' | 'DECISION' | 'CONSULT'
   agent?: string | null
   participants?: string[]
-  status: 'PLANNED' | 'EXECUTING' | 'DONE' | 'SKIPPED' | 'FAILED' | 'WAITING'
+  status: 'PLANNED' | 'EXECUTING' | 'DONE' | 'SKIPPED' | 'FAILED' | 'WAITING' | 'WAITING_ACCEPT'
   /** TASK=指令 / DECISION=向用户提出的问题 */
   instruction?: string | null
   outputSummary?: string | null
@@ -158,6 +160,7 @@ export const STEP_STATUS_LABEL: Record<string, string> = {
   SKIPPED: '已跳过',
   FAILED: '失败',
   WAITING: '等你答复',
+  WAITING_ACCEPT: '待你验收',
 }
 
 export const STEP_STATUS_COLOR: Record<string, string> = {
@@ -167,6 +170,7 @@ export const STEP_STATUS_COLOR: Record<string, string> = {
   SKIPPED: 'orange',
   FAILED: 'error',
   WAITING: 'gold',
+  WAITING_ACCEPT: 'purple',
 }
 
 /** 步骤类型中文 */

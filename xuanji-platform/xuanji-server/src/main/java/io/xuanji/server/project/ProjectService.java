@@ -82,6 +82,8 @@ public class ProjectService {
     private io.xuanji.server.project.orchestrator.DiscussionEngine discussionEngine;
     @Autowired
     private io.xuanji.server.project.orchestrator.StageOrchestrator stageOrchestrator;
+    @Autowired
+    private io.xuanji.server.project.orchestrator.ProjectEventBus projectEvents;
     @Value(value="${xuanji.workspace.root:./workspaces}")
     private String workspaceRoot;
     private final ExecutorService autoFlowExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -346,7 +348,8 @@ public class ProjectService {
             // 而重规划又因已销账行占住 seq 撞唯一键，形成「收口要规划头、规划头建不了」的死锁（测试003 实锤）。
             if (this.stepRepo.hasActiveStep(wsId, current, iteration)) {
                 throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST,
-                        stageLabel(current) + "阶段仍有执行中/等待中的小流程，不能收口；先等它们完成或处理掉");
+                        stageLabel(current) + "阶段仍有未了结的小流程（执行中/等待答复/规划未执行），不能收口；"
+                                + "先执行或 skip_step 处理掉，等待答复的决策等用户答复后再收口");
             }
         } else {
             if (!"APPROVED".equals(String.valueOf(stagePlan.get("status")))) {
@@ -699,6 +702,57 @@ public class ProjectService {
                     new io.xuanji.server.project.orchestrator.TopicBrief("", "", step.instruction(), "", ""));
         }
         return Map.of("ok", true, "seq", seq, "message", "已重新发起，完成后自动刷新（主控会被唤醒继续）");
+    }
+
+    /**
+     * 用户验收（P0 验收责任链）：human 验收步停在 WAITING_ACCEPT，由用户裁决。
+     * 通过 → DONE（verified_by=human，需求回写，唤醒主控消化）；打回 → FAILED（带原因，
+     * 主控下轮看到打回原因自主重试——execute_step 重拾机制原地重做）。
+     */
+    public Map<String, Object> acceptStep(LoginUser user, String wsId, long seq, Map<String, Object> body) {
+        this.requireProject(user, wsId);
+        String stage = this.currentStageOf(wsId);
+        int iteration = this.currentIterationOf(wsId);
+        StageStep step = this.stepRepo.findByStage(wsId, stage, iteration).stream()
+                .filter(s -> s.seq() == seq).findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "步骤不存在: seq=" + seq));
+        if (step.status() != StepStatus.WAITING_ACCEPT) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "该步骤不在待验收状态（当前 " + step.status() + "）——只有验收人=用户的步骤执行完后才需要验收");
+        }
+        boolean pass = Boolean.TRUE.equals(body.get("pass"));
+        String comment = String.valueOf(body.getOrDefault("comment", ""));
+        if (pass) {
+            StageStep done = step.withStatus(StepStatus.DONE).withVerifiedBy("human");
+            if (!comment.isBlank()) {
+                done = done.withAnswer(comment);
+            }
+            this.stepRepo.updateStatus(done);
+            // 需求回写与 tool 验收同口径：human 通过同样推进需求闭环
+            try {
+                taskRunner.settleRequirements(done);
+            } catch (Exception ignore) {
+                // 需求回写失败不阻塞验收（看板信息）
+            }
+            this.projectEvents.publish(wsId, "step.updated", Map.of(
+                    "stage", stage, "seq", seq, "stepType", "TASK",
+                    "status", "DONE", "name", step.name()));
+            this.stageOrchestrator.wakeIfSettled(wsId, stage, iteration,
+                    "步骤 #" + seq + "「" + step.name() + "」已通过用户验收" + (comment.isBlank() ? "" : "（意见：" + comment + "）")
+                            + "。请消化验收结论后继续推进。");
+            return Map.of("ok", true, "seq", seq, "status", "DONE",
+                    "message", "验收通过，主控已被唤醒继续推进");
+        }
+        String reason = "用户验收打回" + (comment.isBlank() ? "" : "：" + comment);
+        this.stepRepo.updateStatus(step.withStatus(StepStatus.FAILED).withError(reason));
+        this.projectEvents.publish(wsId, "step.updated", Map.of(
+                "stage", stage, "seq", seq, "stepType", "TASK",
+                "status", "FAILED", "name", step.name()));
+        this.stageOrchestrator.wakeIfSettled(wsId, stage, iteration,
+                "步骤 #" + seq + "「" + step.name() + "」被用户打回" + (comment.isBlank() ? "" : "（" + comment + "）")
+                        + "。请评估后重试（execute_step 重拾原地重做，instruction 带上打回原因）或调整方案。");
+        return Map.of("ok", true, "seq", seq, "status", "FAILED",
+                "message", "已打回，主控会被唤醒组织重做");
     }
 
     private String currentStageOf(String wsId) {
@@ -1201,7 +1255,11 @@ public class ProjectService {
     }
 
     private Map<String, Object> orchestrationView(Map<String, Object> out, List<StageStep> steps) {
-        boolean waiting = steps.stream().anyMatch(s -> s.status() == StepStatus.WAITING);
+        // WAITING 任何步 + 待验收步 + PLANNED DECISION（存量兼容）——任一存在即 WAITING_DECISION，
+        // state 语义才与决策/验收卡一致
+        boolean waiting = steps.stream().anyMatch(s -> s.status() == StepStatus.WAITING
+                || s.status() == StepStatus.WAITING_ACCEPT
+                || (s.stepType() == StepType.DECISION && s.status() == StepStatus.PLANNED));
         boolean executing = steps.stream().anyMatch(s -> s.status() == StepStatus.EXECUTING);
         long settled = steps.stream().filter(s -> s.status() == StepStatus.DONE || s.status() == StepStatus.SKIPPED).count();
         String state = waiting ? "WAITING_DECISION" : (executing ? "EXECUTING" : (settled == (long)steps.size() ? "FINISHED" : "EXECUTING"));
@@ -1210,9 +1268,10 @@ public class ProjectService {
         out.put("node_runs", List.of());
         ArrayList waitingList = new ArrayList();
         for (StageStep s2 : steps) {
-            // WAITING 的任何步 + 未答复的 DECISION 步（request_decision 创建即 PLANNED，答复后置 DONE）——
-            // 否则决策在「阶段执行」tab 永远不可见，用户不知道 AI 在等什么
-            if (s2.status() != StepStatus.WAITING
+            // WAITING 的任何步 + 待验收步（WAITING_ACCEPT）+ 未答复的 DECISION 步（存量兼容：
+            // request_decision 2026-10-20 前创建即 PLANNED）——否则决策/验收在「阶段执行」tab
+            // 永远不可见，用户不知道 AI 在等什么
+            if (s2.status() != StepStatus.WAITING && s2.status() != StepStatus.WAITING_ACCEPT
                     && !(s2.stepType() == StepType.DECISION && s2.status() == StepStatus.PLANNED)) {
                 continue;
             }
@@ -1221,6 +1280,8 @@ public class ProjectService {
             w.put("node_id", String.valueOf(s2.seq()));
             w.put("node_name", s2.name());
             w.put("output", s2.instruction());
+            // kind 供前端区分渲染：DECISION=答复框；ACCEPT=验收卡（通过/打回按钮）
+            w.put("kind", s2.status() == StepStatus.WAITING_ACCEPT ? "ACCEPT" : "DECISION");
             waitingList.add(w);
         }
         out.put("waiting_decisions", waitingList);
@@ -1468,6 +1529,10 @@ public class ProjectService {
             throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "该 workspace 不是项目，不能用项目删除接口");
         }
         String rootPath = String.valueOf(ws.get("root_path"));
+        // 先终止该项目所有在跑任务再删数据（2026-10-20 实锤：删除不终止任务，异步轮
+        // 继续落库复活脏数据——CONSULT 步 seq 从 1 重新编号复活 7 行）
+        int killed = stageOrchestrator.purgeRuntimeState(wsId);
+        log.info("删除项目: ws={} 终止在跑任务 {} 个", wsId, killed);
         workspaceRepo.deleteProjectCascade(wsId);
         Path root = Paths.get(rootPath).normalize();
         if (Files.isDirectory(root)) {

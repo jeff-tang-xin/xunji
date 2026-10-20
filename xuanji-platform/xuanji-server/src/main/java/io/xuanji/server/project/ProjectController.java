@@ -296,6 +296,13 @@ public class ProjectController {
         return projects.retryStep(user, id, seq);
     }
 
+    /** 用户验收（P0 验收责任链）：human 验收步执行完停在 WAITING_ACCEPT，通过=DONE(verified_by=human)、打回=FAILED 带原因可重试。 */
+    @PostMapping("/{id}/stage/step/{seq}/accept")
+    public Object acceptStep(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
+                             @PathVariable long seq, @RequestBody Map<String, Object> body) {
+        return projects.acceptStep(user, id, seq, body);
+    }
+
     /** 让 PM 产出当前阶段收口总结（PENDING，待人批准）。 */
     @PostMapping("/{id}/summary/draft")
     public Object draftSummary(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id) {
