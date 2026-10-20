@@ -84,7 +84,13 @@ function ArtifactModal({ projectId, path, name, contentMd, onClose }: { projectI
       <div style={{ maxHeight: '65vh', overflow: 'auto' }}>
         {err
           ? <Alert type="error" message={err} />
-          : <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>{path ? (content ?? '加载中…') : (contentMd || '（无正文）')}</pre>}
+          : path
+            ? (content === null
+                ? <Typography.Text type="secondary">加载中…</Typography.Text>
+                : /\.(md|markdown)$/i.test(path)
+                  ? <MarkdownView scroll={false} text={content} />
+                  : <pre style={{ margin: 0, padding: 12, background: '#f6f8fa', borderRadius: 6, fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{content}</pre>)
+            : <MarkdownView scroll={false} text={contentMd || ''} />}
       </div>
     </Modal>
   )
@@ -109,9 +115,7 @@ function RequirementDetailModal({ r, onOpenStep, onClose }: { r: TraceReq | null
           {r.depends_on.length > 0 && <Tag>依赖 {r.depends_on.join('、')}</Tag>}
           {r.source && <Tooltip title="需求口径的确认来源"><Tag>来源 {r.source}</Tag></Tooltip>}
         </Space>
-        {r.description && (
-          <div style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{r.description}</div>
-        )}
+        {r.description && <MarkdownView scroll={false} text={r.description} />}
         {asserts && (
           <div>
             <Typography.Text strong style={{ fontSize: 12 }}>✅ 验收断言</Typography.Text>
@@ -179,7 +183,7 @@ function StepDetailModal({ projectId, s, onClose, onChanged }: { projectId: stri
         {s.instruction && (
           <div style={{ background: '#f8f9fb', border: '1px solid #eef0f3', borderRadius: 6, padding: '8px 12px' }}>
             <Typography.Text strong style={{ fontSize: 12 }}>{s.step_type === 'DECISION' ? '❓ 向你提出的问题' : '📌 执行指令'}</Typography.Text>
-            <div style={{ fontSize: 12, marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{s.instruction}</div>
+            <div style={{ fontSize: 12, marginTop: 4 }}><MarkdownView scroll={false} text={s.instruction} /></div>
           </div>
         )}
         {s.status === 'EXECUTING' && (
@@ -435,8 +439,10 @@ export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], on
             </Space>
             <div>
               <Typography.Text strong style={{ fontSize: 12 }}>📋 用例正文</Typography.Text>
-              <div style={{ fontSize: 12, marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: '#f8f9fb', border: '1px solid #eef0f3', borderRadius: 6, padding: '8px 12px', maxHeight: '45vh', overflowY: 'auto' }}>
-                {detailCase.content || '（未填写正文——用例只有标题，建议测试设计时补前置/步骤/预期）'}
+              <div style={{ fontSize: 12, marginTop: 4, background: '#f8f9fb', border: '1px solid #eef0f3', borderRadius: 6, padding: '8px 12px', maxHeight: '45vh', overflowY: 'auto' }}>
+                {detailCase.content
+                  ? <MarkdownView scroll={false} text={detailCase.content} />
+                  : <Typography.Text type="secondary" style={{ fontSize: 12 }}>（未填写正文——用例只有标题，建议测试设计时补前置/步骤/预期）</Typography.Text>}
               </div>
             </div>
             {(() => {
@@ -474,8 +480,10 @@ export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], on
             )}
             <div>
               <Typography.Text strong style={{ fontSize: 12 }}>🐛 现象/根因/修复说明</Typography.Text>
-              <div style={{ fontSize: 12, marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: '#f8f9fb', border: '1px solid #eef0f3', borderRadius: 6, padding: '8px 12px', maxHeight: '45vh', overflowY: 'auto' }}>
-                {detailBug.content || '（未填写说明）'}
+              <div style={{ fontSize: 12, marginTop: 4, background: '#f8f9fb', border: '1px solid #eef0f3', borderRadius: 6, padding: '8px 12px', maxHeight: '45vh', overflowY: 'auto' }}>
+                {detailBug.content
+                  ? <MarkdownView scroll={false} text={detailBug.content} />
+                  : <Typography.Text type="secondary" style={{ fontSize: 12 }}>（未填写说明）</Typography.Text>}
               </div>
             </div>
           </div>
