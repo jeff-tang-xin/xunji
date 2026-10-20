@@ -135,6 +135,8 @@ export const EXEC_LIVE_STATES = new Set(['EXECUTING', 'WAITING_DECISION', 'NOT_S
 export interface StageStepRow {
   id: number
   seq: number
+  stage?: string
+  iteration?: number
   name: string
   stepType: 'TASK' | 'DISCUSS' | 'DECISION' | 'CONSULT'
   agent?: string | null

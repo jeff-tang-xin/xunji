@@ -154,9 +154,11 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
   const [busy, setBusy] = useState(false)
   /** 终止执行中的步骤（活跃步骤条就地终止）：后端 cancel 当前 LLM 调用，SKIPPED 留痕，主控进入下一步 */
   const [terminating, setTerminating] = useState<number | null>(null)
-  const terminateStep = (seq: number) => {
+  const terminateStep = (seq: number, stage?: string, iteration?: number) => {
     setTerminating(seq)
-    apiJson<{ message?: string }>(`/api/projects/${projectId}/stage/step/${seq}/terminate`, 'POST')
+    // stage/iteration 必带（seq=18 404 实锤）：阶段推进后按当前阶段查会误报步骤不存在
+    const q = stage && iteration ? `?stage=${stage}&iteration=${iteration}` : ''
+    apiJson<{ message?: string }>(`/api/projects/${projectId}/stage/step/${seq}/terminate${q}`, 'POST')
       .then((r) => message.success(r.message || '已终止'))
       .catch((e: Error) => message.error(e.message))
       .finally(() => setTerminating(null))
@@ -835,7 +837,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
                 {s.status === 'EXECUTING' && (
                   <Button size="small" type="text" danger style={{ fontSize: 12, flexShrink: 0 }}
                     loading={terminating === s.seq}
-                    onClick={() => terminateStep(s.seq)}>终止</Button>
+                    onClick={() => terminateStep(s.seq, s.stage, s.iteration)}>终止</Button>
                 )}
               </div>
             ))}

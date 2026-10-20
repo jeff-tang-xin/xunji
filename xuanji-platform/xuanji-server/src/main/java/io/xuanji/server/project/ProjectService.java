@@ -640,13 +640,14 @@ public class ProjectService {
      * 步骤落 SKIPPED（留痕「用户终止」）。主控工具层收到终止信号后直接进入下一步。
      * 若步骤已自然完成（终止晚到）按幂等返回当前状态。
      */
-    public Map<String, Object> terminateStep(LoginUser user, String wsId, long seq) {
+    public Map<String, Object> terminateStep(LoginUser user, String wsId, long seq, String stageArg, Integer iterationArg) {
         this.requireProject(user, wsId);
-        String stage = this.currentStageOf(wsId);
-        int iteration = this.currentIterationOf(wsId);
+        String stage = stageArg != null && !stageArg.isBlank() ? stageArg : this.currentStageOf(wsId);
+        int iteration = iterationArg != null ? iterationArg : this.currentIterationOf(wsId);
         StageStep step = this.stepRepo.findByStage(wsId, stage, iteration).stream()
                 .filter(s -> s.seq() == seq).findFirst()
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "步骤不存在: seq=" + seq));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "步骤不存在: seq=" + seq + "（stage=" + stage + " iter=" + iteration + "）"));
         if (step.status() != StepStatus.EXECUTING) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "步骤不在执行中（" + step.status() + "），无需终止");
         }
@@ -669,13 +670,14 @@ public class ProjectService {
      * 人工重试失败/被终止的步骤：重置 PLANNED 后后台重跑（TASK→TaskRunner / DISCUSS→DiscussionEngine），
      * 完成/失败经事件推送刷新前端，主控经 wakeIfSettled 被唤醒继续。
      */
-    public Map<String, Object> retryStep(LoginUser user, String wsId, long seq) {
+    public Map<String, Object> retryStep(LoginUser user, String wsId, long seq, String stageArg, Integer iterationArg) {
         this.requireProject(user, wsId);
-        String stage = this.currentStageOf(wsId);
-        int iteration = this.currentIterationOf(wsId);
+        String stage = stageArg != null && !stageArg.isBlank() ? stageArg : this.currentStageOf(wsId);
+        int iteration = iterationArg != null ? iterationArg : this.currentIterationOf(wsId);
         StageStep step = this.stepRepo.findByStage(wsId, stage, iteration).stream()
                 .filter(s -> s.seq() == seq).findFirst()
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "步骤不存在: seq=" + seq));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "步骤不存在: seq=" + seq + "（stage=" + stage + " iter=" + iteration + "）"));
         if (step.status() != StepStatus.FAILED && step.status() != StepStatus.SKIPPED) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "只有失败/被终止的步骤可重试（当前 " + step.status() + "）");

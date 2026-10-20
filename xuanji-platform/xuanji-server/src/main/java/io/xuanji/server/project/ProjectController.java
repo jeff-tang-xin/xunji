@@ -282,18 +282,24 @@ public class ProjectController {
         return projects.rerunStage(user, id, stage);
     }
 
-    /** 人为终止执行中的步骤：当前 LLM 调用被取消，步骤落 SKIPPED（留痕），主控直接进入下一步。 */
+    /** 人为终止执行中的步骤：当前 LLM 调用被取消，步骤落 SKIPPED（留痕），主控直接进入下一步。
+     *  stage/iteration 可选（2026-10-20 seq=18 404 实锤）：追溯图可打开任意阶段的步骤——
+     *  阶段推进后旧阶段步骤按 currentStageOf 查不到会误报「步骤不存在」，前端必须带上步骤归属。 */
     @PostMapping("/{id}/stage/step/{seq}/terminate")
     public Object terminateStep(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
-                                @PathVariable long seq) {
-        return projects.terminateStep(user, id, seq);
+                                @PathVariable long seq,
+                                @RequestParam(required = false) String stage,
+                                @RequestParam(required = false) Integer iteration) {
+        return projects.terminateStep(user, id, seq, stage, iteration);
     }
 
     /** 人工重试失败/被终止的步骤：重置后后台重跑（完成/失败经事件推送刷新，主控被唤醒继续）。 */
     @PostMapping("/{id}/stage/step/{seq}/retry")
     public Object retryStep(@RequestAttribute(LoginUser.ATTR) LoginUser user, @PathVariable String id,
-                            @PathVariable long seq) {
-        return projects.retryStep(user, id, seq);
+                            @PathVariable long seq,
+                            @RequestParam(required = false) String stage,
+                            @RequestParam(required = false) Integer iteration) {
+        return projects.retryStep(user, id, seq, stage, iteration);
     }
 
     /** 用户验收（P0 验收责任链）：human 验收步执行完停在 WAITING_ACCEPT，通过=DONE(verified_by=human)、打回=FAILED 带原因可重试。 */

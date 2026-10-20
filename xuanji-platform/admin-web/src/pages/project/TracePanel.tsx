@@ -154,7 +154,8 @@ function StepDetailModal({ projectId, s, onClose, onChanged }: { projectId: stri
   if (!s) return null
   const act = (action: 'terminate' | 'retry') => {
     setBusy(action)
-    apiJson<{ message?: string }>(`/api/projects/${projectId}/stage/step/${s.seq}/${action}`, 'POST')
+    // stage/iteration 必带：追溯图可打开任意阶段的步骤，阶段推进后按当前阶段查会 404（seq=18 实锤）
+    apiJson<{ message?: string }>(`/api/projects/${projectId}/stage/step/${s.seq}/${action}?stage=${s.stage}&iteration=${s.iteration}`, 'POST')
       .then((r) => {
         message.success(r.message || (action === 'terminate' ? '已终止' : '已重新发起'))
         onChanged?.()
