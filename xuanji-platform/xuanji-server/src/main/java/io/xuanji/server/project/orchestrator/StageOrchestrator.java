@@ -249,7 +249,7 @@ public class StageOrchestrator {
                 } else if ("agent.result".equals(type)) {
                     Object txt = payload.get("text");
                     if (txt != null && !String.valueOf(txt).isBlank()) {
-                        replyFromResult[0] = String.valueOf(txt);
+                        replyFromResult[0] = stripFakeCard(String.valueOf(txt), wsId, stage, iteration);
                     }
                 } else if ("tool.call".equals(type)) {
                     toolRows.add(new String[]{String.valueOf(payload.getOrDefault("tool", "?")), "执行中"});
@@ -543,7 +543,7 @@ public class StageOrchestrator {
         if (found.status() == StepStatus.DONE || found.status() == StepStatus.SKIPPED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该决策已处理（" + found.status() + "），无需重复答复");
         }
-        stepRepo.updateStatus(found.withAnswer(answer));
+        stepRepo.updateStatus(found.withAnswer(answer).withVerifiedBy("human"));
         // 决策答复闭环（确定性联动，与 record_answer 工具同一条）：关联需求自动置 CONFIRMED
         //（source=decision#seq）+ 决策记录双落档——用户答复即确认，不依赖主控自觉调 confirm
         List<String> confirmed = decisionSettler.settle(found.withAnswer(answer), answer,
@@ -556,6 +556,22 @@ public class StageOrchestrator {
                         + (confirmed.isEmpty() ? "" : "（关联需求已自动确认: " + String.join("、", confirmed) + "）"));
         return Map.of("ok", true, "seq", seq,
                 "message", "决策已答复并留档" + (confirmed.isEmpty() ? "" : "；关联需求已自动确认: " + String.join("、", confirmed)));
+    }
+
+    /**
+     * 唯一真相（2026-10-20 用户重复确认实锤）：主控回复文本里手写「现已停在用户验收卡，等待您确认」
+     * 类伪验收卡文案，与台账真决策卡并存——用户点文本无响应、以为没确认成功，反复答复同一决策。
+     * 台账存在等待中的决策步时，把文本伪卡句替换为指向真卡的提示（agent.result 是权威全文，
+     * 前端流式缓冲会被 result 替换，落库与留档同步干净）。
+     */
+    private String stripFakeCard(String reply, String wsId, String stage, int iteration) {
+        if (reply == null || !reply.contains("现已停在用户验收卡")) return reply;
+        boolean pending = stepRepo.findByStage(wsId, stage, iteration).stream()
+                .anyMatch(s -> s.stepType() == StepType.DECISION
+                        && (s.status() == StepStatus.PLANNED || s.status() == StepStatus.WAITING));
+        if (!pending) return reply;
+        return reply.replaceAll("现已停在用户验收卡[^\\n]*：?",
+                "（验收决策已发到右侧决策区，请在那里答复——对话文本不构成验收卡）");
     }
 
     /**

@@ -3,12 +3,12 @@ import { Typography } from 'antd'
 import type { TraceStep } from './TracePanel'
 
 /**
- * 需求交付关系图（neo4j 形态的简化版，2026-10-19 用户拍板替换泳道拓扑）：
- * - 每条需求一个聚簇：需求球居中，任务/用例/bug 围绕中心放射排布（圆环均分角度）
- * - 连线 = 交付关系（需求→任务/用例/bug、用例→bug 发现自、父需求→拆分需求）
- * - 节点球状态色 + 执行中脉冲；hover 聚簇高亮、其余淡化；点击节点球开详情
- * - 确定性坐标计算（无力导向模拟、无拖拽缩放），聚簇纵向堆叠
- * 纯 SVG 手绘，不引图库依赖。
+ * 需求泳道追溯图（2026-10-20 重做，替换环形簇布局——环形标签外溢重叠、时序不可见）：
+ * - 行 = 需求（拆分需求缩进挂父行下），列 = 阶段（REQUIREMENT → DEVELOP → OPERATE）
+ * - 行内步骤按 seq 从左到右排进各自阶段列；圆角矩形节点，文字在框内（零重叠）
+ * - 连线 = 行内时序（实线，跨阶段延续）+ 需求依赖（左侧虚线）；用例/bug 徽章挂行尾
+ * - 断链步骤底部独立泳道；hover 高亮整行其余淡化；点击节点开详情
+ * 纯 SVG 手绘，确定性坐标，不引图库依赖。
  */
 
 export interface TraceGraphData {
@@ -32,21 +32,17 @@ export interface TraceGraphData {
 export type TestCaseItem = NonNullable<TraceGraphData['test_cases']>[number]
 export type BugItem = NonNullable<TraceGraphData['bugs']>[number]
 
-/** 步骤状态中文 */
 const STATUS_TEXT: Record<string, string> = {
   DONE: '完成', FAILED: '失败', SKIPPED: '已跳过',
   EXECUTING: '执行中', WAITING: '等你答复', PLANNED: '待执行',
 }
-/** 用例状态中文 */
 const CASE_TEXT: Record<string, string> = {
   ACTIVE: '待执行', PASSED: '通过', FAILED: '失败', BLOCKED: '阻塞',
 }
-/** bug 状态中文 */
 const BUG_TEXT: Record<string, string> = {
   OPEN: '待修复', FIXING: '修复中', FIXED: '已修复', CLOSED: '已关闭', REJECTED: '误报',
 }
 
-/** 状态 → 节点填充色（步骤/需求沿用泳道版口径；用例/bug 同色系映射） */
 const NODE_FILL: Record<string, string> = {
   DONE: '#22c55e', FAILED: '#ef4444', EXECUTING: '#3b82f6',
   WAITING: '#f59e0b', PLANNED: '#cbd5e1', SKIPPED: '#e2e8f0',
@@ -58,26 +54,31 @@ function statusColor(s: string): string {
   return NODE_FILL[s] || '#cbd5e1'
 }
 
-/** 聚簇半径按子节点数自适应（子节点多则环大） */
-function ringRadius(n: number): number {
-  if (n <= 3) return 62
-  if (n <= 6) return 84
-  if (n <= 10) return 108
-  return 128
+function reqColor(s: string): string {
+  return s === 'DONE' ? '#22c55e' : s === 'IN_PROGRESS' ? '#3b82f6'
+    : s === 'CONFIRMED' ? '#14b8a6' : s === 'DROPPED' ? '#e2e8f0' : '#f59e0b'
 }
 
-interface RingNode {
-  kind: 'task' | 'case' | 'bug'
-  key: string
-  label: string
-  color: string
-  live: boolean
-  dashed?: boolean
-  x: number
+// ---- 布局常量 ----
+const LANE_W = 168          // 左侧需求标签列
+const NODE_W = 118          // 步骤节点宽
+const NODE_H = 36           // 步骤节点高
+const GAP_X = 16            // 节点水平间距
+const ROW_H = NODE_H + 18   // 行高
+const HEAD_H = 36           // 阶段表头高
+const STAGE_GAP = 26        // 阶段列组间距
+
+interface LaneRow {
+  req: TraceGraphData['requirements'][number]
   y: number
-  step?: TraceStep
-  tc?: TestCaseItem
-  bug?: BugItem
+  indent: boolean
+  nodes: {
+    key: string; x: number; y: number; label: string; color: string
+    live: boolean; step: TraceStep
+  }[]
+  cases: TestCaseItem[]
+  bugs: BugItem[]
+  blocked: boolean
 }
 
 export function TraceGraph({ data, onOpenStep, onOpenReq, onOpenCase, onOpenBug }: {
@@ -95,96 +96,86 @@ export function TraceGraph({ data, onOpenStep, onOpenReq, onOpenCase, onOpenBug 
     const byReq = <T extends { requirement_code: string | null }>(items: T[], code: string) =>
       items.filter((it) => it.requirement_code === code)
 
-    const topReqs = data.requirements.filter((r) => !r.parent_code)
-    const childReqs = new Map<string, typeof data.requirements>()
+    const stages = data.stages.length
+      ? data.stages
+      : [{ stage: 'REQUIREMENT', label: '需求', status: '' }]
+
+    // 行序：顶层需求 + 其拆分需求紧随（缩进）
+    const ordered: { req: TraceGraphData['requirements'][number]; indent: boolean }[] = []
+    for (const r of data.requirements.filter((x) => !x.parent_code)) {
+      ordered.push({ req: r, indent: false })
+      for (const k of data.requirements.filter((x) => x.parent_code === r.code)) {
+        ordered.push({ req: k, indent: true })
+      }
+    }
     for (const r of data.requirements) {
-      if (r.parent_code) {
-        const arr = childReqs.get(r.parent_code) || []
-        arr.push(r)
-        childReqs.set(r.parent_code, arr)
-      }
+      if (!r.parent_code && !ordered.some((o) => o.req.code === r.code)) ordered.push({ req: r, indent: false })
     }
 
-    const CLUSTER_GAP = 26
-    let y = 16
-    const clusters: {
-      req: TraceGraphData['requirements'][number]
-      cx: number
-      cy: number
-      r: number
-      height: number
-      children: { req: TraceGraphData['requirements'][number]; x: number; y: number }[]
-      nodes: RingNode[]
-    }[] = []
+    // 阶段列偏移：列宽 = 各需求在该阶段最大步骤数
+    const stageCols = new Map<string, number>()
+    for (const st of stages) stageCols.set(st.stage, 1)
+    for (const o of ordered) {
+      const cnt = new Map<string, number>()
+      for (const s of o.req.chain) cnt.set(s.stage, (cnt.get(s.stage) || 0) + 1)
+      for (const [st, n] of cnt) stageCols.set(st, Math.max(stageCols.get(st) || 1, n))
+    }
+    const stageX = new Map<string, number>()
+    let x = LANE_W
+    for (const st of stages) {
+      const cols = stageCols.get(st.stage) || 1
+      stageX.set(st.stage, x)
+      x += cols * (NODE_W + GAP_X) + STAGE_GAP
+    }
+    const totalW = Math.max(x + 40, 640)
 
-    for (const req of topReqs) {
-      const kids = childReqs.get(req.code) || []
-      // 环上节点：任务（按 seq）→ 用例 → bug，同类型聚在一起
-      const ring: Omit<RingNode, 'x' | 'y'>[] = []
-      for (const s of req.chain.slice().sort((a, b) => a.seq - b.seq)) {
-        ring.push({
-          kind: 'task', key: `${s.stage}-${s.iteration}-${s.seq}`, label: s.name || '',
-          color: statusColor(s.status), live: s.status === 'EXECUTING' || s.status === 'WAITING', step: s,
-        })
-      }
-      for (const c of byReq(cases, req.code)) {
-        ring.push({ kind: 'case', key: c.code, label: `${c.code} ${c.title}`, color: statusColor(c.status), live: false, tc: c })
-      }
-      for (const b of byReq(bugs, req.code)) {
-        ring.push({
-          kind: 'bug', key: b.code, label: `${b.code}·${b.severity} ${b.title}`,
-          color: statusColor(b.status), live: b.status === 'OPEN' || b.status === 'FIXING', dashed: true, bug: b,
-        })
-      }
-      for (const k of kids) {
-        for (const s of k.chain.slice().sort((a, b) => a.seq - b.seq)) {
-          ring.push({
-            kind: 'task', key: `${s.stage}-${s.iteration}-${s.seq}`, label: s.name || '',
-            color: statusColor(s.status), live: s.status === 'EXECUTING' || s.status === 'WAITING', step: s,
-          })
+    // 行布局：步骤按 seq 排序，落进各自阶段列（行内列号按出现顺序）
+    const rows: LaneRow[] = []
+    let y = HEAD_H + 8
+    for (const o of ordered) {
+      const sorted = o.req.chain.slice().sort((a, b) => a.seq - b.seq)
+      const colIdx = new Map<string, number>()
+      const nodes = sorted.map((s) => {
+        const ci = colIdx.get(s.stage) || 0
+        colIdx.set(s.stage, ci + 1)
+        return {
+          key: `${s.stage}-${s.iteration}-${s.seq}`,
+          x: (stageX.get(s.stage) || LANE_W) + ci * (NODE_W + GAP_X),
+          y: y + (ROW_H - NODE_H) / 2,
+          label: s.name || `#${s.seq}`,
+          color: statusColor(s.status),
+          live: s.status === 'EXECUTING' || s.status === 'WAITING',
+          step: s,
         }
-        for (const c of byReq(cases, k.code)) {
-          ring.push({ kind: 'case', key: c.code, label: `${c.code} ${c.title}`, color: statusColor(c.status), live: false, tc: c })
-        }
-        for (const b of byReq(bugs, k.code)) {
-          ring.push({
-            kind: 'bug', key: b.code, label: `${b.code}·${b.severity} ${b.title}`,
-            color: statusColor(b.status), live: b.status === 'OPEN' || b.status === 'FIXING', dashed: true, bug: b,
-          })
-        }
-      }
-
-      const R = ringRadius(ring.length)
-      const cx = 24 + R + 90 // 左侧留需求标签宽
-      const cy = y + R + 30
-      // 角度均分：从顶部 -90° 顺时针
-      const placed: RingNode[] = ring.map((n, i) => {
-        const angle = -Math.PI / 2 + (i * 2 * Math.PI) / Math.max(ring.length, 1)
-        return { ...n, x: cx + R * Math.cos(angle), y: cy + R * Math.sin(angle) }
       })
-      // 拆分需求球：中心右侧近距
-      const children = kids.map((k, i) => ({ req: k, x: cx + 44, y: cy + 30 + i * 34 }))
-
-      clusters.push({ req, cx, cy, r: R, height: 2 * R + 60, children, nodes: placed })
-      y += 2 * R + 60 + CLUSTER_GAP
+      rows.push({
+        req: o.req, y, indent: o.indent, nodes,
+        cases: byReq(cases, o.req.code),
+        bugs: byReq(bugs, o.req.code),
+        blocked: (o.req.depends_on || []).some((d) => data.requirements.find((q) => q.code === d && q.status !== 'DONE')),
+      })
+      y += ROW_H
     }
 
-    // 断链步骤（未声明需求关联）：末尾一排
-    const unlinkedY = y + 8
-    const unlinkedNodes = data.unlinked.map((s, i) => ({ s, x: 60 + i * 130, y: unlinkedY + 24 }))
-
-    const maxCx = clusters.reduce((m, c) => Math.max(m, c.cx + c.r + 110), 420)
-    return { clusters, unlinkedY, unlinkedNodes, totalW: maxCx, totalH: unlinkedY + (data.unlinked.length ? 70 : 16) }
+    // 断链泳道
+    const unlinkedY = y + 10
+    const unlinkedNodes = data.unlinked.map((s, i) => ({
+      s, x: LANE_W + 8 + i * (NODE_W + GAP_X), y: unlinkedY + (ROW_H - NODE_H) / 2,
+    }))
+    const totalH = unlinkedY + (data.unlinked.length ? ROW_H + 40 : 20)
+    return { stages, stageX, rows, unlinkedY, unlinkedNodes, totalW, totalH }
   }, [data])
 
-  const { clusters, unlinkedY, unlinkedNodes, totalW, totalH } = layout
-  const dim = (key: string) => (hover === null ? 1 : hover === key ? 1 : 0.16)
+  const { stages, stageX, rows, unlinkedY, unlinkedNodes, totalW, totalH } = layout
+  const dim = (key: string | null) => (hover === null || hover === key ? 1 : 0.18)
+
+  const truncate = (t: string, n: number) => (t.length > n ? t.slice(0, n) + '…' : t)
 
   return (
     <div style={{ overflowX: 'auto' }}>
       <svg width={totalW} height={totalH} style={{ display: 'block', minWidth: '100%' }}>
         <defs>
-          <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+          <filter id="tg-glow" x="-60%" y="-60%" width="220%" height="220%">
             <feGaussianBlur stdDeviation="3" result="b" />
             <feMerge>
               <feMergeNode in="b" />
@@ -193,88 +184,109 @@ export function TraceGraph({ data, onOpenStep, onOpenReq, onOpenCase, onOpenBug 
           </filter>
         </defs>
 
-        {clusters.map((cl) => {
-          const key = cl.req.code
-          const blocked = (cl.req.depends_on || []).some((d) => data.requirements.find((x) => x.code === d && x.status !== 'DONE'))
+        {/* 阶段表头 + 列分隔 */}
+        {stages.map((st) => {
+          const sx = stageX.get(st.stage) || LANE_W
+          const cols = Math.max(1, ...rows.map((r) => r.nodes.filter((n) => n.step.stage === st.stage).length), 1)
+          const w = cols * (NODE_W + GAP_X) - GAP_X
+          return (
+            <g key={st.stage}>
+              <rect x={sx - 8} y={4} width={w + 16} height={HEAD_H - 10} rx={6}
+                    fill={st.status === 'DONE' ? '#f0fdf4' : st.status === 'IN_PROGRESS' ? '#eff6ff' : '#f8fafc'}
+                    stroke="#e2e8f0" />
+              <text x={sx + w / 2} y={25} textAnchor="middle" fontSize={12} fontWeight={700} fill="#334155">
+                {st.label}{st.status === 'DONE' ? ' ✓' : st.status === 'IN_PROGRESS' ? ' …' : ''}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* 需求依赖虚线（标签列内：依赖 → 需求） */}
+        {rows.map((r) => (r.req.depends_on || []).map((d) => {
+          const from = rows.find((q) => q.req.code === d)
+          if (!from) return null
+          const y1 = from.y + ROW_H / 2, y2 = r.y + ROW_H / 2
+          return (
+            <path key={`dep-${r.req.code}-${d}`}
+                  d={`M ${LANE_W - 10} ${y1} C ${LANE_W - 34} ${y1}, ${LANE_W - 34} ${y2}, ${LANE_W - 10} ${y2}`}
+                  fill="none" stroke="#c7d2fe" strokeWidth={1.2} strokeDasharray="4 3" opacity={dim(r.req.code)} />
+          )
+        }))}
+
+        {/* 泳道行 */}
+        {rows.map((r) => {
+          const key = r.req.code
+          const last = r.nodes[r.nodes.length - 1]
+          const tailX = last ? last.x + NODE_W : LANE_W + 8
           return (
             <g key={key} opacity={dim(key)} style={{ transition: 'opacity .25s' }}
                onMouseEnter={() => setHover(key)} onMouseLeave={() => setHover(null)}>
-              {blocked && <rect x={0} y={cl.cy - cl.r - 24} width={totalW} height={cl.height} fill="#fffbeb" opacity={0.5} rx={8} />}
-
-              {/* 放射连线：需求 → 环上节点 */}
-              {cl.nodes.map((n) => (
-                <line key={`ln-${n.key}`} x1={cl.cx} y1={cl.cy} x2={n.x} y2={n.y}
-                      stroke={hover === key ? '#a5b4fc' : '#e2e8f0'} strokeWidth={hover === key ? 1.4 : 1} />
-              ))}
-              {/* 用例 → bug（发现自）虚线 */}
-              {cl.nodes.filter((n) => n.kind === 'bug' && n.bug?.test_case_code).map((n) => {
-                const src = cl.nodes.find((m) => m.kind === 'case' && m.key === n.bug!.test_case_code)
-                if (!src) return null
-                return <line key={`cb-${n.key}`} x1={src.x} y1={src.y} x2={n.x} y2={n.y} stroke="#fecaca" strokeWidth={1} strokeDasharray="3 3" />
-              })}
-              {/* 父 → 拆分需求连线 */}
-              {cl.children.map((ch) => (
-                <line key={`pc-${ch.req.code}`} x1={cl.cx + 16} y1={cl.cy + 10} x2={ch.x - 10} y2={ch.y} stroke="#e2e8f0" strokeWidth={1.2} />
-              ))}
-
-              {/* 需求中心球 */}
-              <g onClick={() => onOpenReq(cl.req)} style={{ cursor: 'pointer' }}>
-                <title>{`${cl.req.code} ${cl.req.title}\n状态：${cl.req.status}${cl.req.description ? '\n' + cl.req.description.slice(0, 100) : ''}`}</title>
-                <circle cx={cl.cx} cy={cl.cy} r={18} fill="#fff"
-                        stroke={cl.req.status === 'DONE' ? '#22c55e' : cl.req.status === 'IN_PROGRESS' ? '#3b82f6' : cl.req.status === 'CONFIRMED' ? '#14b8a6' : cl.req.status === 'DROPPED' ? '#e2e8f0' : '#f59e0b'}
-                        strokeWidth={2.4} filter={hover === key ? 'url(#glow)' : undefined} />
-                <text x={cl.cx} y={cl.cy + 4} textAnchor="middle" fontSize={10} fontWeight={700} fill="#334155">
-                  {cl.req.code.replace('REQ-', '')}
+              {r.blocked && (
+                <rect x={0} y={r.y - 4} width={totalW} height={ROW_H} fill="#fffbeb" opacity={0.55} rx={6} />
+              )}
+              {/* 需求标签 */}
+              <g onClick={() => onOpenReq(r.req)} style={{ cursor: 'pointer' }}>
+                <title>{`${r.req.code} ${r.req.title}\n状态：${r.req.status}${r.req.parent_code ? `（拆分自 ${r.req.parent_code}）` : ''}${r.req.description ? '\n' + r.req.description.slice(0, 120) : ''}`}</title>
+                <circle cx={(r.indent ? 26 : 14) + 5} cy={r.y + ROW_H / 2} r={5.5}
+                        fill="#fff" stroke={reqColor(r.req.status)} strokeWidth={2.2} />
+                <text x={r.indent ? 40 : 28} y={r.y + ROW_H / 2 - 2} fontSize={11.5} fontWeight={700} fill="#1e293b">
+                  {r.req.code}
                 </text>
-                <text x={8} y={cl.cy - 4} fontSize={11.5} fontWeight={600} fill="#1e293b">{cl.req.code}</text>
-                <text x={8} y={cl.cy + 10} fontSize={9.5} fill="#94a3b8">
-                  {cl.req.title.length > 13 ? cl.req.title.slice(0, 13) + '…' : cl.req.title}
+                <text x={r.indent ? 40 : 28} y={r.y + ROW_H / 2 + 11} fontSize={9.5} fill="#94a3b8">
+                  {truncate(r.req.title, 12)}
                 </text>
               </g>
-
-              {/* 拆分需求球 */}
-              {cl.children.map((ch) => (
-                <g key={ch.req.code} onClick={() => onOpenReq(ch.req)} style={{ cursor: 'pointer' }}>
-                  <title>{`${ch.req.code} ${ch.req.title}\n状态：${ch.req.status}（拆分自 ${cl.req.code}）`}</title>
-                  <circle cx={ch.x} cy={ch.y} r={12} fill="#fff"
-                          stroke={ch.req.status === 'DONE' ? '#22c55e' : ch.req.status === 'IN_PROGRESS' ? '#3b82f6' : ch.req.status === 'CONFIRMED' ? '#14b8a6' : '#f59e0b'}
-                          strokeWidth={1.6} />
-                  <text x={ch.x} y={ch.y + 3} textAnchor="middle" fontSize={8} fontWeight={700} fill="#334155">
-                    {ch.req.code.replace('REQ-', '')}
+              {/* 行内时序连线 */}
+              {r.nodes.slice(1).map((n, i) => {
+                const p = r.nodes[i]
+                return (
+                  <line key={`seq-${n.key}`} x1={p.x + NODE_W} y1={p.y + NODE_H / 2} x2={n.x} y2={n.y + NODE_H / 2}
+                        stroke="#cbd5e1" strokeWidth={1.3} />
+                )
+              })}
+              {/* 步骤节点（矩形，文字在框内） */}
+              {r.nodes.map((n) => (
+                <g key={n.key} style={{ cursor: 'pointer' }} onClick={() => onOpenStep(n.step)}>
+                  <title>
+                    {`${n.step.name}\n${STATUS_TEXT[n.step.status] || n.step.status} · ${n.step.stage}${n.step.verified_by === 'tool' ? ' · ⚙机器验证' : n.step.verified_by === 'human' ? ' · 👤人确认' : ''}${n.step.error ? '\n❌ ' + n.step.error.slice(0, 140) : ''}${n.step.output_summary ? '\n' + n.step.output_summary.slice(0, 120) : ''}`}
+                  </title>
+                  {n.live && (
+                    <rect x={n.x - 4} y={n.y - 4} width={NODE_W + 8} height={NODE_H + 8} rx={10} fill="none" stroke={n.color} strokeWidth={1.4}>
+                      <animate attributeName="opacity" values="0.9;0.1;0.9" dur="1.6s" repeatCount="indefinite" />
+                    </rect>
+                  )}
+                  <rect x={n.x} y={n.y} width={NODE_W} height={NODE_H} rx={7}
+                        fill={n.step.status === 'SKIPPED' ? '#fff' : n.color}
+                        fillOpacity={n.step.status === 'SKIPPED' ? 1 : 0.14}
+                        stroke={n.color} strokeWidth={1.6}
+                        strokeDasharray={n.step.status === 'PLANNED' || n.step.status === 'SKIPPED' ? '4 3' : undefined} />
+                  <text x={n.x + NODE_W / 2} y={n.y + 15} textAnchor="middle" fontSize={9.5} fontWeight={600} fill="#334155">
+                    {truncate(n.label, 13)}
+                  </text>
+                  <text x={n.x + NODE_W / 2} y={n.y + 28} textAnchor="middle" fontSize={8.5} fill="#64748b">
+                    {(STATUS_TEXT[n.step.status] || n.step.status)
+                      + (n.step.verified_by === 'tool' ? ' ⚙' : n.step.verified_by === 'human' ? ' 👤' : '')}
                   </text>
                 </g>
               ))}
-
-              {/* 环上节点球 */}
-              {cl.nodes.map((n) => (
-                <g key={n.key} style={{ cursor: 'pointer' }}
-                   onClick={() => (n.kind === 'task' && n.step ? onOpenStep(n.step) : n.kind === 'case' && n.tc ? onOpenCase(n.tc) : n.bug ? onOpenBug(n.bug) : undefined)}>
-                  <title>
-                    {n.kind === 'task' && n.step
-                      ? `${n.step.name}\n${STATUS_TEXT[n.step.status] || n.step.status}${n.step.verified_by === 'tool' ? ' · 机器验证' : n.step.verified_by === 'human' ? ' · 人确认' : ''}${n.step.error ? '\n❌ ' + n.step.error.slice(0, 120) : ''}${n.step.output_summary ? '\n' + n.step.output_summary.slice(0, 100) : ''}`
-                      : n.kind === 'case' && n.tc
-                        ? `${n.tc.code} ${n.tc.title}\n状态：${CASE_TEXT[n.tc.status] || n.tc.status}${n.tc.content ? '\n' + n.tc.content.slice(0, 120) : ''}`
-                        : n.bug
-                          ? `${n.bug.code} ${n.bug.title}\n严重度：${n.bug.severity} · 状态：${BUG_TEXT[n.bug.status] || n.bug.status}${n.bug.content ? '\n' + n.bug.content.slice(0, 120) : ''}`
-                          : ''}
-                  </title>
-                  {n.live && (
-                    <circle cx={n.x} cy={n.y} r={7} fill="none" stroke={n.color} strokeWidth={1.5}>
-                      <animate attributeName="r" values="7;13;7" dur="1.6s" repeatCount="indefinite" />
-                      <animate attributeName="opacity" values="0.8;0;0.8" dur="1.6s" repeatCount="indefinite" />
-                    </circle>
-                  )}
-                  <circle cx={n.x} cy={n.y} r={n.kind === 'task' ? 6 : 5.5}
-                          fill={n.dashed ? '#fff' : n.color}
-                          stroke={n.dashed ? n.color : '#fff'} strokeWidth={1.8}
-                          strokeDasharray={n.dashed ? '2 2' : undefined} />
-                  {n.kind === 'task' && n.step?.verified_by === 'tool' && <text x={n.x + 6} y={n.y - 6} fontSize={8}>⚙</text>}
-                  {n.kind === 'task' && n.step?.verified_by === 'human' && <text x={n.x + 6} y={n.y - 6} fontSize={8}>👤</text>}
-                  {n.kind === 'task' && n.step?.artifact && <rect x={n.x - 2.5} y={n.y + 9} width={5} height={5} rx={1} fill="#94a3b8" />}
-                  {/* 标签：球外侧小字（按角度决定左右对齐） */}
-                  <text x={n.x + (n.x >= cl.cx ? 10 : -10)} y={n.y + 3.5} fontSize={9}
-                        textAnchor={n.x >= cl.cx ? 'start' : 'end'} fill="#64748b">
-                    {n.label.length > 14 ? n.label.slice(0, 14) + '…' : n.label}
+              {/* 用例/bug 徽章（行尾） */}
+              {r.cases.map((c, i) => (
+                <g key={c.code} style={{ cursor: 'pointer' }} onClick={() => onOpenCase(c)}>
+                  <title>{`${c.code} ${c.title}\n用例：${CASE_TEXT[c.status] || c.status}${c.content ? '\n' + c.content.slice(0, 140) : ''}`}</title>
+                  <rect x={tailX + 6 + i * 58} y={r.y + ROW_H / 2 - 9} width={52} height={18} rx={9}
+                        fill="#fff" stroke={statusColor(c.status)} strokeWidth={1.2} />
+                  <text x={tailX + 6 + i * 58 + 26} y={r.y + ROW_H / 2 + 3} textAnchor="middle" fontSize={8.5} fill="#475569">
+                    🧪{truncate(c.code.replace('TC-', ''), 5)}
+                  </text>
+                </g>
+              ))}
+              {r.bugs.map((b, i) => (
+                <g key={b.code} style={{ cursor: 'pointer' }} onClick={() => onOpenBug(b)}>
+                  <title>{`${b.code} ${b.title}\n严重度：${b.severity} · 状态：${BUG_TEXT[b.status] || b.status}${b.content ? '\n' + b.content.slice(0, 140) : ''}`}</title>
+                  <rect x={tailX + 6 + (r.cases.length + i) * 58} y={r.y + ROW_H / 2 - 9} width={52} height={18} rx={9}
+                        fill="#fff" stroke={statusColor(b.status)} strokeWidth={1.2} strokeDasharray={b.status === 'OPEN' || b.status === 'FIXING' ? '3 2' : undefined} />
+                  <text x={tailX + 6 + (r.cases.length + i) * 58 + 26} y={r.y + ROW_H / 2 + 3} textAnchor="middle" fontSize={8.5} fill="#475569">
+                    🐞{truncate(b.code.replace('BUG-', ''), 5)}
                   </text>
                 </g>
               ))}
@@ -282,25 +294,35 @@ export function TraceGraph({ data, onOpenStep, onOpenReq, onOpenCase, onOpenBug 
           )
         })}
 
-        {/* 断链步骤 */}
+        {/* 断链泳道 */}
         {unlinkedNodes.length > 0 && (
-          <g opacity={hover === null ? 1 : 0.3}>
-            <rect x={0} y={unlinkedY} width={totalW} height={54} fill="#fffbeb" opacity={0.6} />
-            <text x={12} y={unlinkedY + 16} fontSize={11} fontWeight={600} fill="#d97706">
-              断链 {data.unlinked.length} 项 · 未声明需求关联
+          <g opacity={hover === null ? 1 : 0.35}>
+            <rect x={0} y={unlinkedY} width={totalW} height={ROW_H + 8} fill="#fffbeb" opacity={0.6} rx={6} />
+            <text x={12} y={unlinkedY + ROW_H / 2 - 2} fontSize={11} fontWeight={700} fill="#d97706">
+              断链
+            </text>
+            <text x={12} y={unlinkedY + ROW_H / 2 + 12} fontSize={9} fill="#b45309">
+              {data.unlinked.length} 项未声明
             </text>
             {unlinkedNodes.map((n) => (
-              <g key={`${n.s.stage}-${n.s.iteration}-${n.s.seq}`} onClick={() => onOpenStep(n.s)} style={{ cursor: 'pointer' }}>
-                <title>{`${n.s.name}\n${n.s.status}${n.s.error ? '\n❌ ' + n.s.error.slice(0, 120) : ''}`}</title>
-                <circle cx={n.x} cy={n.y} r={6} fill={statusColor(n.s.status)} stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="2 2" />
-                <text x={n.x + 10} y={n.y + 3.5} fontSize={9.5} fill="#475569">{n.s.name}</text>
+              <g key={`${n.s.stage}-${n.s.iteration}-${n.s.seq}`} style={{ cursor: 'pointer' }} onClick={() => onOpenStep(n.s)}>
+                <title>{`${n.s.name}\n${STATUS_TEXT[n.s.status] || n.s.status} · ${n.s.stage}${n.s.error ? '\n❌ ' + n.s.error.slice(0, 140) : ''}`}</title>
+                <rect x={n.x} y={n.y} width={NODE_W} height={NODE_H} rx={7}
+                      fill={statusColor(n.s.status)} fillOpacity={0.12}
+                      stroke="#fbbf24" strokeWidth={1.4} strokeDasharray="4 3" />
+                <text x={n.x + NODE_W / 2} y={n.y + 15} textAnchor="middle" fontSize={9.5} fontWeight={600} fill="#334155">
+                  {truncate(n.s.name, 13)}
+                </text>
+                <text x={n.x + NODE_W / 2} y={n.y + 28} textAnchor="middle" fontSize={8.5} fill="#64748b">
+                  {STATUS_TEXT[n.s.status] || n.s.status}
+                </text>
               </g>
             ))}
           </g>
         )}
       </svg>
       <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', padding: '4px 8px' }}>
-        一个圆环 = 一条需求的交付关系（中心需求 → 任务/用例/bug 围绕辐射）· 悬停高亮整簇 · 绿完成/红失败/蓝执行中脉冲/黄等答复或阻塞/灰待执行 · 虚线球=未了结 bug · ⚙机器验证 👤人确认 · 点击看详情
+        行 = 需求（缩进 = 拆分需求）· 列 = 阶段推进方向（左→右）· 实线 = 行内时序 · 左侧虚线 = 需求依赖 · 🧪用例 🐞bug 挂行尾 · 黄底行 = 依赖未闭环或断链 · 绿完成/红失败/蓝执行中/黄等答复/灰虚线待执行 · ⚙机器验证 👤人确认 · 点击看详情
       </Typography.Text>
     </div>
   )

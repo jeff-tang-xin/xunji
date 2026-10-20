@@ -1056,7 +1056,7 @@ public class OrchestrationTools {
                 return ToolResult.of(Map.of("ok", false, "message",
                         "决策 #" + seq + " 已处理（" + cur + "），无需重复落档"));
             }
-            stepRepo.updateStatus(found.get().withAnswer(answer));
+            stepRepo.updateStatus(found.get().withAnswer(answer).withVerifiedBy("human"));
             // 决策答复闭环：关联需求自动确认 + 决策记录落档（与答复端点同一条确定性联动）
             List<String> confirmed = decisionSettler.settle(found.get().withAnswer(answer), answer,
                     user == null ? "user" : user.username());
@@ -1075,9 +1075,14 @@ public class OrchestrationTools {
             }
             // 验收责任链（P0）：本阶段没有任何用户验收过的交付 → 自动插一道「阶段交付验收」
             // 决策（等用户答复）并拒绝收口——用户不点头，阶段不推进（结构性保证，不靠 PM 自觉）
+            // 兜底（2026-10-20 收口循环实锤）：DONE 的 DECISION 步本身即用户答复过的人确认——
+            // 旧数据 verifiedBy 可能缺失，只查 verified_by=human 会让主控每轮收口都重发同一个
+            // 验收决策门（#15→#16→#17 无限循环），用户答复一次就被追问一次
             List<StageStep> steps = stepRepo.findByStage(wsId, stage, iteration);
             boolean humanAccepted = steps.stream()
-                    .anyMatch(s -> s.status() == StepStatus.DONE && "human".equals(s.verifiedBy()));
+                    .anyMatch(s -> s.status() == StepStatus.DONE && "human".equals(s.verifiedBy()))
+                    || steps.stream().anyMatch(s -> s.status() == StepStatus.DONE
+                            && s.stepType() == StepType.DECISION);
             if (!humanAccepted) {
                 StageStep gate = nextStep("阶段交付验收：" + truncate(summary, 40), StepType.DECISION,
                         "user", List.of(),
