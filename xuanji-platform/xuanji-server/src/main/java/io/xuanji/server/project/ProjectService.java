@@ -1562,14 +1562,21 @@ public class ProjectService {
     }
 
     /** 项目文件树：列出项目目录（root_path）下的文件与子目录——代码/文档产出直接可见，不再只看对话碎片。 */
+    /** 文件树忽略目录：编译产物/包管理依赖/IDE 元数据——node_modules 几万条目会把 500 配额吃光，其他目录全被挤没（2026-10-20 用户实测）。 */
+    private static final java.util.Set<String> IGNORED_DIR_NAMES = java.util.Set.of(
+            "node_modules", "target", "dist", "build", "out", ".git", ".idea", ".vscode",
+            "__pycache__", ".next", ".nuxt", "coverage", ".gradle", ".venv", "venv",
+            ".pytest_cache", ".mypy_cache", ".cache", ".turbo", ".output", ".settings");
+
     public List<Map<String, Object>> listFiles(LoginUser user, String wsId) {
         Path root = projectRoot(user, wsId);
         List<Map<String, Object>> out = new ArrayList<>();
-        try (java.util.stream.Stream<Path> stream = Files.walk(root, 6)) {
-            stream.filter(p -> !p.equals(root)).sorted().limit(500).forEach(p -> {
+        // walkFileTree 而非 Files.walk：忽略目录必须 SKIP_SUBTREE 整棵剪枝——
+        // Files.walk 会先遍历 node_modules 内部再过滤，慢且 500 limit 在排序前截断（配额被垃圾目录吃光）
+        try {
+            java.util.function.BiConsumer<Path, Boolean> addEntry = (p, dir) -> {
                 Map<String, Object> f = new LinkedHashMap<>();
                 f.put("path", root.relativize(p).toString().replace('\\', '/'));
-                boolean dir = Files.isDirectory(p);
                 f.put("type", dir ? "dir" : "file");
                 if (!dir) {
                     try {
@@ -1579,6 +1586,36 @@ public class ProjectService {
                     }
                 }
                 out.add(f);
+            };
+            final int[] count = {0};
+            Files.walkFileTree(root, new java.nio.file.SimpleFileVisitor<>() {
+                private java.nio.file.FileVisitResult check(Path p, boolean dir) {
+                    if (count[0] >= 500) {
+                        return java.nio.file.FileVisitResult.SKIP_SUBTREE;
+                    }
+                    count[0]++;
+                    addEntry.accept(p, dir);
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult preVisitDirectory(Path dir, java.nio.file.attribute.BasicFileAttributes attrs) {
+                    if (dir.equals(root)) {
+                        return java.nio.file.FileVisitResult.CONTINUE;
+                    }
+                    if (IGNORED_DIR_NAMES.contains(dir.getFileName().toString())) {
+                        return java.nio.file.FileVisitResult.SKIP_SUBTREE;
+                    }
+                    if (root.relativize(dir).getNameCount() > 6) {
+                        return java.nio.file.FileVisitResult.SKIP_SUBTREE;
+                    }
+                    return check(dir, true);
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult visitFile(Path file, java.nio.file.attribute.BasicFileAttributes attrs) {
+                    return check(file, false);
+                }
             });
         }
         catch (IOException e) {
