@@ -174,11 +174,12 @@ public class StageOrchestrator {
         java.util.concurrent.CompletableFuture<Void> turnFuture = java.util.concurrent.CompletableFuture
                 .runAsync(() -> {
                     try {
-                        runMasterTurn(spec, wsId, stage, iteration, masterAgent, query, emitter, false, null);
-                    } finally {
+                        boolean claimsWaiting = runMasterTurn(spec, wsId, stage, iteration, masterAgent, query, emitter, false, null);
                         // AutoPilot（2026-10-19「派给开发任务做完了就做完了没后续」）：主控轮结束后
                         // 判定黑板——还有 PLANNED 步骤就自动续跑，流程不再靠用户一句句推
-                        autoPilot(wsId, stage, iteration);
+                        autoPilot(wsId, stage, iteration, claimsWaiting);
+                    } finally {
+                        // 注册表注销由 whenComplete 统一处理
                     }
                 }, chatExecutor);
         TaskRegistry.register(wsId, turnFuture);
@@ -187,12 +188,38 @@ public class StageOrchestrator {
     }
 
     /**
+     * 唯一真相播报帧：主控轮结束后向对话流发布台账实况（步骤/需求统计）。
+     * 对话文本与台账是两个真相源（伪验收卡 2026-10-20 实锤）——系统帧是台账的权威播报，
+     * 前端渲染成系统消息，用户据此核对主控声称的状态与台账是否一致。
+     */
+    private void publishTruthFrame(String wsId, String stage, int iteration, String busKey,
+                                   boolean systemWake, SseEmitter direct) {
+        try {
+            List<StageStep> steps = stepRepo.findByStage(wsId, stage, iteration);
+            long done = steps.stream().filter(s -> s.status() == StepStatus.DONE).count();
+            long executing = steps.stream().filter(s -> s.status() == StepStatus.EXECUTING).count();
+            long waitingAccept = steps.stream().filter(s -> s.status() == StepStatus.WAITING_ACCEPT).count();
+            long decisionPending = steps.stream().filter(s -> s.stepType() == StepType.DECISION
+                    && (s.status() == StepStatus.PLANNED || s.status() == StepStatus.WAITING)).count();
+            long planned = steps.stream().filter(s -> s.status() == StepStatus.PLANNED
+                    && s.stepType() != StepType.DECISION).count();
+            long failed = steps.stream().filter(s -> s.status() == StepStatus.FAILED).count();
+            sendOrPublish(direct, busKey, systemWake, "system.truth", Map.of(
+                    "stage", stage, "iteration", iteration,
+                    "done", done, "executing", executing, "waitingAccept", waitingAccept,
+                    "decisionPending", decisionPending, "planned", planned, "failed", failed));
+        } catch (Exception e) {
+            log.warn("真相播报失败: ws={} {}#{} -> {}", wsId, stage, iteration, e.getMessage());
+        }
+    }
+
+    /**
      * 主控单轮执行核心（前端发起轮与系统唤醒轮共用）。
      *
      * @param direct     请求级 SSE（前端发起轮）；null=无头轮（系统唤醒）
      * @param systemWake 无头轮标志：事件发会话总线（前端常驻订阅实时回显），并先发 system.wake
      */
-    private void runMasterTurn(AgentSpec spec, String wsId, String stage, int iteration, String masterAgent,
+    private boolean runMasterTurn(AgentSpec spec, String wsId, String stage, int iteration, String masterAgent,
                                String query, SseEmitter direct, boolean systemWake, String wakeReason) {
         String busKey = StageChatEventBus.key(wsId, stage, iteration);
         // 过程留档累积：思考全文 / 工具调用序列 / 最终回复——流结束后落 docs/{stage}/iter{n}/，
@@ -245,6 +272,18 @@ public class StageOrchestrator {
                 direct.complete();
             }
             log.info("orchestrator chat finished: ws={} stage={} agent={} systemWake={}", wsId, stage, masterAgent, systemWake);
+            // 唯一真相播报（产品契约：对话文本里声称的每个状态都必须有系统台账对应）：
+            // 主控说完，系统紧跟一条台账实况帧——用户看到的不是主控声称的状态，而是台账是什么
+            publishTruthFrame(wsId, stage, iteration, busKey, systemWake, direct);
+            // 唯一真相检测（2026-10-20 实锤）：主控回复声称「等待用户确认/验收卡」但台账无等待中的
+            // 决策步 = 文本模拟决策卡——返回给 autoPilot 补纠正唤醒（用户面对伪卡死等，点了无响应）
+            String reply = replyFromResult[0] != null ? replyFromResult[0] : replyBuf.toString();
+            boolean claimsWaiting = reply.contains("等待您确认") || reply.contains("等待确认")
+                    || reply.contains("验收卡") || reply.contains("等待您的确认");
+            boolean decisionPending = stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .anyMatch(s -> s.stepType() == StepType.DECISION
+                            && (s.status() == StepStatus.PLANNED || s.status() == StepStatus.WAITING));
+            return claimsWaiting && !decisionPending;
         } catch (Exception e) {
             log.warn("orchestrator chat failed: ws={} stage={} -> {}", wsId, stage, e.getMessage());
             saveChatLog(wsId, stage, iteration, masterAgent, query, thinkingBuf.toString(),
@@ -260,6 +299,7 @@ public class StageOrchestrator {
                     direct.completeWithError(e);
                 }
             }
+            return false;
         }
     }
 
@@ -305,7 +345,7 @@ public class StageOrchestrator {
      * 相同（零进展）熔断；③单会话续跑超 {@link #AUTOPILOT_MAX_ROUNDS} 轮熔断。
      * 阶段已推进（complete_stage 已执行）时不续——下一阶段由 autoStartStage 接管。</p>
      */
-    private void autoPilot(String wsId, String stage, int iteration) {
+    private void autoPilot(String wsId, String stage, int iteration, boolean masterClaimsWaiting) {
         try {
             // 阶段已收口推进：下一阶段由 complete_stage 的 stageAutoStart 钩子接管，本阶段不再续
             if (!stage.equals(currentStageOf(wsId))) {
@@ -319,20 +359,9 @@ public class StageOrchestrator {
             if (busy) {
                 return; // 正在执行或等决策——不抢跑
             }
-            // 决策步（PLANNED=已发出等答复）不算待办：决策是等用户的明确停点，
-            // 把它当「未执行」唤醒主控只会让主控空转探索、甚至重复发出决策（2026-10-20 实锤）
-            List<StageStep> planned = steps.stream()
-                    .filter(s -> s.status() == StepStatus.PLANNED)
-                    .filter(s -> s.stepType() != StepType.DECISION)
-                    .toList();
-            if (planned.isEmpty()) {
-                return; // 只剩决策步（或无待办）=等用户，不空转
-            }
-            boolean decisionPending = steps.stream().anyMatch(s ->
-                    s.stepType() == StepType.DECISION
-                            && (s.status() == StepStatus.PLANNED || s.status() == StepStatus.WAITING));
             String key = StageChatEventBus.key(wsId, stage, iteration);
-            // 零进展熔断：本轮黑板指纹与上轮相同 = 主控没干任何实事，续跑只会原样空转
+            // 零进展熔断（前置）：本轮黑板指纹与上轮相同 = 主控没干任何实事，续跑只会原样空转。
+            // 纠正唤醒同样受熔断管——主控连续「只说不做」时最多 AUTOPILOT_MAX_ROUNDS 轮就停
             String fingerprint = steps.stream()
                     .map(s -> s.seq() + ":" + s.status()).sorted()
                     .collect(java.util.stream.Collectors.joining(","));
@@ -345,6 +374,26 @@ public class StageOrchestrator {
                         wsId, stage, iteration);
                 return;
             }
+            // 决策步（PLANNED=已发出等答复）不算待办：决策是等用户的明确停点，
+            // 把它当「未执行」唤醒主控只会让主控空转探索、甚至重复发出决策（2026-10-20 实锤）
+            List<StageStep> planned = steps.stream()
+                    .filter(s -> s.status() == StepStatus.PLANNED)
+                    .filter(s -> s.stepType() != StepType.DECISION)
+                    .toList();
+            if (planned.isEmpty()) {
+                // 唯一真相防御（2026-10-20 实锤）：主控声称「停在验收卡等确认」但台账无等待中的
+                // 决策步 = 文本模拟决策卡（用户无卡可点死等）——补一次纠正唤醒，明确要求调 request_decision
+                if (masterClaimsWaiting) {
+                    wakeMaster(wsId, stage, iteration,
+                            "你上一轮回复声称「停在验收卡等待用户确认」，但台账里没有任何等待答复的决策步——"
+                                    + "对话文本里的『通过/有异议』选项用户点了没有任何响应（那不是真的卡）。"
+                                    + "需要用户确认必须调 request_decision 工具创建真决策卡；若无需确认请直接继续推进。");
+                }
+                return; // 只剩决策步（或无待办）=等用户，不空转
+            }
+            boolean decisionPending = steps.stream().anyMatch(s ->
+                    s.stepType() == StepType.DECISION
+                            && (s.status() == StepStatus.PLANNED || s.status() == StepStatus.WAITING));
             String names = planned.stream()
                     .map(s -> "#" + s.seq() + "「" + s.name() + "」(" + s.stepType() + ")")
                     .collect(java.util.stream.Collectors.joining("、"));
@@ -398,11 +447,13 @@ public class StageOrchestrator {
             String query = "[系统唤醒] " + reason + "\n请基于以上情况继续推进。";
             java.util.concurrent.CompletableFuture<Void> wakeFuture = java.util.concurrent.CompletableFuture
                     .runAsync(() -> {
+                        boolean[] claimsWaiting = {false};
                         try {
-                            runMasterTurn(spec, wsId, stage, iteration, masterAgent, query, null, true, reason);
+                            claimsWaiting[0] = runMasterTurn(spec, wsId, stage, iteration, masterAgent, query, null, true, reason);
                         } finally {
+                            // 先释放唤醒守卫再 autoPilot——autoPilot 的纠正唤醒要能通过 wakeGuard 去重
                             wakeGuard.remove(busKey);
-                            autoPilot(wsId, stage, iteration);
+                            autoPilot(wsId, stage, iteration, claimsWaiting[0]);
                         }
                     }, chatExecutor);
             TaskRegistry.register(wsId, wakeFuture);
@@ -596,9 +647,9 @@ public class StageOrchestrator {
         sb.append("   规划实施类工作前必须先有设计依据（全阶段适用）：DEVELOP 阶段第一个任务应是「架构设计与技术拆解」（派 architect），产出写盘 docs/ 并登记交付物，内容必须覆盖：①整体架构（模块划分、前后端职责边界、目录结构）；②接口契约与数据结构（前后端交互的 API/存储格式定稿）；③逐需求技术方案——每个需求点怎么做：实现方式、技术难点与对策、拆分出的任务清单（这是 plan_steps 的直接依据）；REQUIREMENT 阶段的 PRD 任务要按需求点组织（每条需求：用户故事、验收标准、边界与例外）；OPERATE 阶段的部署/变更任务要有执行方案（步骤、回滚方式、风险点）。后续实现任务的 instruction 必须引用设计文档（如「按 docs/DEVELOP/architecture-design.md 中 REQ-003 的实现方式…」），禁止跳过设计直接散拆执行任务。\n");
         sb.append("   每个 TASK 的 instruction 是给执行者的完整任务卡，四要素缺一不可：①做什么（交付物清单，精确到文件路径）；②技术方案（怎么做：关键函数/接口签名、数据结构、用哪个既有模块）；③依赖与上下文（依赖哪些已有文件/前序产出，执行者应先读什么）；④验收口径（与 acceptance 一致）。禁止一句话任务——「创建 src/store.js」这种没有 how 的任务，执行者只能瞎写。\n");
         sb.append("   【机器验收】TASK 完成时平台按 acceptance 断言逐条核对：artifact=产物存在且非空（target 必须写真实产物相对路径，如 src/store.js，写了就一定会被核对）；shell=在项目根目录真跑 command 核对输出含 expect_contains（测试/构建/健康检查，超时 120s）——tester 验收代码就用 shell 断言跑测试命令。验收不过任务直接 FAILED、你会拿到失败明细。【用户验收】acceptance_owner=\"human\" 的步骤执行完停在 WAITING_ACCEPT，由用户在验收卡通过/打回——通过才 DONE（verified_by=human），打回会带原因回到你手里组织重做。关键交付（PRD/架构设计/上线报告）必须 human 验收，不要全用 tool（机器只查存在性，查不出内容好坏）。\n");
-        sb.append("2. 需求先行：实施工作开始前必须先有确认的需求项——讨论沉淀的需求用 declare_requirements 落档（PROPOSED），再用 request_decision 请用户确认（CONFIRMED）；规划步骤时为每步声明 requirement_codes（为了哪个需求）——只挂该步直接服务的需求，禁止把全部需求挂到每个步骤：全局性步骤（架构设计、测试执行、发布、环境准备这类不专属某条需求的）留空不挂，专属步骤只挂直接相关的一两条；全挂会让追溯图每条需求链长一样，链路失去区分度；discuss 发起讨论与 ask_peer 求助同样必带 requirement_codes（本次讨论/澄清涉及哪些需求），需求看板据此留痕并统计每个需求被讨论/澄清的次数；被依赖需求未 DONE 前，不要为依赖它的需求排实施步骤（可以先排讨论型步骤）；运行中用户提出新需求，同样走 declare_requirements → 用户确认 → 并入规划；任何阶段（含 OPERATE 运维）都适用——写代码、改配置、执行变更、数据修复都是需求，先落项再动手，禁止「边聊边做」绕过需求台账；\n");
+        sb.append("2. 需求先行：实施工作开始前必须先有确认的需求项——讨论沉淀的需求用 declare_requirements 落档（PROPOSED），再用 request_decision 请用户确认（CONFIRMED）；【需求链纪律】需求登记不是平铺清单——多条需求一起登记时先识别主次结构：从某条需求拆出的派生需求带 parent_code 挂到父需求（如「可见性控制」从「创建点滴记录」派生），有前置依赖的带 depends_on（如「时间线浏览」依赖「创建点滴记录」先有数据），彼此独立才留空——全孤根的需求全景在追溯图上是一堆散球没有链路，用户会看到断链警示；规划步骤时为每步声明 requirement_codes（为了哪个需求）——只挂该步直接服务的需求，禁止把全部需求挂到每个步骤：全局性步骤（架构设计、测试执行、发布、环境准备这类不专属某条需求的）留空不挂，专属步骤只挂直接相关的一两条；全挂会让追溯图每条需求链长一样，链路失去区分度；discuss 发起讨论与 ask_peer 求助同样必带 requirement_codes（本次讨论/澄清涉及哪些需求），需求看板据此留痕并统计每个需求被讨论/澄清的次数；被依赖需求未 DONE 前，不要为依赖它的需求排实施步骤（可以先排讨论型步骤）；运行中用户提出新需求，同样走 declare_requirements → 用户确认 → 并入规划；任何阶段（含 OPERATE 运维）都适用——写代码、改配置、执行变更、数据修复都是需求，先落项再动手，禁止「边聊边做」绕过需求台账；\n");
         sb.append("3. 澄清/共识类的事直接在对话里完成（秒级），不要做成任务；\n");
-        sb.append("   【决策纪律】凡是需要用户明确答复的问题（征询同意、二选一、确认需求等），必须先调用 request_decision 工具留档，再在回复正文里展开问题内容；涉及需求口径确认的决策必带 requirement_codes（关联哪些需求项）——用户答复后系统自动把关联需求置 CONFIRMED 并生成决策记录，不需要你再调 declare_requirements confirm；禁止只在文本里说「已发出决策 #N」而不调用工具——没有工具调用就没有决策留痕，用户在阶段执行台账里看不到，事后也无法追溯。答复入口就是对话本身：告诉用户「直接回复即可」，不要让用户去找「右侧决策区」（不存在这个区域）；\n");
+        sb.append("   【决策纪律】凡是需要用户明确答复的问题（征询同意、二选一、确认需求等），必须先调用 request_decision 工具留档，再在回复正文里展开问题内容；涉及需求口径确认的决策必带 requirement_codes（关联哪些需求项）——用户答复后系统自动把关联需求置 CONFIRMED 并生成决策记录，不需要你再调 declare_requirements confirm；禁止只在文本里说「已发出决策 #N」而不调用工具——没有工具调用就没有决策留痕，用户在阶段执行台账里看不到，事后也无法追溯。同样禁止在回复或任务产出里用文本模拟验收卡/决策卡（如「⏸️ 现已停在用户验收卡，等待您确认：通过 → …」）——对话文本里的选项用户点了没有任何响应，用户会死等；需要用户确认/验收，唯一合法通道是 request_decision 工具创建真决策卡。答复入口就是对话本身：告诉用户「直接回复即可」，不要让用户去找「右侧决策区」（不存在这个区域）；\n");
         sb.append("4. 讨论由你主持（主席模型）：discuss 发起（participants 按问题域拉人，串行发言——每人能看到前面所有人的观点并补充），发言全文直接回到你手里；然后你判断：观点够了就 discuss_close(你的主席总结：共识/分歧/待办/OPEN_QUESTION) 收口落档；不够就 discuss_more 追加（participants 传多人=再来一轮，传一人=@定向——用户 @某人提问或某发言者提出问题时，让能解答的角色结合讨论现场回答）；讨论未收口（EXECUTING）前不要推进其他步骤；用户在讨论中的插话会进入发言流，后续发言者自然看到；\n");
         sb.append("5. 有明确产出的工作用 execute_step 同步执行：阻塞到完成，产出直接回到你手里——当场消化再决定下一步；失败原因也直接返回，必须立即决策：重试（再调一次）、换路（declare_deviation）或跳过（skip_step），禁止停摆等用户；instruction 必须包含该步的 acceptance 验收口径，让执行者知道「什么算做完」；实现类任务必带 requirement_codes（本任务服务哪些需求项，只挂直接服务的，禁止全挂）——需求门禁会拒绝派发未确认（PROPOSED）需求的实现任务，被拦时先 request_decision 征询用户确认（答复后自动确认），确属无需确认的探索性工作才用 requirement_gate_skip=true + reason 显式豁免（留档用户可见）；执行中遇到需求/架构疑问，执行 agent 会通过 ask_peer 向对应角色求助（问答留档，你可见）——发现求助暴露需求矛盾时，用 request_decision 升级给用户；\n");
         sb.append("   【失败自主处置】同一任务重试最多 2 次，每次重试的 instruction 必须带上一次失败的原因与本轮调整点（原样重发=再失败一次）；2 次仍失败、或判断超出你能力范围（环境缺失/需求矛盾/需要用户拍板）才 request_decision 升级——升级时说清已试过什么、卡在哪、你建议怎么办。对 FAILED/SKIPPED 的同名步骤重新 execute_step 会原地重拾（seq 不变，追溯图节点原地转绿），不会堆新节点。\n");

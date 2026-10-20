@@ -472,6 +472,23 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
               if (idx >= 0) busToolLines[idx] = line
               else busToolLines.push(line)
               if (busProc.id) setMsgs((x) => x.map((m) => (m.id === busProc.id ? { ...m, text: busToolLines.join('\n') } : m)))
+            } else if (event === 'system.truth') {
+              // 唯一真相播报（产品契约：对话文本声称的状态必须有台账对应）：
+              // 主控轮结束后系统播报台账实况——用户据此核对主控说的与台账是否一致
+              const done = Number(payload.done || 0)
+              const executing = Number(payload.executing || 0)
+              const waitingAccept = Number(payload.waitingAccept || 0)
+              const decisionPending = Number(payload.decisionPending || 0)
+              const planned = Number(payload.planned || 0)
+              const failed = Number(payload.failed || 0)
+              const parts: string[] = []
+              if (executing) parts.push(`执行中 ${executing}`)
+              if (waitingAccept) parts.push(`待验收 ${waitingAccept}`)
+              if (decisionPending) parts.push(`待决策 ${decisionPending}`)
+              if (planned) parts.push(`未执行 ${planned}`)
+              if (failed) parts.push(`失败 ${failed}`)
+              parts.push(`已完成 ${done}`)
+              setMsgs((x) => [...x, { id: nextId(), type: 'system', text: `📋 台账实况：${parts.join(' · ')}` }])
             } else if (event === 'stage.finish' && busAgent.id) {
               finishQueue(busAgent.id)
               setMsgs((x) => x.map((m) => (m.id === busAgent.id ? { ...m, streaming: false, phaseText: undefined } : m)))
@@ -502,6 +519,26 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
     } catch {
       message.error('读取过程留档失败')
     }
+  }
+
+  /** 💭 思考段落拆分：执行轨迹里的 💭【思考】…💭【思考结束】段折叠渲染（默认收起）——
+   *  协作现场：用户能看到每个智能体的想法，但长思考不淹没正文 */
+  const renderWithThinking = (text: string) => {
+    if (!text || !text.includes('💭 【思考】')) return <MarkdownView scroll={false} text={text} />
+    const parts = text.split(/💭 【思考】([\s\S]*?)(?:💭 【思考结束】|$)/g)
+    return parts.map((seg, i) => i % 2 === 0
+      ? (seg.trim() ? <MarkdownView key={i} scroll={false} text={seg} /> : null)
+      : (
+        <details key={i} style={{ margin: '4px 0' }}>
+          <summary style={{ fontSize: 12, color: '#8c8c8c', cursor: 'pointer', userSelect: 'none' }}>
+            💭 思考过程（点击展开）
+          </summary>
+          <div style={{
+            fontSize: 12, color: '#8c8c8c', whiteSpace: 'pre-wrap', maxHeight: 220, overflowY: 'auto',
+            padding: '4px 8px', background: '#fafafa', borderLeft: '2px solid #d9d9d9', borderRadius: 4, marginTop: 2,
+          }}>{seg}</div>
+        </details>
+      ))
   }
 
   /** 工具授权决定：批准/拒绝（可勾选本会话记住）→ 恢复执行 → 渲染恢复期间事件 */
@@ -939,7 +976,7 @@ export function StageChatPanel({ projectId, exec, onJumpExec }: {
                 )}
                 {m.type === 'user' || m.type === 'queued'
                   ? m.text
-                  : <MarkdownView scroll={false} text={m.text} />}
+                  : renderWithThinking(m.text)}
                 {m.streaming && m.phaseText && (
                   <div style={{ marginTop: 4, fontSize: 12, color: '#531dab' }}>
                     {m.phaseText}

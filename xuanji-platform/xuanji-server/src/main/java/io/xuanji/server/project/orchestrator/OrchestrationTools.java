@@ -368,8 +368,24 @@ public class OrchestrationTools {
             }
             return ToolResult.of(Map.of("ok", true, "message",
                     "需求已落档: " + String.join("；", results)
-                            + ("propose".equals(action) ? "。请用 request_decision 请用户确认后再规划实施" : "")));
+                            + ("propose".equals(action) ? "。请用 request_decision 请用户确认后再规划实施" : "")
+                            + orphanRootNote(action, items)));
         });
+    }
+
+    /**
+     * 需求链完整性提醒（2026-10-20 实锤）：批量 propose 全孤根（无 parent_code/depends_on）
+     * → 追溯图散球无链、用户看到断链警示——返回值当场提醒主控补声明（确属独立可忽略）。
+     */
+    private String orphanRootNote(String action, List<?> items) {
+        if (!"propose".equals(action) || items.size() < 2) {
+            return "";
+        }
+        boolean anyLink = items.stream().anyMatch(o -> o instanceof Map<?, ?> m
+                && (m.get("depends_on") instanceof List<?> dl && !dl.isEmpty()
+                    || !str(m.get("parent_code")).isBlank()));
+        return anyLink ? "" : " ⚠️ 本次登记 " + items.size()
+                + " 条需求全部为孤根（无 parent_code/depends_on）——若存在主次/派生/前置关系，请用 update 补声明（追溯图据此画需求链）；确属彼此独立可忽略。";
     }
 
     /** 自动生成下一个需求编号：REQ-001 起，取现有最大序号 +1。 */
@@ -924,9 +940,13 @@ public class OrchestrationTools {
             }
             // 重拾复用（2026-10-19「相同节点可以重拾 不能直接创建」）：同名同 agent 的
             // FAILED/SKIPPED 旧步骤原地重置（seq 不变，追溯图节点原地转绿）——execute_step
-            // 是即席派单，失败重试若每次都新建，图上会堆一堆红色旧节点 + 灰色新节点
+            // 是即席派单，失败重试若每次都新建，图上会堆一堆红色旧节点 + 灰色新节点。
+            // PLANNED 也复用（2026-10-20 实锤）：plan_steps 登记的规划节点被 execute_step
+            // 落地时必须原地关联——否则规划节点永远残留 PLANNED，autoPilot 反复「黑板还有
+            // N 个未执行步骤」空转唤醒，主控被误导后文本模拟验收卡死等用户（用户点伪卡无响应）
             Optional<StageStep> stale = stepRepo.findByStage(wsId, stage, iteration).stream()
-                    .filter(s -> s.status() == StepStatus.FAILED || s.status() == StepStatus.SKIPPED)
+                    .filter(s -> s.status() == StepStatus.FAILED || s.status() == StepStatus.SKIPPED
+                            || s.status() == StepStatus.PLANNED)
                     .filter(s -> s.name().equals(name) && s.agent() != null && s.agent().equals(agent))
                     .findFirst();
             long id;
@@ -943,10 +963,17 @@ public class OrchestrationTools {
                 // 同步执行（无超时）：产出直接回到你手里，当场消化再决定下一步
                 String output = taskRunner.runSync(exec, brief(""));
                 String briefOut = output.length() > 1500 ? output.substring(0, 1500) + "…(全文已留档)" : output;
+                // 唯一真相防御（2026-10-20 实锤）：执行 agent 在产出文本里模拟「验收卡/等待确认」，
+                // 主控若照搬转述，用户面对的是无响应的伪卡——返回值当场提醒主控补 request_decision
+                boolean fakeCard = output.contains("等待您确认") || output.contains("等待确认")
+                        || output.contains("验收卡") || output.contains("等待您的确认");
                 return ToolResult.of(Map.of("ok", true, "seq", exec.seq(),
                         "output", briefOut,
                         "message", "任务完成，产出已留档（交付物+文档）。消化产出后继续推进；"
-                                + "若产出不合格可重发 execute_step 重做该步。"));
+                                + "若产出不合格可重发 execute_step 重做该步。"
+                                + (fakeCard ? " ⚠️ 产出文本声称「等待用户确认/验收」——对话文本里的选项用户点了没有任何响应；"
+                                        + "若该任务确需用户验收，你必须调 request_decision 创建真决策卡（或确认该步骤 acceptance_owner=human 走 WAITING_ACCEPT）；"
+                                        + "若无需确认，直接继续推进，不要转述伪卡。" : "")));
             } catch (DiscussionEngine.UserInterrupted ui) {
                 return ToolResult.of(Map.of("ok", false, "seq", exec.seq(),
                         "message", "用户已终止本任务。请直接进入下一步，不要重试。"));
@@ -1376,8 +1403,8 @@ public class OrchestrationTools {
         reqProps.put("title", str("需求标题（一句话说清要什么）"));
         reqProps.put("description", str("需求描述：背景、边界、约束"));
         reqProps.put("acceptance", obj(acceptanceProps()));
-        reqProps.put("depends_on", arr(str("依赖的需求编号列表（如 [\"REQ-001\"]）：被依赖需求完成前，本需求不得排实施步骤")));
-        reqProps.put("parent_code", str("父需求编号（REQ-001）：本条是父需求拆出的子需求时填——交付图据此画「原始需求→拆分点」父子连线，顶层需求留空"));
+        reqProps.put("depends_on", arr(str("依赖的需求编号列表（如 [\"REQ-001\"]）：被依赖需求完成前，本需求不得排实施步骤。批量登记时凡有前置关系的必须声明（如「时间线浏览」依赖「创建点滴记录」先有数据）——追溯图据此画依赖链，全留空=散球无链")));
+        reqProps.put("parent_code", str("父需求编号（REQ-001）：本条是父需求拆出的子需求时填——交付图据此画「原始需求→拆分点」父子连线。批量登记时先识别主次：主需求（根）留空，派生需求挂父（如「可见性控制」「数据安全」多从核心功能派生）"));
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("action", str("propose=落新需求（PROPOSED）/ confirm=用户已同意后置 CONFIRMED / update=改 PROPOSED 草稿 / drop=废弃"));
         props.put("requirements", arr(obj(reqProps)));

@@ -136,6 +136,7 @@ public class TaskRunner {
         StringBuilder trace = new StringBuilder();
         final long[] lastFlush = {System.currentTimeMillis()};
         final StringBuilder pending = new StringBuilder();
+        final boolean[] inThinking = {false}; // 思考段落边界标记（💭 段落成对出现）
         java.util.function.Consumer<String> flush = (force) -> {
             String buf = pending.toString();
             if (buf.isEmpty()) {
@@ -165,9 +166,26 @@ public class TaskRunner {
         java.util.function.Consumer<io.xuanji.core.runtime.AgentStreamEvent> onEvent = evt -> {
             String type = evt.type();
             if ("agent.delta".equals(type) && evt.delta() != null && !evt.delta().isEmpty()) {
+                if (inThinking[0]) {
+                    pending.append("\n💭 【思考结束】\n");
+                    inThinking[0] = false;
+                }
+                pending.append(evt.delta());
+                flush.accept("throttle");
+            } else if ("thinking.delta".equals(type) && evt.delta() != null && !evt.delta().isEmpty()) {
+                // 协作现场（产品契约：用户能看到每个智能体的想法）：执行 agent 的思考增量
+                // 进轨迹与对话流——💭 标记段落，前端折叠区淡化渲染
+                if (!inThinking[0]) {
+                    pending.append("\n💭 【思考】\n");
+                    inThinking[0] = true;
+                }
                 pending.append(evt.delta());
                 flush.accept("throttle");
             } else if ("tool.call".equals(type)) {
+                if (inThinking[0]) {
+                    pending.append("\n💭 【思考结束】\n");
+                    inThinking[0] = false;
+                }
                 String tool = evt.meta() == null ? "" : String.valueOf(evt.meta().getOrDefault("tool", evt.meta().get("name")));
                 if (!tool.isBlank()) {
                     pending.append("\n🔧 调用 ").append(tool).append(" …\n");
@@ -496,7 +514,10 @@ public class TaskRunner {
         }
         // 裸类名用户看不懂（2026-10-19 反馈）：常见无 message 异常给可读文案
         if (cur instanceof InterruptedException) {
-            return "执行被中断（服务重启或人为终止）——可重试";
+            // 2026-10-20 实锤：AgentScope 模型调用默认超时 5 分钟（ExecutionConfig.MODEL_DEFAULTS），
+            // 超时 Flux.timeout cancel → interrupt 线程走到这里——多数是 LLM 调用超时，
+            // 少数才是服务重启/人为终止（终止端点有独立「用户终止」留痕，不走此文案）
+            return "LLM 调用超时或被中断（单次生成超过上限）——可重试";
         }
         if (cur instanceof java.util.concurrent.TimeoutException) {
             return "执行超时";
