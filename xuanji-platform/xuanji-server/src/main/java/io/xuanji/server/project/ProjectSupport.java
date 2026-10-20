@@ -29,7 +29,7 @@ public final class ProjectSupport {
     public static final Map<String, String> STAGE_LABEL = Map.of("REQUIREMENT", "需求", "DEVELOP", "开发", "OPERATE", "运维");
     public static final String STAGE_OPERATE = "OPERATE";
     public static final String STAGE_REQUIREMENT = "REQUIREMENT";
-    public static final List<String> CAPABILITY_KEYS = List.of("tools", "skills", "mcps", "connectors", "artifacts", "urls", "agents", "workflow", "servers");
+    public static final List<String> CAPABILITY_KEYS = List.of("tools", "skills", "mcps", "connectors", "artifacts", "urls", "agents", "workflow", "servers", "db_addresses", "deploy_spec");
     public static final Map<String, String> TYPE_STAGE = Map.ofEntries(Map.entry("DISCUSS", "REQUIREMENT"), Map.entry("INITIATION", "REQUIREMENT"), Map.entry("PROJECT_DOC", "REQUIREMENT"), Map.entry("PRD", "REQUIREMENT"), Map.entry("PROTOTYPE", "REQUIREMENT"), Map.entry("UI_DESIGN", "REQUIREMENT"), Map.entry("ARCHITECTURE", "DEVELOP"), Map.entry("DESIGN", "DEVELOP"), Map.entry("TEST_CASE", "DEVELOP"), Map.entry("DEVELOP", "DEVELOP"), Map.entry("SMOKE", "DEVELOP"), Map.entry("SUBMIT", "DEVELOP"), Map.entry("TEST", "DEVELOP"), Map.entry("REVIEW", "DEVELOP"), Map.entry("RELEASE", "OPERATE"), Map.entry("DEPLOY", "OPERATE"), Map.entry("OPS", "OPERATE"), Map.entry("BUGFIX", "OPERATE"), Map.entry("MONITOR", "OPERATE"), Map.entry("DB", "OPERATE"), Map.entry("DATABASE", "OPERATE"));
     public static Long optionalLong(Object v, String label) {
         if (v == null) {

@@ -71,8 +71,9 @@ public class AgentScopeRuntime implements AgentRuntime {
      */
     private final ObjectProvider<ToolApprovalChecker> approvalChecker;
 
-    /** shell 命令白名单（逗号分隔，application.yml xuanji.agent.shell-allowed 可覆盖） */
-    @org.springframework.beans.factory.annotation.Value("${xuanji.agent.shell-allowed:git,mvn,java,ls,cat,pwd,echo,tail,head,grep,find,docker,systemctl}")
+    /** shell 命令白名单（逗号分隔，application.yml xuanji.agent.shell-allowed 可覆盖）；
+     * node/npm/npx 供 developer/tester 跑构建与测试自证（2026-10-19 责任链改造） */
+    @org.springframework.beans.factory.annotation.Value("${xuanji.agent.shell-allowed:git,mvn,java,ls,cat,pwd,echo,tail,head,grep,find,docker,systemctl,node,npm,npx}")
     private String shellAllowed;
 
     /**
@@ -366,6 +367,17 @@ public class AgentScopeRuntime implements AgentRuntime {
 
     private GenerateOptions generateOptions(AgentSpec spec) {
         GenerateOptions.Builder b = GenerateOptions.builder();
+        // 模型执行配置：AgentScope MODEL_DEFAULTS 超时 5 分钟（ExecutionConfig 字节码实锤），
+        // qwen 慢生成单次可超 5 分钟 → Flux.timeout 触发 cancel → interrupt 任务线程 →
+        // 步骤被误标「执行被中断」。提到 30 分钟（与 SSE 上限 1800s 对齐），其余字段复刻 MODEL_DEFAULTS。
+        b.executionConfig(io.agentscope.core.model.ExecutionConfig.builder()
+                .timeout(java.time.Duration.ofMinutes(30))
+                .maxAttempts(2)
+                .initialBackoff(java.time.Duration.ofSeconds(2))
+                .maxBackoff(java.time.Duration.ofSeconds(30))
+                .backoffMultiplier(2.0)
+                .retryOn(io.agentscope.core.model.ExecutionConfig.RETRYABLE_ERRORS)
+                .build());
         Map<String, Object> params = spec.model().params();
         if (params != null) {
             Object t = params.get("temperature");

@@ -54,6 +54,7 @@ public class DataSourceService {
         String url = str(body, "url");
         String dbUser = str(body, "user");
         String password = str(body, "password");
+        String dbType = normalizeDbType(body.get("db_type"), url);
         if (name == null || name.isBlank() || url == null || url.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name 与 url 必填");
         }
@@ -64,17 +65,51 @@ public class DataSourceService {
         validateOrThrow(new Credential("basic", Map.of(
                 "url", url, "user", dbUser == null ? "" : dbUser, "password", password == null ? "" : password)));
         String cipher = password == null ? null : crypto.encrypt(password);
-        Long id = repo.insert(PLATFORM, name, url, cipher, extraJson(dbUser), user.username());
-        return Map.of("id", id, "name", name);
+        Long id = repo.insert(PLATFORM, name, url, cipher, extraJson(dbUser, dbType), user.username());
+        return Map.of("id", id, "name", name, "db_type", dbType);
     }
 
     /** 测试连接：用传入的临时凭证试连（不落库） */
     public Map<String, Object> test(Map<String, Object> body) {
+        String url = nullToEmpty(str(body, "url"));
+        normalizeDbType(body.get("db_type"), url); // 类型与 URL 前缀一致性前置校验
         validateOrThrow(new Credential("basic", Map.of(
-                "url", nullToEmpty(str(body, "url")),
+                "url", url,
                 "user", nullToEmpty(str(body, "user")),
                 "password", nullToEmpty(str(body, "password")))));
         return Map.of("ok", true);
+    }
+
+    /** 支持的数据库类型 → JDBC URL 前缀。类型未传时从 URL 推断，推断不出按 postgresql 兜底。 */
+    private static final Map<String, String> DB_URL_PREFIX = Map.of(
+            "postgresql", "jdbc:postgresql://",
+            "mysql", "jdbc:mysql://");
+
+    /**
+     * 归一化数据库类型：显式传入时校验合法 + 与 URL 前缀一致（防「选了 MySQL 填了 PG URL」的错配）；
+     * 未传时从 URL 前缀推断（兼容旧客户端）。
+     */
+    private String normalizeDbType(Object raw, String url) {
+        String requested = raw == null ? "" : raw.toString().trim().toLowerCase();
+        String inferred = null;
+        for (var e : DB_URL_PREFIX.entrySet()) {
+            if (url != null && url.startsWith(e.getValue())) {
+                inferred = e.getKey();
+                break;
+            }
+        }
+        if (requested.isEmpty()) {
+            return inferred != null ? inferred : "postgresql";
+        }
+        if (!DB_URL_PREFIX.containsKey(requested)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "不支持的数据库类型: " + requested + "（当前支持 " + DB_URL_PREFIX.keySet() + "）");
+        }
+        if (inferred != null && !inferred.equals(requested)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "数据库类型与连接地址不匹配：选了 " + requested + " 但 URL 是 " + DB_URL_PREFIX.get(inferred) + " 前缀");
+        }
+        return requested;
     }
 
     /** 试连失败转 400：ConnectorException 是 RuntimeException，不拦会冒 500（异常分支须友好报错） */
@@ -111,10 +146,10 @@ public class DataSourceService {
         return s == null ? "" : s;
     }
 
-    private static String extraJson(String user) {
+    private static String extraJson(String user, String dbType) {
         try {
             return new com.fasterxml.jackson.databind.ObjectMapper()
-                    .writeValueAsString(Map.of("user", user == null ? "" : user));
+                    .writeValueAsString(Map.of("user", user == null ? "" : user, "db_type", dbType == null ? "postgresql" : dbType));
         } catch (Exception e) {
             return "{}";
         }

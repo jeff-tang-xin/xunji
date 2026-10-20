@@ -250,6 +250,10 @@ export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], on
   const [detailReq, setDetailReq] = useState<TraceReq | null>(null)
   const [detailCase, setDetailCase] = useState<NonNullable<TraceData['test_cases']>[number] | null>(null)
   const [detailBug, setDetailBug] = useState<NonNullable<TraceData['bugs']>[number] | null>(null)
+  // P0 验收责任链：验收操作状态（hooks 必须在条件 return 之前——React #310 教训）
+  const [acceptBusy, setAcceptBusy] = useState(false)
+  const [rejectStep, setRejectStep] = useState<StageStepRow | null>(null)
+  const [rejectComment, setRejectComment] = useState('')
 
   const load = () => {
     setLoading(true)
@@ -275,9 +279,6 @@ export function TracePanel({ projectId, refreshKey = 0, exec, artifacts = [], on
   )
   // 验收责任链（P0）：human 验收步执行完停在 WAITING_ACCEPT——用户通过才 DONE，打回带原因重做
   const pendingAccepts = (exec?.steps || []).filter((s) => s.status === 'WAITING_ACCEPT')
-  const [acceptBusy, setAcceptBusy] = useState(false)
-  const [rejectStep, setRejectStep] = useState<StageStepRow | null>(null)
-  const [rejectComment, setRejectComment] = useState('')
 
   /** 用户验收：通过=DONE(verified_by=human) 主控被唤醒继续；打回=FAILED 带原因，主控组织重做。 */
   const submitAccept = async (seq: number, pass: boolean, comment: string) => {

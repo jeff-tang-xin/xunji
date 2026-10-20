@@ -41,6 +41,11 @@ public class AuthInterceptor implements HandlerInterceptor {
         }
         String header = request.getHeader("Authorization");
         String token = header != null && header.startsWith("Bearer ") ? header.substring(7) : null;
+        if (token == null && path.endsWith("/events")) {
+            // SSE 订阅端点：浏览器 EventSource 无法设置 Authorization header（API 限制），
+            // 允许 ?token= 传递（仅 /events 后缀放行，普通接口仍强制 header，避免 token 进访问日志）
+            token = request.getParameter("token");
+        }
         LoginUser user = tokenService.resolve(token);
         if (user == null) {
             response.setStatus(401);

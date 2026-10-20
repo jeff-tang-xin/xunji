@@ -17,7 +17,7 @@ import {
   RobotOutlined, UserOutlined, PlusOutlined, SendOutlined,
   ShareAltOutlined, LinkOutlined, ApartmentOutlined,
 } from '@ant-design/icons'
-import { apiFetch, apiJson } from '../api/client'
+import { apiFetch, apiJson, getToken } from '../api/client'
 
 /** 工作区行（后端 snake_case） */
 interface WsRow {
@@ -339,7 +339,8 @@ function ChatPanel({ ws, onStatusRefresh }: { ws: WsRow; onStatusRefresh: () => 
       }
       void apiJson<Record<string, unknown>>('/api/runs/' + runId).then((d) => {
         if (String(d.status || '') === 'RUNNING') {
-          es = new EventSource('/api/runs/' + runId + '/events')
+          // EventSource 带不了 Authorization header，token 走 ?token=（后端仅 /events 端点接受）
+          es = new EventSource('/api/runs/' + runId + '/events?token=' + encodeURIComponent(getToken() || ''))
           es.addEventListener('run.finished', () => { void settle() })
           es.onerror = () => { window.setTimeout(() => { void settle() }, 300) }
         } else {

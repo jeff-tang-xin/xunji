@@ -250,8 +250,8 @@ public class AgentNodeExecutor {
         }
     }
 
-    /** 项目工作区绝对路径（内置文件工具 baseDir 硬边界）。 */
-    private String workspaceRoot(String wsId) {
+    /** 项目工作区绝对路径（内置文件工具 baseDir 硬边界；TaskRunner 机器验收也用它定位产物）。 */
+    public String workspaceRoot(String wsId) {
         try {
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "SELECT root_path FROM workspace WHERE id = ?", wsId);

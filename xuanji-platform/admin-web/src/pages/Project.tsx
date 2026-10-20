@@ -38,7 +38,7 @@ import {
   ReloadOutlined,
   SettingOutlined,
 } from '@ant-design/icons'
-import { apiJson } from '../api/client'
+import { apiJson, getToken } from '../api/client'
 import { EXEC_LIVE_STATES, ProjectDetailData, ProjectRow, SHOW_TEMPLATE_ENTRY, StageExecution, fmtDate, projectStatusColor, stageLabel } from './project/types'
 import { CreateProjectModal } from './project/CreateProjectModal'
 import { OpsConnLists, OpsServer, OpsDatabase, cleanServers, cleanDatabases } from './project/OpsConnLists'
@@ -186,7 +186,8 @@ const [rightTab, setRightTab] = useState('trace')
   // 此前只有 requirement.updated 驱动 TracePanel，步骤落终态后追溯图不更新——最大不实时缺口）
   const [dataTick, setDataTick] = useState(0)
   useEffect(() => {
-    const es = new EventSource(`/api/projects/${id}/events`)
+    // EventSource 带不了 Authorization header（浏览器 API 限制），token 走 ?token=（后端仅 /events 端点接受）
+    const es = new EventSource(`/api/projects/${id}/events?token=${encodeURIComponent(getToken() || '')}`)
     const refresh = () => { setDataTick((x) => x + 1); void loadExec(); void load(true) }
     es.addEventListener('step.updated', refresh)        // 步骤落终态（含决策步创建即推）
     es.addEventListener('decision.answered', refresh)   // 决策答复闭环
