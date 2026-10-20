@@ -294,30 +294,38 @@ export function TraceGraph({ data, onOpenStep, onOpenReq, onOpenCase, onOpenBug 
           )
         })}
 
-        {/* 断链泳道 */}
+        {/* 未挂需求泳道：global=全局步骤（["*"] 显式声明，中性灰蓝）；其余=真断链（黄警示） */}
         {unlinkedNodes.length > 0 && (
           <g opacity={hover === null ? 1 : 0.35}>
             <rect x={0} y={unlinkedY} width={totalW} height={ROW_H + 8} fill="#fffbeb" opacity={0.6} rx={6} />
             <text x={12} y={unlinkedY + ROW_H / 2 - 2} fontSize={11} fontWeight={700} fill="#d97706">
-              断链
+              未挂需求
             </text>
             <text x={12} y={unlinkedY + ROW_H / 2 + 12} fontSize={9} fill="#b45309">
-              {data.unlinked.length} 项未声明
+              {data.unlinked.filter((s) => !s.global).length} 断链
+              {data.unlinked.some((s) => s.global) ? ` · ${data.unlinked.filter((s) => s.global).length} 全局` : ''}
             </text>
-            {unlinkedNodes.map((n) => (
-              <g key={`${n.s.stage}-${n.s.iteration}-${n.s.seq}`} style={{ cursor: 'pointer' }} onClick={() => onOpenStep(n.s)}>
-                <title>{`${n.s.name}\n${STATUS_TEXT[n.s.status] || n.s.status} · ${n.s.stage}${n.s.error ? '\n❌ ' + n.s.error.slice(0, 140) : ''}`}</title>
-                <rect x={n.x} y={n.y} width={NODE_W} height={NODE_H} rx={7}
-                      fill={statusColor(n.s.status)} fillOpacity={0.12}
-                      stroke="#fbbf24" strokeWidth={1.4} strokeDasharray="4 3" />
-                <text x={n.x + NODE_W / 2} y={n.y + 15} textAnchor="middle" fontSize={9.5} fontWeight={600} fill="#334155">
-                  {truncate(n.s.name, 13)}
-                </text>
-                <text x={n.x + NODE_W / 2} y={n.y + 28} textAnchor="middle" fontSize={8.5} fill="#64748b">
-                  {STATUS_TEXT[n.s.status] || n.s.status}
-                </text>
-              </g>
-            ))}
+            {unlinkedNodes.map((n) => {
+              const isGlobal = !!n.s.global
+              const stroke = isGlobal ? '#64748b' : '#fbbf24'
+              return (
+                <g key={`${n.s.stage}-${n.s.iteration}-${n.s.seq}`} style={{ cursor: 'pointer' }} onClick={() => onOpenStep(n.s)}>
+                  <title>
+                    {`${n.s.name}\n${isGlobal ? '全局步骤（不专属某条需求）' : '断链：未声明服务任何需求'}\n${STATUS_TEXT[n.s.status] || n.s.status} · ${n.s.stage}${n.s.error ? '\n❌ ' + n.s.error.slice(0, 140) : ''}`}
+                  </title>
+                  <rect x={n.x} y={n.y} width={NODE_W} height={NODE_H} rx={7}
+                        fill={statusColor(n.s.status)} fillOpacity={0.12}
+                        stroke={stroke} strokeWidth={1.4}
+                        strokeDasharray={isGlobal ? undefined : '4 3'} />
+                  <text x={n.x + NODE_W / 2} y={n.y + 15} textAnchor="middle" fontSize={9.5} fontWeight={600} fill="#334155">
+                    {truncate(n.s.name, 13)}
+                  </text>
+                  <text x={n.x + NODE_W / 2} y={n.y + 28} textAnchor="middle" fontSize={8.5} fill={isGlobal ? '#64748b' : '#b45309'}>
+                    {isGlobal ? '全局' : '断链'} · {STATUS_TEXT[n.s.status] || n.s.status}
+                  </text>
+                </g>
+              )
+            })}
           </g>
         )}
       </svg>

@@ -1115,9 +1115,16 @@ public class ProjectService {
             node.put("output_summary", s.outputSummary());
             node.put("instruction", s.instruction());
             node.put("requirement_codes", s.requirementCodes());
+            // ["*"] = 全局步骤（架构设计/测试执行/发布等不专属某条需求的，guidance 让主控显式传）——
+            // 仍进 unlinked 泳道但带 global 标记，前端显示中性「全局」徽章而非断链警示
+            boolean globalStep = s.requirementCodes().contains("*");
+            node.put("global", globalStep);
             node.put("artifact", stepArts.get("step-" + s.stage() + "-" + s.iteration() + "-" + s.seq()));
             boolean linked = false;
             for (String code : s.requirementCodes()) {
+                if ("*".equals(code)) {
+                    continue; // 全局标记不挂到具体需求链
+                }
                 Map<String, Object> item = byCode.get(code);
                 if (item != null) {
                     ((List<Object>) item.get("chain")).add(node);
@@ -1595,13 +1602,27 @@ public class ProjectService {
         }
         try {
             long size = Files.size(target);
+            String content;
+            boolean truncated = false;
             if (size > 200 * 1024) {
-                throw new ResponseStatusException((HttpStatusCode)HttpStatus.BAD_REQUEST, "文件超过 200KB，暂不支持在线查看");
+                // 大文件不再 400 拒绝（2026-10-20 用户反馈「大于200kb的文件不可见」）：
+                // 截断返回前 200KB + truncated 标记，前端提示「仅显示前 200KB」
+                try (java.io.InputStream in = Files.newInputStream(target)) {
+                    byte[] buf = in.readNBytes(200 * 1024);
+                    java.nio.charset.CharsetDecoder dec = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+                            .onMalformedInput(java.nio.charset.CodingErrorAction.IGNORE)
+                            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.IGNORE);
+                    content = dec.decode(java.nio.ByteBuffer.wrap(buf)).toString();
+                }
+                truncated = true;
+            } else {
+                content = Files.readString(target);
             }
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("path", relPath);
             out.put("size", size);
-            out.put("content", Files.readString(target));
+            out.put("truncated", truncated);
+            out.put("content", content);
             return out;
         }
         catch (IOException e) {

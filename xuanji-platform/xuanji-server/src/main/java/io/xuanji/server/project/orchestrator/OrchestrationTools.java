@@ -906,6 +906,15 @@ public class OrchestrationTools {
             // 需求门禁：未确认（PROPOSED）需求不能派发实现任务——先征询确认，或显式豁免（留档）
             boolean gateSkip = Boolean.TRUE.equals(req.input().get("requirement_gate_skip"));
             String gateReason = str(req.input().get("requirement_gate_reason"));
+            // 挂链门禁（2026-10-20 断链 6 项实锤）：codes 为空=追溯图断链警示——必须显式声明：
+            // 专属步骤挂具体 REQ-xxx；全局性步骤（架构设计/测试执行/发布/环境准备）传 ["*"]；
+            // 确实无法归类才用 requirement_gate_skip=true + reason 留档
+            if (codes.isEmpty() && !gateSkip) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "步骤「" + name + "」未声明 requirement_codes——需求先行：请声明本步服务的需求项编号"
+                                + "（如 [\\\"REQ-001\\\"]）；全局性步骤（架构设计/测试执行/发布/环境准备等不专属某条需求的）"
+                                + "传 [\\\"*\\\"]；确实无法归类才用 requirement_gate_skip=true + requirement_gate_reason 留档"));
+            }
             if (gateSkip && gateReason.isBlank()) {
                 return ToolResult.of(Map.of("ok", false, "message",
                         "需求门禁豁免必须给 requirement_gate_reason（豁免留档用户可见）"));

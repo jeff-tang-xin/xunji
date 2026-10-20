@@ -88,6 +88,7 @@ export default function ProjectFiles({ projectId, refreshKey = 0 }: { projectId:
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [content, setContent] = useState<string>('')
+  const [truncated, setTruncated] = useState(false)
   const [fileLoading, setFileLoading] = useState(false)
   const [search, setSearch] = useState('')
   /** md 文件默认渲染预览，可切原文 */
@@ -118,10 +119,11 @@ export default function ProjectFiles({ projectId, refreshKey = 0 }: { projectId:
     setRawMode(false)
     setFileLoading(true)
     try {
-      const data = await apiJson<{ content: string }>(
+      const data = await apiJson<{ content: string; truncated?: boolean }>(
         `/api/projects/${projectId}/files/content?path=${encodeURIComponent(path)}`, 'GET',
       )
       setContent(data?.content ?? '')
+      setTruncated(!!data?.truncated)
     } catch (e) {
       setContent('')
       if (e instanceof Error) message.error(e.message)
@@ -311,6 +313,11 @@ export default function ProjectFiles({ projectId, refreshKey = 0 }: { projectId:
             </Tooltip>
           </div>
           <div style={{ maxHeight: '65vh', overflowY: 'auto' }}>
+            {truncated && (
+              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: '6px 12px', margin: '0 0 8px', fontSize: 12, color: '#ad6800' }}>
+                文件超过 200KB，仅显示前 200KB——完整内容请在项目目录查看
+              </div>
+            )}
             {fileLoading
               ? <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
               : selected?.toLowerCase().endsWith('.md') && !rawMode

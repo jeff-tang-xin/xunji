@@ -195,7 +195,7 @@ public static List<String> parseParticipants(String stored) {
         if (codes == null || codes.isEmpty()) {
             return null;
         }
-        List<String> safe = codes.stream().filter(c -> c.matches("[A-Za-z0-9_-]+")).distinct().toList();
+        List<String> safe = codes.stream().filter(c -> c.equals("*") || c.matches("[A-Za-z0-9_-]+")).distinct().toList();
         return safe.isEmpty() ? null : "[\"" + String.join("\",\"", safe) + "\"]";
     }
 

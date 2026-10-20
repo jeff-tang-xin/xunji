@@ -27,8 +27,10 @@ export interface TraceStep {
   error: string | null; output_summary: string | null; artifact: TraceArtifact | null
   /** 指令/问题原文（DECISION=向用户提的问题，TASK/DISCUSS=执行指令） */
   instruction?: string | null
-  /** 声明服务的需求项（空=全局步骤） */
+  /** 声明服务的需求项（["*"]=全局步骤；空=漏传，断链） */
   requirement_codes?: string[]
+  /** ["*"] 全局步骤标记（后端 trace 组装时打上）——显示中性「全局」徽章而非断链警示 */
+  global?: boolean
 }
 interface TraceReq {
   code: string; title: string; status: string; depth?: number
@@ -72,16 +74,22 @@ const STAGE_TAG_COLOR: Record<string, string> = { REQUIREMENT: 'gold', DEVELOP: 
 /** 步骤→产出证据的文件内容弹窗：有 file_path 走 /files/content（≤200KB 文本），否则显示登记时的 content_md。 */
 function ArtifactModal({ projectId, path, name, contentMd, onClose }: { projectId: string; path: string | null; name: string; contentMd?: string | null; onClose: () => void }) {
   const [content, setContent] = useState<string | null>(null)
+  const [truncated, setTruncated] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   useEffect(() => {
     if (!path) return
-    apiJson<{ content: string }>(`/api/projects/${projectId}/files/content?path=${encodeURIComponent(path)}`)
-      .then((r) => setContent(r?.content ?? ''))
+    apiJson<{ content: string; truncated?: boolean }>(`/api/projects/${projectId}/files/content?path=${encodeURIComponent(path)}`)
+      .then((r) => { setContent(r?.content ?? ''); setTruncated(!!r?.truncated) })
       .catch((e: Error) => setErr(e.message))
   }, [projectId, path])
   return (
     <Modal open title={<Space><FileTextOutlined />{name}</Space>} onCancel={onClose} footer={null} width={780}>
       <div style={{ maxHeight: '65vh', overflow: 'auto' }}>
+        {truncated && (
+          <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: '6px 12px', margin: '0 0 8px', fontSize: 12, color: '#ad6800' }}>
+            文件超过 200KB，仅显示前 200KB——完整内容请在项目目录查看
+          </div>
+        )}
         {err
           ? <Alert type="error" message={err} />
           : path
