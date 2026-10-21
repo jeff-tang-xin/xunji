@@ -362,8 +362,13 @@ public class StageOrchestrator {
             String key = StageChatEventBus.key(wsId, stage, iteration);
             // 零进展熔断（前置）：本轮黑板指纹与上轮相同 = 主控没干任何实事，续跑只会原样空转。
             // 纠正唤醒同样受熔断管——主控连续「只说不做」时最多 AUTOPILOT_MAX_ROUNDS 轮就停
+            // 零进展指纹（2026-10-21 修正）：只看待办集合（PLANNED 非 DECISION 步的 seq）——
+            // 此前用全量 seq:status，主控每轮新插一个同议题讨论（新 seq 走完 DONE）指纹就变，
+            // 零进展熔断被「假进展」绕过（实锤：同一议题开 9 次讨论，#2 规划步纹丝不动，循环不熔断）
             String fingerprint = steps.stream()
-                    .map(s -> s.seq() + ":" + s.status()).sorted()
+                    .filter(s -> s.status() == StepStatus.PLANNED && s.stepType() != StepType.DECISION)
+                    .map(s -> String.valueOf(s.seq()))
+                    .sorted()
                     .collect(java.util.stream.Collectors.joining(","));
             String last = autoPilotLast.put(key, fingerprint);
             int rounds = autoPilotRounds.merge(key, 1, Integer::sum);
@@ -395,16 +400,29 @@ public class StageOrchestrator {
                     s.stepType() == StepType.DECISION
                             && (s.status() == StepStatus.PLANNED || s.status() == StepStatus.WAITING));
             String names = planned.stream()
-                    .map(s -> "#" + s.seq() + "「" + s.name() + "」(" + s.stepType() + ")")
+                    .map(s -> {
+                        String how = s.stepType() == StepType.DISCUSS
+                                ? "discuss(seq=" + s.seq() + ") 认领执行，或 skip_step(seq=" + s.seq() + ") 跳过"
+                                : "execute_step 原地执行（同名自动复用），或 skip_step(seq=" + s.seq() + ") 跳过";
+                        return "#" + s.seq() + "「" + s.name() + "」(" + s.stepType() + "→" + how + ")";
+                    })
                     .collect(java.util.stream.Collectors.joining("、"));
             String decisionNote = decisionPending
                     ? "注意：已有决策正在等待用户答复——不要重复发出决策、不要反复探索目录空转；"
                       + "先执行与决策无关的步骤，与决策相关的步骤等用户答复后再做。"
                     : "";
+            // 讨论收敛硬禁令（2026-10-21 实锤：同一议题 9 个讨论变体，规划步纹丝不动）：
+            // 已完成讨论 ≥2 时禁止再开新讨论——待办讨论步内容已被覆盖就 skip_step 跳过
+            long doneDiscussions = steps.stream()
+                    .filter(s -> s.stepType() == StepType.DISCUSS && s.status() == StepStatus.DONE).count();
+            String discussBan = doneDiscussions >= 2
+                    ? "⚠ 本阶段已完成 " + doneDiscussions + " 次讨论——禁止再发起新讨论（同议题反复讨论=空转烧 token）；"
+                      + "待办讨论步的内容若已被已有讨论覆盖，直接 skip_step(seq=N) 跳过并写明理由。"
+                    : "";
             wakeMaster(wsId, stage, iteration,
                     "黑板还有 " + planned.size() + " 个未执行步骤：" + names
-                            + "。请连续执行（discuss/execute_step 逐个发起，做完一个立刻下一个，不要中途停下汇报），"
-                            + "全部完成后 complete_stage 收口。" + decisionNote);
+                            + "。逐个处置（做完一个立刻下一个，不要中途停下汇报），全部处置完 complete_stage 收口。"
+                            + discussBan + decisionNote);
         } catch (Exception e) {
             log.warn("AutoPilot 判定失败: ws={} {}#{} -> {}", wsId, stage, iteration, e.getMessage());
         }
@@ -651,6 +669,7 @@ public class StageOrchestrator {
         
         sb.append("你对流程与验收链的完整性负责：规划时给每步声明验收人（acceptance_owner）、执行后消化产出、验收链走完才收口。内容质量由验收人把关：tester 用 shell 断言跑测试验代码、developer 按架构设计开工（开不出工=设计不合格，打回 architect）、用户验收关键交付。你是第一道质量筛子：消化产出时发现敷衍（架构文档空洞、代码是示例、需求只有关键点没有用户故事与验收标准）——当场打回重做（execute_step 重拾，instruction 写明整改要求），禁止照单收口；收口前自查：本阶段关键交付是否都有非 self 验收（tool/human）？没有就补验收或发起阶段交付验收决策。\n");
         sb.append("你是本阶段的主控。用户只负责说话，流程由你决定：做什么、顺序、谁能跳。\n");
+        sb.append("【做事前四问（方法论，你与全体执行角色共用）】发起任何步骤（规划/讨论/派任务/发决策）之前先自答：①为什么做这件事——它解决什么具体问题（「应该做」「通常要做」不是答案）；②做它能带来什么——产出什么、下游谁消费、成本是什么；③依据是什么——凭什么判断会有这个收益（已有产出/数据/POC/明确的需求条目）；④不采用这个方案有没有替代方案——至少考虑过一条备选并说清为什么选它而不是备选（只想到一条路=还没想清楚）。四问答不清楚就不要发起——它大概率是空转（重复讨论、仪式性文档、无人消费的产出）。派任务时把四问的答案写进任务卡（为什么做/产出什么/验收依据/备选与否决理由），执行者不是接单机器，它需要知道为什么。\n");
         String anchor = stepRepo.findAnchorText(wsId, stage, iteration);
         if (anchor != null && !anchor.isBlank()) {
             sb.append("【意图锚（规划时锁定，不可偏离）】").append(anchor).append("\n");
@@ -660,8 +679,8 @@ public class StageOrchestrator {
         sb.append("【工作方式】\n");
         sb.append("1. 阶段开始或需求变化时，先用 plan_steps 规划小流程（TASK=产出型，DISCUSS=讨论型）；规划必须携带 intent_anchor（全局意图与总体验收口径），并为每个 TASK 步给出可判定的 acceptance 断言（artifact=产物存在性核对 / shell=真跑命令核对输出（测试/构建/健康检查）/ test / api，禁止「质量良好」这类不可判定描述），且必须声明 acceptance_owner（验收人）：\"tool\"=平台机器验收（产物断言/验证命令），\"human\"=用户验收（关键交付必用：PRD、架构设计、上线报告）——缺 acceptance_owner 的 TASK 步会被拒绝规划；\n");
         sb.append("   【规划质量纪律——任务卡质量=执行质量的上限】\n");
-        sb.append("   规划实施类工作前必须先有设计依据（全阶段适用）：DEVELOP 阶段第一个任务应是「架构设计与技术拆解」（派 architect），产出写盘 docs/ 并登记交付物，内容必须覆盖：①整体架构（模块划分、前后端职责边界、目录结构）；②接口契约与数据结构（前后端交互的 API/存储格式定稿）；③逐需求技术方案——每个需求点怎么做：实现方式、技术难点与对策、拆分出的任务清单（这是 plan_steps 的直接依据）；REQUIREMENT 阶段的 PRD 任务要按需求点组织（每条需求：用户故事、验收标准、边界与例外）；OPERATE 阶段的部署/变更任务要有执行方案（步骤、回滚方式、风险点）。后续实现任务的 instruction 必须引用设计文档（如「按 docs/DEVELOP/architecture-design.md 中 REQ-003 的实现方式…」），禁止跳过设计直接散拆执行任务。\n");
-        sb.append("   每个 TASK 的 instruction 是给执行者的完整任务卡，四要素缺一不可：①做什么（交付物清单，精确到文件路径）；②技术方案（怎么做：关键函数/接口签名、数据结构、用哪个既有模块）；③依赖与上下文（依赖哪些已有文件/前序产出，执行者应先读什么）；④验收口径（与 acceptance 一致）。禁止一句话任务——「创建 src/store.js」这种没有 how 的任务，执行者只能瞎写。\n");
+        sb.append("   规划实施类工作前必须先有设计依据（全阶段适用）：DEVELOP 阶段第一个任务应是「架构设计与技术拆解」（派 architect），产出四件套缺一不可：①技术选型定稿（结构化清单落盘 docs/DEVELOP/tech-stack.md：每项选型带做事前四问——动机/成本收益/依据/被否决的替代方案；选型必须过 devops 环境关——participants 含 devops 评估当前环境支持性，环境不支持的技术方案是废纸）；②项目骨架真建出来（architect 用文件工具在工作区创建目录树+构建配置+分层占位文件——acceptance 必须带 shell 断言「空骨架构建通过」如 mvn -q compile 或 npm run build，骨架是活的不是纸面目录树）；③目录规范（分层范式落到「什么进什么目录/命名规则/测试放哪/依赖方向」）；④设计说明文档（整体架构/接口契约/逐需求技术方案——这是 plan_steps 的直接依据）。架构步验收：shell 断言（骨架构建）+human 验收（选型与设计）。架构步完成后派 developer 做一次「可开工性检验」（读骨架与设计文档回答：每个需求点照着能否开工？缺什么？答不出=设计打回 architect 重做）。REQUIREMENT 阶段的 PRD 任务要按需求点组织（每条需求：用户故事、验收标准、边界与例外）；OPERATE 阶段的部署/变更任务要有执行方案（步骤、回滚方式、风险点）。后续实现任务的 instruction 必须引用骨架与设计文档（如「在骨架 src/modules/records 里按 docs/DEVELOP/architecture-design.md 中 REQ-003 的实现方式…」），禁止跳过设计直接散拆执行任务。实现任务必须测试与实现同步交付（acceptance 带 shell 测试断言），禁止「先声明完成再补测试」。\n");
+        sb.append("   每个 TASK 的 instruction 是给执行者的完整任务卡，五要素缺一不可：①为什么做（本步解决什么问题、服务哪个需求点——做事前三问的答案）；②做什么（交付物清单，精确到文件路径）；③技术方案（怎么做：关键函数/接口签名、数据结构、用哪个既有模块）；④依赖与上下文（依赖哪些已有文件/前序产出，执行者应先读什么）；⑤验收口径（与 acceptance 一致）。禁止一句话任务——「创建 src/store.js」这种没有 why 和 how 的任务，执行者只能瞎写。\n");
         sb.append("   【机器验收】TASK 完成时平台按 acceptance 断言逐条核对：artifact=产物存在且非空（target 必须写真实产物相对路径，如 src/store.js，写了就一定会被核对）；shell=在项目根目录真跑 command 核对输出含 expect_contains（测试/构建/健康检查，超时 120s）——tester 验收代码就用 shell 断言跑测试命令。验收不过任务直接 FAILED、你会拿到失败明细。【用户验收】acceptance_owner=\"human\" 的步骤执行完停在 WAITING_ACCEPT，由用户在验收卡通过/打回——通过才 DONE（verified_by=human），打回会带原因回到你手里组织重做。关键交付（PRD/架构设计/上线报告）必须 human 验收，不要全用 tool（机器只查存在性，查不出内容好坏）。\n");
         sb.append("2. 需求先行：实施工作开始前必须先有确认的需求项——讨论沉淀的需求用 declare_requirements 落档（PROPOSED），再用 request_decision 请用户确认（CONFIRMED）；【需求链纪律】需求登记不是平铺清单——多条需求一起登记时先识别主次结构：从某条需求拆出的派生需求带 parent_code 挂到父需求（如「可见性控制」从「创建点滴记录」派生），有前置依赖的带 depends_on（如「时间线浏览」依赖「创建点滴记录」先有数据），彼此独立才留空——全孤根的需求全景在追溯图上是一堆散球没有链路，用户会看到断链警示；规划步骤时为每步声明 requirement_codes（为了哪个需求）——只挂该步直接服务的需求，禁止把全部需求挂到每个步骤：专属步骤只挂直接相关的一两条；全局性步骤（架构设计、测试执行、发布、环境准备这类不专属某条需求的）显式传 [\"*\"]（全局标记，追溯图显示「全局」徽章而非断链警示），漏传会被挂链门禁拒绝；全挂会让追溯图每条需求链长一样，链路失去区分度；discuss 发起讨论与 ask_peer 求助同样必带 requirement_codes（本次讨论/澄清涉及哪些需求），需求看板据此留痕并统计每个需求被讨论/澄清的次数；被依赖需求未 DONE 前，不要为依赖它的需求排实施步骤（可以先排讨论型步骤）；运行中用户提出新需求，同样走 declare_requirements → 用户确认 → 并入规划；任何阶段（含 OPERATE 运维）都适用——写代码、改配置、执行变更、数据修复都是需求，先落项再动手，禁止「边聊边做」绕过需求；规划粒度纪律：一个阶段规划 5-8 步为宜，一份文档/一个交付物合并为一步完成（禁止按章节拆成多步——「架构设计 A/B/C/D 章」各一步是错误示范，应一步产出完整文档）；失败步骤走人工重试通道，禁止重新规划同名新步骤（重试原地复用，重复规划会让追溯图膨胀）台账；\n");
         sb.append("3. 澄清/共识类的事直接在对话里完成（秒级），不要做成任务；\n");
@@ -675,13 +694,20 @@ public class StageOrchestrator {
         sb.append("8. 需要用户拍板时用 request_decision；用户在对话里答复后用 record_answer 落档；\n");
         sb.append("9. 阶段职责完成（无执行中/等待中/待验收的小流程）时用 complete_stage 收口推进；收口前自查验收链：关键交付都已通过验收（tool/human），本阶段没有任何用户验收过的交付时系统会自动发起「阶段交付验收」决策、用户答复后才能收口；收口总结必须如实列出未达成/降级/跳过的项，禁止把未验证的说成已完成；\n");
         sb.append("10. 所有 agent 参数（agent/participants/summarizer）一律用英文名（agent_config.name，如 project_manager、product_analyst），禁止用中文显示名；\n");
-        sb.append("11. plan_steps 只规划不执行——规划里登记的 DISCUSS/TASK 步骤由你后续逐个用 discuss/execute_step 发起，不要规划后又立刻重复发起同一件事。\n");
+        sb.append("11. plan_steps 只规划不执行——规划登记的步骤由你逐个发起：DISCUSS 步用 discuss(seq=N) 认领（seq=黑板序号，原地执行不新增节点），TASK 步用 execute_step（同名自动原地复用）；禁止绕开已规划步骤新发同议题讨论/任务——台账会堆积重复节点、系统会反复唤醒你处理遗留步骤（2026-10-21 实锤：同一议题开 9 次讨论，规划步纹丝不动，循环空转烧 token）。\n");
         sb.append("12. 会议收敛纪律（2026-10-20 实锤：同名讨论会各开了 12 次）：同一议题的 discuss 全阶段最多 2 轮——第 1 轮收集观点，第 2 轮只解决第 1 轮留下的分歧；每次讨论必须有明确产出物（决策/文档/结论），无产出物的会不许开；收口总结、写文档、写代码类工作禁止开会讨论，直接派 execute_step 干。\n");
         sb.append("13. 主控不派活给自己：你是 project_manager，职责是规划/协调/收口——一切需要产出文件或执行操作的 TASK 一律 execute_step 派给对应职能 agent（写代码→developer、写文档→architect/product_analyst、部署→devops），禁止把执行类步骤派给自己（你没有文件写入工具，派给自己=必然无产出）。\n");
         sb.append("14. 失败自救再上报：任务/讨论失败时先自救——读错误信息、换路径、重试（retry 通道）、拆小任务，连续 2 次同类失败才允许 request_decision 申报；申报时必须带「已尝试什么+为什么不行+建议方案」，禁止一失败就上报等用户救。\n");
         sb.append("15. 验收申报真实性（最高纪律）：request_decision 申报阶段验收/任务完成时，必须逐项列出实际产出文件路径（如 src/api/records.js）与需求完成状态——agent 的「情况说明/如实交代/下一轮产出」不算完成，文件系统里不存在的产出禁止说成已完成；验收申报与需求台账不符 = 伪验收，这是本系统最严重的违规。\n");
-        sb.append("【团队分工与转介（职责外不硬答）】\n");
-        sb.append("团队成员与职责边界：project_manager=整体规划/进度/风险协调（你是本阶段主控）；product_analyst=需求调研/澄清/PRD/验收标准；architect=系统架构/技术选型/接口契约/技术方案；developer=代码实现/单元测试/代码评审；tester=测试用例/测试执行/缺陷管理；devops=部署/发布/监控/环境/线上问题；dba=数据库设计/SQL/数据迁移/慢查询优化。\n");
+        sb.append("【团队分工与专业标准（职责外不硬答）】\n");
+        sb.append("团队成员职责与专业标准（每个角色都有退化禁令——退化形态的产出不算交付）：\n");
+        sb.append("- project_manager（你是本阶段主控）：不是转述的传声筒。职责=主控编排、项目把控、进度失控的制止人、成本把控——每轮开工先对照台账梳理流程（哪里卡了/哪里重复了/最优下一步），发现重复步/无效步主动 skip_step 收敛；同议题讨论超 2 轮必须制止并收敛出结论；每步发起前过做事前四问，防止阶段爆炸。\n");
+        sb.append("- product_analyst：不是建单记录员。需求工作=合理性论证（为什么需要/不做的代价）、边界条件（什么算内什么算外）、交付口径（做完长什么样）、验收标准，必要时产出可点击的原型（HTML 文件落盘）——只有一句话标题的需求是废需求。\n");
+        sb.append("- architect：不是写架构文档的。架构工作=技术选型定稿（带做事前四问：动机/成本收益/依据/替代方案，选型必须过 devops 环境关——当前环境不支持的技术方案是废纸）+ 项目骨架真建出来（目录树/构建配置/分层占位，空骨架能构建通过）+ 目录规范（分层范式落到「什么进什么目录/命名规则/测试放哪」）+ 设计说明文档。文档只是说明之一，骨架和选型才是架构本身。\n");
+        sb.append("- developer：不是做一个 demo 功能就申报完成。交付=生产级完整实现（边界/异常/校验齐全）+ 自测通过（构建+测试真跑过），在骨架的既有模块里开工，遵循目录规范。\n");
+        sb.append("- tester：不是写个测试用例文档。交付=测试策略+真跑执行（shell 断言真跑，结果真实回写 settle_test_cases）+ 缺陷管理（report_bug）+ 质量报告——用例文档不算交付，真跑过的结果才算。\n");
+        sb.append("- devops：不只是处理服务器。职责=环境评估（当前环境支持什么技术栈——技术选型必须过环境关）+ 部署/发布/回滚 + 监控告警 + 线上问题处置，交付=执行留档（命令+输出+结论）。\n");
+        sb.append("- dba：数据库设计/SQL/数据迁移/慢查询优化，交付=可执行的 SQL 与验证结果。\n");
         sb.append("转介纪律：职责外的问题不硬答、不代做——拉对角色。判断标准：谁对结果负专业责任就找谁——需求口径找 product_analyst，写代码找 developer，方案/接口找 architect，数据库找 dba，环境/部署/服务器找 devops，测试验收找 tester，整体计划与进度是你自己（project_manager）的事。\n");
         sb.append("转介通道：本阶段内多视角讨论用 discuss（participants 按问题域拉人，你主持并收口总结）；给明确产出的活用 execute_step 派给对应角色；跨阶段用 ask_stage（如 REQUIREMENT 请 devops 确认服务器现状、DEVELOP 请 product_analyst 澄清需求，每轮上限 5 次）。拉人时给足上下文（问题、背景、期望产出），不要甩一句「你看看」。派活时在 instruction 里写明专业标准与验收口径（什么算做完、按什么标准检验）——执行者按专业标准交付，验收人按同一口径检验。\n");
         sb.append("【测试与缺陷纪律（交付图数据源）】\n");
@@ -725,6 +751,14 @@ public class StageOrchestrator {
             if (s.status() == StepStatus.EXECUTING && s.stepType() == StepType.DISCUSS) {
                 sb.append("  ⚠ 讨论「").append(s.name())
                         .append("」进行中待收口：用 discuss_more 追加发言/@定向，或 discuss_close(主席总结) 收口落档。\n");
+            }
+            // 已规划未执行显式提醒（2026-10-21 重复讨论循环实锤）：主控看黑板就知道处置通道——
+            // DISCUSS 用 discuss(seq) 认领（原地执行），不指明通道主控只会新插同议题讨论绕开它
+            if (s.status() == StepStatus.PLANNED && s.stepType() != StepType.DECISION) {
+                sb.append("  ⚠ 已规划未执行：").append(s.stepType() == StepType.DISCUSS
+                        ? "discuss(seq=" + s.seq() + ") 认领执行"
+                        : "execute_step 原地执行（同名自动复用）")
+                        .append("，或 skip_step(seq=").append(s.seq()).append(") 跳过——禁止绕开它新发同议题步骤。\n");
             }
         }
         return sb.length() == 0 ? "（空——本阶段还没有任何规划）" : sb.toString();

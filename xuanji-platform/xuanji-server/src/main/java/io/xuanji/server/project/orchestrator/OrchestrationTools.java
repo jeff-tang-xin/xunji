@@ -207,6 +207,18 @@ public class OrchestrationTools {
                                     + "\"tool\"=平台机器验收（产物断言/验证命令），\"human\"=用户验收（关键交付：PRD/架构设计/上线报告）。"
                                     + "验收人缺位=没人对结果负责，敷衍产出会一路绿灯"));
                 }
+                // 关键交付强制用户验收（2026-10-21 用户定调：写的好坏人并不清楚，AI self/机器存在性检查
+                // 都判定不了内容合理与否）——PRD/架构设计这类「合理性无法机器判定」的关键交付，
+                // 声明 tool 直接拒绝规划：用户不点头的关键交付不算交付
+                boolean criticalDelivery =
+                        ("REQUIREMENT".equals(stage) && (name.contains("PRD") || name.contains("需求文档")
+                                || name.contains("产品文档") || name.contains("原型")))
+                        || ("DEVELOP".equals(stage) && (name.contains("架构") || name.contains("技术方案")));
+                if (type != StepType.DISCUSS && criticalDelivery && !"human".equalsIgnoreCase(acceptanceOwner)) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "步骤「" + name + "」是关键交付（PRD/需求文档/架构设计/技术方案）——其合理性机器判定不了、"
+                                    + "AI 自述不可信，必须 acceptance_owner=\"human\" 由用户验收后才能算完成。"));
+                }
                 StageStep match = settled.stream()
                         .filter(s -> s.name().equals(name) && s.stepType() == type
                                 && s.agent() != null && s.agent().equals(rowAgent))
@@ -699,8 +711,66 @@ public class OrchestrationTools {
             String topic = str(req.input().get("topic"));
             List<String> participants = req.input().get("participants") instanceof List<?> pl
                     ? pl.stream().map(String::valueOf).toList() : List.of();
-            if (name.isBlank() || topic.isBlank() || participants.isEmpty()) {
-                return ToolResult.of(Map.of("ok", false, "message", "name/topic/participants 必填"));
+            long claimSeq = parseLong(req.input().get("seq"), -1);
+            if (topic.isBlank() || (claimSeq < 0 && name.isBlank())) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "topic 必填；name（新发起）或 seq（认领已规划讨论步）二选一"));
+            }
+            // 认领模式（2026-10-21 重复讨论循环实锤）：传 seq = 执行 plan_steps 已登记的讨论步——
+            // 原地 EXECUTING（seq 不变），不再新插节点。此前 discuss 只能新插，规划节点永远
+            // 残留 PLANNED，autoPilot 反复唤醒「还有 1 个未执行步骤」，主控每轮被唤醒就再开
+            // 一个同议题新讨论（实锤：同一议题 9 个讨论变体），死循环烧 token。
+            if (claimSeq >= 0) {
+                StageStep planned = stepRepo.findByStage(wsId, stage, iteration).stream()
+                        .filter(s -> s.seq() == claimSeq && s.stepType() == StepType.DISCUSS)
+                        .findFirst().orElse(null);
+                if (planned == null) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "讨论步不存在: seq=" + claimSeq + "（只有黑板里 PLANNED 的 DISCUSS 步能认领）"));
+                }
+                if (planned.status() != StepStatus.PLANNED) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "讨论 #" + claimSeq + " 已是 " + planned.status() + "——进行中的用 discuss_more/discuss_close，"
+                                    + "已完成的禁止重开（重复讨论会被台账与系统警报暴露）"));
+                }
+                List<String> parts = participants.isEmpty() ? planned.participants() : participants;
+                if (parts.isEmpty()) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "participants 必填（该规划步未登记参与者，请指定本轮发言人）"));
+                }
+                String bad = checkAgents(parts);
+                if (bad != null) {
+                    return ToolResult.of(Map.of("ok", false, "message", bad));
+                }
+                List<String> codes = req.input().get("requirement_codes") instanceof List<?> rl
+                        ? rl.stream().map(String::valueOf).filter(c -> !c.isBlank()).toList() : List.of();
+                if (codes.isEmpty()) {
+                    codes = StageStep.extractRequirementCodes(planned.name() + " " + topic);
+                }
+                if (!stepRepo.claimPlannedDiscuss(planned.id(), topic, parts, codes.isEmpty() ? null : codes)) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "认领失败（步骤状态已变化），请重试"));
+                }
+                StageStep exec = planned.withStatus(StepStatus.EXECUTING);
+                try {
+                    String transcript = discussionEngine.runDiscussion(exec, brief(topic), parts, null);
+                    return ToolResult.of(Map.of("ok", true, "seq", exec.seq(),
+                            "speeches", transcript,
+                            "message", "已认领规划步 #" + exec.seq() + "「" + planned.name() + "」并完成第一轮发言（"
+                                    + parts.size() + " 人串行）。你是讨论主席：观点够了用 discuss_close(你的主席总结) 收口；"
+                                    + "不够用 discuss_more 追加。讨论未收口前不要推进其他步骤。"));
+                } catch (DiscussionEngine.UserInterrupted ui) {
+                    discussionEngine.markInterrupted(exec);
+                    return ToolResult.of(Map.of("ok", false, "seq", exec.seq(),
+                            "message", "用户已终止本讨论。请直接进入下一步，不要重试。"));
+                } catch (Exception e) {
+                    stepRepo.updateStatus(exec.withError(TaskRunner.rootMessage(e)));
+                    return ToolResult.of(Map.of("ok", false, "seq", exec.seq(),
+                            "message", "讨论失败: " + TaskRunner.rootMessage(e) + "——可重试或调整参会人"));
+                }
+            }
+            if (participants.isEmpty()) {
+                return ToolResult.of(Map.of("ok", false, "message", "participants 必填"));
             }
             String badAgents = checkAgents(participants);
             if (badAgents != null) {
@@ -807,8 +877,17 @@ public class OrchestrationTools {
                         "讨论不在进行中（" + step.status() + "），无需收口"));
             }
             discussionEngine.closeDiscussion(step, summary);
+            // OPEN_QUESTION 出口（2026-10-21 用户实锤：讨论提出「PostgreSQL Schema/账号需 PM 确认」
+            // 后主控从未转成决策卡，问题悬空、用户被绕过）——收口即检测，硬性提醒转 request_decision
+            boolean hasOpenQuestion = summary.contains("OPEN_QUESTION") || summary.contains("需用户确认")
+                    || summary.contains("需用户澄清") || summary.contains("待用户确认")
+                    || summary.contains("需要用户确认") || summary.contains("需要用户澄清");
+            String openQNote = hasOpenQuestion
+                    ? " ⚠ 你的总结里有需要用户澄清/拍板的问题（OPEN_QUESTION）——讨论纪要里用户没有答复入口，"
+                      + "必须用 request_decision 把这些问题发给用户（问题文本带背景与选项），否则问题悬空、流程会被它卡住。"
+                    : "";
             return ToolResult.of(Map.of("ok", true, "seq", step.seq(),
-                    "message", "讨论已收口落档（纪要=各方观点+你的主席总结，已进留档与交付物索引）。继续推进。"));
+                    "message", "讨论已收口落档（纪要=各方观点+你的主席总结，已进留档与交付物索引）。继续推进。" + openQNote));
         });
     }
 
@@ -1082,6 +1161,32 @@ public class OrchestrationTools {
                         "message", "仍有未了结的小流程（执行中/等待答复/待验收/规划未执行），不能收口；"
                                 + "先逐个执行或 skip_step 处理掉，等待答复的决策等用户答复后再收口"));
             }
+            // 需求澄清强制（2026-10-21 用户实锤：笼统需求未经用户确认就开跑，用户被绕过）：
+            // REQUIREMENT 阶段收口时还有 PROPOSED 需求 = 用户没点过头的工作不能算范围共识
+            if ("REQUIREMENT".equals(stage)) {
+                long proposed = requirementRepo.findByWorkspace(wsId).stream()
+                        .filter(r -> "PROPOSED".equals(r.status())).count();
+                if (proposed > 0) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "还有 " + proposed + " 条需求处于 PROPOSED（未请用户确认）——需求是用户的需求，"
+                                    + "只有用户能确认：用 request_decision 征询（带 requirement_codes），"
+                                    + "用户答复后自动 CONFIRMED，再收口。"));
+                }
+            }
+            // 「可跑」硬校验（2026-10-21 用户定调：要的是可跑的程序，不是 MVP 或伪完成）：
+            // DEVELOP 阶段收口时必须存在至少一条真跑通过的 shell 断言（构建/测试/健康检查）——
+            // 「能跑」是机器跑出来的，不是主控说的。没有 = 本阶段从未验证过程序可运行
+            if ("DEVELOP".equals(stage)) {
+                boolean shellProven = stepRepo.findByStage(wsId, stage, iteration).stream()
+                        .anyMatch(s -> s.status() == StepStatus.DONE && "tool".equals(s.verifiedBy())
+                                && s.acceptanceJson() != null && s.acceptanceJson().contains("\"shell\""));
+                if (!shellProven) {
+                    return ToolResult.of(Map.of("ok", false, "message",
+                            "本阶段没有任何真跑通过的 shell 断言——「能跑」必须是机器跑出来的，不是主控说的："
+                                    + "给实现任务补 acceptance shell 断言（如 mvn test / npm run build + expect_contains）"
+                                    + "并 execute_step 重做，机器验证通过后再收口。"));
+                }
+            }
             // 验收责任链（P0）：本阶段没有任何用户验收过的交付 → 自动插一道「阶段交付验收」
             // 决策（等用户答复）并拒绝收口——用户不点头，阶段不推进（结构性保证，不靠 PM 自觉）
             // 兜底（2026-10-20 收口循环实锤）：DONE 的 DECISION 步本身即用户答复过的人确认——
@@ -1095,7 +1200,8 @@ public class OrchestrationTools {
             if (!humanAccepted) {
                 StageStep gate = nextStep("阶段交付验收：" + truncate(summary, 40), StepType.DECISION,
                         "user", List.of(),
-                        "本阶段交付是否验收通过？通过后进入下一阶段；有问题请直接说明，PM 会组织整改。")
+                        "本阶段交付是否验收通过？通过后进入下一阶段；有问题请直接说明，PM 会组织整改。\n\n"
+                                + "【系统责任清单（台账实况，非主控自述）】\n" + buildResponsibilityReport())
                         .withStatus(StepStatus.WAITING);
                 stepRepo.insert(gate);
                 projectEvents.publish(wsId, "step.updated", Map.of(
@@ -1128,6 +1234,61 @@ public class OrchestrationTools {
         });
     }
 
+    /**
+     * 阶段收口责任清单（2026-10-21 用户定调：收口唯一输出谁负责——答案=台账）。
+     * 系统从台账生成，非主控创作：每步的验收来源（机器/用户/AI 自述）、跳过、失败、偏差全部暴露——
+     * 用户在验收卡上看到的是这份清单，不是主控的粉饰 summary。台账里没有的，收口输出里就不能出现。
+     */
+    private String buildResponsibilityReport() {
+        List<StageStep> steps = stepRepo.findByStage(wsId, stage, iteration);
+        long tool = 0, human = 0, self = 0, skipped = 0, failed = 0;
+        List<String> selfLines = new ArrayList<>(), skipLines = new ArrayList<>(), devLines = new ArrayList<>();
+        for (StageStep s : steps) {
+            switch (s.status()) {
+                case DONE -> {
+                    if ("human".equals(s.verifiedBy())) {
+                        human++;
+                    } else if ("tool".equals(s.verifiedBy())) {
+                        tool++;
+                    } else {
+                        self++;
+                        selfLines.add("#" + s.seq() + " " + s.name());
+                    }
+                }
+                case SKIPPED -> {
+                    skipped++;
+                    skipLines.add("#" + s.seq() + " " + s.name() + "（" + s.skipReason() + "）");
+                }
+                case FAILED -> failed++;
+                default -> { }
+            }
+            if (s.deviationJson() != null && !s.deviationJson().isBlank()) {
+                devLines.add("#" + s.seq() + " " + s.name());
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("本阶段共 ").append(steps.size()).append(" 步：机器验收 ").append(tool)
+                .append("、用户验收 ").append(human).append("、AI 自述 ").append(self);
+        if (skipped > 0) {
+            sb.append("、跳过 ").append(skipped);
+        }
+        if (failed > 0) {
+            sb.append("、失败未处理 ").append(failed);
+        }
+        if (!selfLines.isEmpty()) {
+            sb.append("。⚠ 以下 ").append(selfLines.size())
+                    .append(" 步仅 AI 自述完成（未经机器断言或用户确认，质量无人把关）：")
+                    .append(String.join("；", selfLines));
+        }
+        if (!skipLines.isEmpty()) {
+            sb.append("。跳过留痕：").append(String.join("；", skipLines));
+        }
+        if (!devLines.isEmpty()) {
+            sb.append("。偏差申报：").append(String.join("；", devLines));
+        }
+        return sb.toString();
+    }
+
     // ---------- 组装辅助 ----------
 
     private TopicBrief brief(String topic) {
@@ -1137,6 +1298,15 @@ public class OrchestrationTools {
     /** 黑板摘要：意图锚 + 需求全景 + 本阶段各步骤状态与产出（goal 传达的上下文来源，执行 agent 与讨论参与者同见）。 */
     public String boardDigest() {
         StringBuilder sb = new StringBuilder();
+        // 阶段成本计数（2026-10-21 用户定调：四问方法论=防止阶段爆炸，PM 是第一责任人）——
+        // 每轮看着数字决策：讨论/决策次数超常规就是阶段在膨胀，先收敛再前进
+        List<StageStep> costSteps = stepRepo.findByStage(wsId, stage, iteration);
+        long costDiscussions = costSteps.stream()
+                .filter(s -> s.stepType() == StepType.DISCUSS && s.status() == StepStatus.DONE).count();
+        long costDecisions = costSteps.stream().filter(s -> s.stepType() == StepType.DECISION).count();
+        sb.append("【阶段成本】已消耗 ").append(costSteps.size()).append(" 步（讨论 ").append(costDiscussions)
+                .append(" 次 / 决策 ").append(costDecisions).append(" 个）——每步发起前过做事前四问"
+                + "（为什么/带来什么/依据/替代方案），答不清的不要发起，防止阶段爆炸。\n");
         String anchor = stepRepo.findAnchorText(wsId, stage, iteration);
         if (anchor != null && !anchor.isBlank()) {
             sb.append("【意图锚——本阶段一切工作的最高准绳，产出偏离它即走偏】\n")
@@ -1471,11 +1641,12 @@ public class OrchestrationTools {
 
     private Map<String, Object> discussSchema() {
         Map<String, Object> props = new LinkedHashMap<>();
-        props.put("name", str("讨论名"));
+        props.put("seq", str("要执行的已规划讨论步 seq（黑板里 PLANNED 的 DISCUSS 步）——传了就原地认领执行（seq 不变、不新增节点），此时 name 可省；新发起讨论则不传"));
+        props.put("name", str("讨论名（新发起时必填；传 seq 认领已规划步时可省）"));
         props.put("topic", str("讨论议题"));
         props.put("participants", arr(str("参与方 agent 英文名名单（按问题域拉人，如需求会诊 [\"product_analyst\",\"architect\"]；串行发言每人可见前人观点；禁用中文显示名）")));
         props.put("requirement_codes", arr(str("本次讨论涉及的需求编号（如 [\"REQ-001\",\"REQ-003\"]）；讨论为了哪个需求就关联哪个，需求看板据此统计每个需求被讨论的次数")));
-        return schema(props, List.of("name", "topic", "participants"));
+        return schema(props, List.of("topic", "participants"));
     }
 
     private Map<String, Object> discussMoreSchema() {

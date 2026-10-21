@@ -142,6 +142,22 @@ public class StageStepRepository {
                 StageStep.joinRequirementCodes(reqCodes), id) > 0;
     }
 
+    /**
+     * 认领已规划讨论步（2026-10-21 重复讨论循环实锤）：PLANNED → EXECUTING，
+     * 按本次发起覆盖议题与参与者（原地执行，seq 不变——不再新插同议题节点）。
+     * requirement_codes 传 null 保持规划值。仅 PLANNED 可认领（并发认领只有一个成功）。
+     */
+    public boolean claimPlannedDiscuss(long id, String topic, java.util.List<String> participants,
+                                       java.util.List<String> reqCodes) {
+        return jdbc.update("""
+                UPDATE project_stage_step SET status = 'EXECUTING', instruction = ?,
+                    participants = ?, started_at = now(),
+                    requirement_codes = COALESCE(CAST(? AS jsonb), requirement_codes)
+                WHERE id = ? AND status = 'PLANNED'
+                """, topic, StageStep.joinParticipants(participants),
+                reqCodes == null ? null : StageStep.joinRequirementCodes(reqCodes), id) > 0;
+    }
+
     public long insert(StageStep s) {
         // 项目已删除守卫（2026-10-20）：删除项目后异步任务（主控轮/ask_peer/讨论线程）还会存活几分钟，
         // 落库会复活脏数据（实锤：删除后 CONSULT 步 seq 从 1 重新编号复活 7 行）——workspace 行不在即静默丢弃
