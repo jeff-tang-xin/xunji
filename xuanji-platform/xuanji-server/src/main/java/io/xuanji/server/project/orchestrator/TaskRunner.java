@@ -238,8 +238,11 @@ public class TaskRunner {
             String stepNodeId = "step-" + step.stage() + "-" + step.iteration() + "-" + step.seq();
             // 11 参重载带 stage：交付物必须标阶段归属，否则生命周期「交付物 N 份」按 stage 统计时
             // 交付物全被漏掉、DOC 被误当交付物计数（测试003 实锤：交付物 tab 5 条 vs 生命周期报 24）
+            // 交付说明块（2026-10-21 用户实锤「这交付的是个啥」）：agent 回复是申报话术
+            //（「任务已完成，成功生成…」），真产物是它用文件工具写盘的文件——content 前置
+            // acceptance 锁定的产物清单，agent 回复全文附后作为执行说明
             projectRepo.insertArtifact(step.workspaceId(), stepNodeId,
-                    "DELIVERABLE", step.name(), "TEXT", null, output, 1, "ACTIVE", step.stage(), step.agent());
+                    "DELIVERABLE", step.name(), "TEXT", null, deliverableNote(step) + output, 1, "ACTIVE", step.stage(), step.agent());
             String summary = output.length() > 300 ? output.substring(0, 300) + "…" : output;
             // 机器验收（质量闸，2026-10-19「没有人为代码/质量负责」）：acceptance 里 type=artifact
             // 的断言由平台逐条核对（产物存在且非空）——AI 自述「已创建」而文件不存在 = 验收失败，
@@ -256,6 +259,24 @@ public class TaskRunner {
                         "status", "FAILED", "name", step.name()));
                 throw new IllegalStateException(detail + "——产出已留档但产物未落盘/不合规，"
                         + "重试时在 instruction 里带上本验收明细");
+            }
+            // 文档双落 + file_path 回填（提前到 human 分支前：WAITING_ACCEPT 的交付物同样
+            // 要指向真产物——否则 PRD 类 human 验收步的交付物永远没有 file_path，前端只能
+            // 显示 agent 的申报话术）。file_path 优先指向 acceptance artifact target
+            //（真产物，机器验收已核对存在）——前端交付物弹窗有 file_path 时直接展示文件内容，
+            // 用户点开看到的是 PRD 本身，不是 agent 的完成申报。无 artifact 断言才回退
+            // 到 output 落盘路径
+            String docPath = docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(),
+                    "TASK", step.seq(), step.name(), output);
+            String realTarget = parseAcceptance(step.acceptanceJson()).stream()
+                    .filter(a -> "artifact".equalsIgnoreCase(String.valueOf(a.get("type"))))
+                    .map(a -> String.valueOf(a.getOrDefault("target", "")).trim())
+                    .filter(t -> !t.isEmpty())
+                    .findFirst().orElse(null);
+            if (realTarget != null) {
+                projectRepo.updateArtifactFilePath(step.workspaceId(), stepNodeId, realTarget);
+            } else if (docPath != null) {
+                projectRepo.updateArtifactFilePath(step.workspaceId(), stepNodeId, docPath);
             }
             // 验收责任链（P0）：human 验收步执行完不直接 DONE——进 WAITING_ACCEPT 等用户
             // 通过（验收端点）才 DONE（verified_by=human）；打回=FAILED 带原因可重试。
@@ -280,13 +301,6 @@ public class TaskRunner {
             if (!trajectory.isBlank()) {
                 docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(), "CHATLOG",
                         step.seq(), step.name() + "-执行轨迹", trajectory);
-            }
-            // 文档双落：产出落项目目录（docs/{stage}/iter{n}/），相对路径回填 DELIVERABLE 索引
-            // （不另插 DOC 索引——同一产出两条索引会让交付物 tab 重复）
-            String docPath = docStore.writeFile(step.workspaceId(), step.stage(), step.iteration(),
-                    "TASK", step.seq(), step.name(), output);
-            if (docPath != null) {
-                projectRepo.updateArtifactFilePath(step.workspaceId(), stepNodeId, docPath);
             }
             settleRequirements(step);
             log.info("任务执行完成: ws={} seq={} 产出 {} 字", step.workspaceId(), step.seq(), output.length());
@@ -322,6 +336,26 @@ public class TaskRunner {
             // 失败原因上抛：主控当场拿到，立即决策（重试/换路/跳过），不停摆
             throw new IllegalStateException(msg, e);
         }
+    }
+
+    /**
+     * 交付说明块（2026-10-21 用户实锤「这交付的是个啥」）：交付物 content 原来是 agent 回复全文
+     * （开头是「任务已完成…」申报话术，真产物埋在文件树里）——content 前置 acceptance 断言
+     * 锁定的产物路径清单（真交付物，file_path 同步指向它），agent 回复全文附后作为执行说明。
+     * 无 artifact 断言返回空串（content 保持 agent 回复原文）。
+     */
+    private String deliverableNote(StageStep step) {
+        List<String> targets = parseAcceptance(step.acceptanceJson()).stream()
+                .filter(a -> "artifact".equalsIgnoreCase(String.valueOf(a.get("type"))))
+                .map(a -> String.valueOf(a.getOrDefault("target", "")).trim())
+                .filter(t -> !t.isEmpty())
+                .toList();
+        if (targets.isEmpty()) {
+            return "";
+        }
+        return "【交付物清单（acceptance 锁定，机器已核对存在性）】\n"
+                + "- " + String.join("\n- ", targets)
+                + "\n\n——以下为执行 agent 的完成说明——\n\n";
     }
 
     /**
