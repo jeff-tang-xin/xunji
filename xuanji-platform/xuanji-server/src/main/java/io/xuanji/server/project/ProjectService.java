@@ -1102,6 +1102,12 @@ public class ProjectService {
         for (Map<String, Object> item : reqItems) {
             byCode.put(String.valueOf(item.get("code")), item);
         }
+        // 两遍组装：先建全部节点，再挂链与求助归属。求助（CONSULT，ask_peer 产生）不是规划内的
+        // 工作，是执行中的协作——不作为链上独立节点（与 TASK 平级会让追溯图膨胀且语义错位，
+        // 2026-10-21 用户定调「求助应该归于某个节点的子节点」），归属到发起步的 consults 子列表
+        //（发起 seq 从 name 前缀「求助·步骤#N·」解析）。跨阶段支援步（「支援·」前缀）代表目标
+        // 阶段真实发生的工作，保持独立节点。
+        java.util.Map<String, Map<String, Object>> nodeByKey = new java.util.LinkedHashMap<>();
         for (io.xuanji.server.project.orchestrator.StageStep s : steps) {
             java.util.LinkedHashMap<String, Object> node = new java.util.LinkedHashMap<>();
             node.put("stage", s.stage());
@@ -1120,6 +1126,27 @@ public class ProjectService {
             boolean globalStep = s.requirementCodes().contains("*");
             node.put("global", globalStep);
             node.put("artifact", stepArts.get("step-" + s.stage() + "-" + s.iteration() + "-" + s.seq()));
+            nodeByKey.put(s.stage() + "-" + s.iteration() + "-" + s.seq(), node);
+        }
+        for (io.xuanji.server.project.orchestrator.StageStep s : steps) {
+            Map<String, Object> node = nodeByKey.get(s.stage() + "-" + s.iteration() + "-" + s.seq());
+            if (s.stepType() == io.xuanji.server.project.orchestrator.StepType.CONSULT
+                    && s.name().startsWith("求助·步骤#")) {
+                int hash = s.name().indexOf('#');
+                int dot = s.name().indexOf('·', hash);
+                if (hash > 0 && dot > hash) {
+                    try {
+                        long fromSeq = Long.parseLong(s.name().substring(hash + 1, dot).trim());
+                        Map<String, Object> from = nodeByKey.get(s.stage() + "-" + s.iteration() + "-" + fromSeq);
+                        if (from != null) {
+                            ((List<Object>) from.computeIfAbsent("consults", k -> new java.util.ArrayList<>())).add(node);
+                            continue;
+                        }
+                    } catch (NumberFormatException ignore) {
+                        // 前缀解析失败按普通步骤挂链处理
+                    }
+                }
+            }
             boolean linked = false;
             for (String code : s.requirementCodes()) {
                 if ("*".equals(code)) {

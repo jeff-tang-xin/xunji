@@ -267,6 +267,16 @@ export function TraceGraph({ data, onOpenStep, onOpenReq, onOpenCase, onOpenBug 
                     {(STATUS_TEXT[n.step.status] || n.step.status)
                       + (n.step.verified_by === 'tool' ? ' ⚙' : n.step.verified_by === 'human' ? ' 👤' : '')}
                   </text>
+                  {(n.step.consults?.length ?? 0) > 0 && (
+                    <g onClick={(e) => { e.stopPropagation(); onOpenStep(n.step.consults![n.step.consults!.length - 1]) }}
+                       style={{ cursor: 'pointer' }}>
+                      <title>{`${n.step.consults!.length} 次执行中求助，点击查看最近一次问答`}</title>
+                      <circle cx={n.x + NODE_W - 7} cy={n.y + 7} r={7.5} fill="#ede9fe" stroke="#8b5cf6" strokeWidth={1.1} />
+                      <text x={n.x + NODE_W - 7} y={n.y + 10.5} textAnchor="middle" fontSize={8.5} fill="#6d28d9" fontWeight={700}>
+                        {'💬' + n.step.consults!.length}
+                      </text>
+                    </g>
+                  )}
                 </g>
               ))}
               {/* 用例/bug 徽章（行尾） */}

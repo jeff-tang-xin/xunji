@@ -31,6 +31,8 @@ export interface TraceStep {
   requirement_codes?: string[]
   /** ["*"] 全局步骤标记（后端 trace 组装时打上）——显示中性「全局」徽章而非断链警示 */
   global?: boolean
+  /** 执行中的求助（ask_peer 产生，后端归属到发起步）——不再是链上独立节点 */
+  consults?: TraceStep[]
 }
 interface TraceReq {
   code: string; title: string; status: string; depth?: number
