@@ -1161,6 +1161,15 @@ public class OrchestrationTools {
                         "message", "仍有未了结的小流程（执行中/等待答复/待验收/规划未执行），不能收口；"
                                 + "先逐个执行或 skip_step 处理掉，等待答复的决策等用户答复后再收口"));
             }
+            // 债务一等公民（P3）：FAILED 步骤是未还的债——带着失败收口=把债埋进下一阶段。
+            // 必须显式处置（重试成功 或 skip_step 留痕理由）才能收口
+            long failedSteps = stepRepo.findByStage(wsId, stage, iteration).stream()
+                    .filter(s -> s.status() == StepStatus.FAILED).count();
+            if (failedSteps > 0) {
+                return ToolResult.of(Map.of("ok", false, "message",
+                        "还有 " + failedSteps + " 个失败步骤未处置——失败是债，带着失败收口=把债埋进下一阶段："
+                                + "逐个重试（execute_step 原地重拾）或 skip_step 留痕理由后，再收口。"));
+            }
             // 需求澄清强制（2026-10-21 用户实锤：笼统需求未经用户确认就开跑，用户被绕过）：
             // REQUIREMENT 阶段收口时还有 PROPOSED 需求 = 用户没点过头的工作不能算范围共识
             if ("REQUIREMENT".equals(stage)) {
@@ -1307,6 +1316,23 @@ public class OrchestrationTools {
         sb.append("【阶段成本】已消耗 ").append(costSteps.size()).append(" 步（讨论 ").append(costDiscussions)
                 .append(" 次 / 决策 ").append(costDecisions).append(" 个）——每步发起前过做事前四问"
                 + "（为什么/带来什么/依据/替代方案），答不清的不要发起，防止阶段爆炸。\n");
+        // 债务一等公民（P3）：偏差/跳过/失败是本阶段的债——主控每轮看着债单决策，
+        // 能还的尽快还（重试/补做），还不了的收口时在责任清单里向用户交代
+        List<String> debts = new ArrayList<>();
+        for (StageStep s : costSteps) {
+            if (s.status() == StepStatus.FAILED) {
+                debts.add("#" + s.seq() + " 失败:" + s.name());
+            } else if (s.status() == StepStatus.SKIPPED) {
+                debts.add("#" + s.seq() + " 跳过:" + s.name());
+            }
+            if (s.status() != StepStatus.FAILED && s.deviationJson() != null && !s.deviationJson().isBlank()) {
+                debts.add("#" + s.seq() + " 偏差:" + s.name());
+            }
+        }
+        if (!debts.isEmpty()) {
+            sb.append("【债务清单】").append(debts.size()).append(" 项待还：").append(String.join("；", debts))
+                    .append("——能还的尽快还（重试/补做），收口时全部向用户交代。\n");
+        }
         String anchor = stepRepo.findAnchorText(wsId, stage, iteration);
         if (anchor != null && !anchor.isBlank()) {
             sb.append("【意图锚——本阶段一切工作的最高准绳，产出偏离它即走偏】\n")
